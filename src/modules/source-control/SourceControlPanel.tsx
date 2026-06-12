@@ -40,6 +40,7 @@ import { joinPath } from "@/modules/explorer/lib/useFileTree";
 import {
   AiContentGenerator02Icon,
   Alert02Icon,
+  Add01Icon,
   ArrowDown01Icon,
   ArrowRight01Icon,
   ArrowUp01Icon,
@@ -69,6 +70,7 @@ import {
   type CheckState,
   type SourceControlFileEntry,
 } from "./useSourceControlPanel";
+import { NewWorktreePopover } from "./NewWorktreePopover";
 
 type Props = {
   open: boolean;
@@ -456,6 +458,24 @@ export const SourceControlPanel = memo(function SourceControlPanel({
               <span className="rounded bg-muted/55 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
                 detached
               </span>
+            ) : null}
+            {scm.panelState === "ready" && scm.repo ? (
+              <NewWorktreePopover
+                repoRoot={scm.repo?.repoRoot ?? null}
+                suggestedName={scm.suggestedWorktreeName}
+                onCreate={async (branchName) => {
+                  const path = await scm.createWorktree(branchName);
+                  if (path) onOpenTerminal?.(path);
+                }}
+                busy={scm.worktreeBusy}
+                error={scm.worktreeError}>
+                <button
+                  type="button"
+                  aria-label="New worktree"
+                  className="inline-flex size-6 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground/6 hover:text-foreground">
+                  <HugeiconsIcon icon={Add01Icon} size={13} strokeWidth={2} />
+                </button>
+              </NewWorktreePopover>
             ) : null}
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
