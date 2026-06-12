@@ -84,6 +84,7 @@ type Props = {
     title?: string;
   }) => void;
   onOpenFile?: (absolutePath: string) => void;
+  onOpenTerminal?: (cwd: string) => void;
 };
 
 const SOURCE_CONTROL_TOOLTIP_CLASS =
@@ -151,6 +152,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
   onOpenGitGraph,
   onOpenDiff,
   onOpenFile,
+  onOpenTerminal,
 }: Props) {
   const scm = useSourceControlPanel(open, sourceControl, onOpenDiff);
   const refreshAnimationRef = useRef<number | null>(null);
