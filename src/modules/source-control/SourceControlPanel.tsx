@@ -418,7 +418,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
 
   return (
     <TooltipProvider delayDuration={800} skipDelayDuration={300}>
-      <aside className="flex h-full min-w-0 flex-col bg-card/80 backdrop-blur [contain:layout_style]">
+      <aside className="flex h-full min-w-0 flex-col bg-card/80 backdrop-blur contain-[layout_style]">
         <header className="flex shrink-0 items-center justify-between gap-2 border-b border-border/50 px-3 pb-2.5 pt-3">
           <div className="flex min-w-0 items-center gap-1.5">
             <div className="inline-flex min-w-0 items-center gap-1.5 rounded-md bg-foreground/5 px-2 py-1 text-[11.5px] font-medium leading-none text-foreground transition-colors hover:bg-foreground/10">
@@ -472,7 +472,8 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                 <button
                   type="button"
                   aria-label="New worktree"
-                  className="inline-flex size-6 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground/6 hover:text-foreground">
+                  className="inline-flex size-6 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground/6 hover:text-foreground"
+                >
                   <HugeiconsIcon icon={Add01Icon} size={13} strokeWidth={2} />
                 </button>
               </NewWorktreePopover>

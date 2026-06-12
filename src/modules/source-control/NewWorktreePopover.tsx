@@ -15,9 +15,10 @@ interface Props {
   children: React.ReactNode;
   repoRoot: string | null;
   suggestedName: string;
-  onCreate: (branchName: string) => Promise<string | void>;
+  onCreate: (branchName: string) => Promise<string>;
   busy: boolean;
   error: string | null;
+  onClearError?: () => void;
 }
 
 function basename(path: string): string {
@@ -54,6 +55,7 @@ export function NewWorktreePopover({
   onCreate,
   busy,
   error,
+  onClearError,
 }: Props) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
@@ -62,10 +64,11 @@ export function NewWorktreePopover({
   useEffect(() => {
     if (!open) return;
     setName("");
+    onClearError?.();
     setTimeout(() => {
       inputRef.current?.focus();
     }, 0);
-  }, [open]);
+  }, [open, onClearError]);
 
   const resolvedName = slugify(name) || suggestedName;
   const projectName = repoRoot ? projectNameFromRepoRoot(repoRoot) : "project";
@@ -74,7 +77,8 @@ export function NewWorktreePopover({
   const submit = async () => {
     const branchName = slugify(name) || suggestedName;
     if (!branchName) return;
-    await onCreate(branchName);
+    const worktreePath = await onCreate(branchName);
+    if (!worktreePath) return;
     setOpen(false);
     setName("");
   };
@@ -86,13 +90,11 @@ export function NewWorktreePopover({
         side="bottom"
         align="start"
         sideOffset={6}
-        className="w-50 p-3">
+        className="w-50 p-3"
+      >
         <PopoverHeader className="gap-0">
           <PopoverTitle className="flex items-center gap-1.5 text-sm font-semibold">
-            <HugeiconsIcon
-              icon={GitBranchIcon}
-              size={14}
-              strokeWidth={1.75}/>
+            <HugeiconsIcon icon={GitBranchIcon} size={14} strokeWidth={1.75} />
             New worktree
           </PopoverTitle>
         </PopoverHeader>
@@ -101,7 +103,10 @@ export function NewWorktreePopover({
           <Input
             ref={inputRef}
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) => {
+              setName(e.target.value);
+              onClearError?.();
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !busy) {
                 e.preventDefault();
@@ -110,9 +115,10 @@ export function NewWorktreePopover({
             }}
             placeholder={suggestedName || "branch-name"}
             disabled={busy}
-            className="h-8 text-xs"/>
+            className="h-8 text-xs"
+          />
           {error ? (
-            <div className="text-[10.5px] leading-tight text-destructive">
+            <div className="wrap-break-word text-[10.5px] leading-tight text-destructive">
               {error}
             </div>
           ) : (
@@ -126,14 +132,16 @@ export function NewWorktreePopover({
               size="xs"
               onClick={() => setOpen(false)}
               disabled={busy}
-              className="h-7 text-[11px]">
+              className="h-7 text-[11px]"
+            >
               Cancel
             </Button>
             <Button
               size="xs"
               onClick={() => void submit()}
               disabled={busy || !resolvedName}
-              className="h-7 text-[11px]">
+              className="h-7 text-[11px]"
+            >
               {busy ? "Creating…" : "Create"}
             </Button>
           </div>
