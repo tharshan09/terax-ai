@@ -2,6 +2,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
 use crate::modules::git::errors::{GitError, Result};
+use crate::modules::git::names;
 use crate::modules::git::parser::parse_porcelain_v2;
 use crate::modules::git::process::{
     ensure_git_available, ensure_success, git_show_text, git_stdout_line_opt, git_stdout_lines,
@@ -820,6 +821,7 @@ pub fn suggest_worktree_name(
 ) -> Result<GitWorktreeNameSuggestion> {
     let repo_root = authorized_repo_root(registry, repo_root, workspace)?;
     ensure_git_available(&repo_root.workspace)?;
+    names::suggest_branch_name(&repo_root.workspace, &repo_root.git_path, user_input)
 }
 
 pub fn add_worktree(
@@ -1191,5 +1193,47 @@ mod tests {
             "fatal: your current branch 'main' does not have any commits yet"
         )));
         assert!(!looks_like_no_head(&mk("fatal: pathspec did not match")));
+    }
+
+    #[test]
+    fn join_git_path_normalizes_separators() {
+        assert_eq!(
+            join_git_path(r"C:\Users\me", &[".terax", "worktrees", "repo", "branch"]),
+            "C:/Users/me/.terax/worktrees/repo/branch"
+        );
+        assert_eq!(
+            join_git_path("/home/me/", &["/.terax/", "worktrees", "repo"]),
+            "/home/me/.terax/worktrees/repo"
+        );
+    }
+
+    #[test]
+    fn validate_worktree_branch_name_reject_path_escapes() {
+        assert!(!locally_invalid_worktree_branch_name("feature/new-panel"));
+        assert!(locally_invalid_worktree_branch_name("../escape"));
+        assert!(locally_invalid_worktree_branch_name("-bad"));
+        assert!(locally_invalid_worktree_branch_name("bad name"));
+        assert!(locally_invalid_worktree_branch_name("bad:ref"));
+        assert!(locally_invalid_worktree_branch_name("bad@{ref"));
+    }
+
+    #[test]
+    fn validate_worktree_branch_name_uses_git_ref_rules() {
+        let git = std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .ok()
+            .is_some_and(|o| o.status.success());
+        if !git {
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_string_lossy().to_string();
+        assert!(
+            validate_worktree_branch_name(&WorkspaceEnv::Local, &root, "feature/new-panel").is_ok()
+        );
+        assert!(validate_worktree_branch_name(&WorkspaceEnv::Local, &root, "bad.lock").is_err());
+        assert!(validate_worktree_branch_name(&WorkspaceEnv::Local, &root, "bad?ref").is_err());
     }
 }
