@@ -461,6 +461,8 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                 detached
               </span>
             ) : null}
+          </div>
+          <div className="flex shrink-0 items-center gap-0.5">
             {scm.panelState === "ready" && scm.repo ? (
               <NewWorktreePopover
                 repoRoot={scm.repo?.repoRoot ?? null}
@@ -483,8 +485,6 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                 </button>
               </NewWorktreePopover>
             ) : null}
-          </div>
-          <div className="flex shrink-0 items-center gap-0.5">
             <IconActionButton
               label={fetchBusy ? "Fetching…" : "Fetch from remote"}
               disabled={!canFetch}
