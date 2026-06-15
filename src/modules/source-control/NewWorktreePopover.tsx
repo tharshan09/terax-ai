@@ -30,13 +30,14 @@ function basename(path: string): string {
  *  e.g. if inside ~/.terax/worktrees/{project}/{branch}, extract {project}.
  *  otherwise use the repo root basename. */
 function projectNameFromRepoRoot(repoRoot: string): string {
-  const id = repoRoot.indexOf(".terax/worktrees/");
+  const normalized = repoRoot.replace(/\\/g, "/");
+  const id = normalized.indexOf(".terax/worktrees/");
   if (id !== -1) {
-    const after = repoRoot.slice(id + ".terax/worktrees/".length);
+    const after = normalized.slice(id + ".terax/worktrees/".length);
     const slash = after.indexOf("/");
     return slash !== -1 ? after.slice(0, slash) : after;
   }
-  return basename(repoRoot);
+  return basename(normalized);
 }
 
 function slugify(input: string): string {
