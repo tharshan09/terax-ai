@@ -73,6 +73,9 @@ fn short_suffix() -> String {
     format!("{:04x}", name_seed() & 0xffff)
 }
 
+/// Generates a unique branch name from optional user input or a
+/// random word pair. The name is guaranteed not to collide with any
+/// existing branch in the repo by adding a 4 digit hex string.
 pub fn suggest_branch_name(
     workspace: &WorkspaceEnv,
     repo_root: &str,
