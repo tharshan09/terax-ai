@@ -86,11 +86,10 @@ pub fn suggest_branch_name(
         _ => word_pair(),
     };
 
-    let branch_name = if branch_exists(workspace, repo_root, &base)? {
-        format!("{base}-{}", short_suffix())
-    } else {
-        base
-    };
+    let mut branch_name = base.clone();
+    while branch_exists(workspace, repo_root, &branch_name)? {
+        branch_name = format!("{base}-{}", short_suffix());
+    }
 
     Ok(GitWorktreeNameSuggestion {
         display_name: branch_name.clone(),
