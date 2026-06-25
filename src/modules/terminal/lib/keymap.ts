@@ -1,6 +1,6 @@
 export type TerminalKeyEvent = Pick<
   KeyboardEvent,
-  "altKey" | "ctrlKey" | "metaKey" | "key" | "code"
+  "altKey" | "ctrlKey" | "metaKey" | "shiftKey" | "key" | "code"
 >;
 
 export type PlatformOpts = { isMac: boolean };
@@ -23,6 +23,35 @@ export function terminalLineNavigationSequence(
   if (event.key === "ArrowLeft" || event.code === "ArrowLeft") return "\x01";
   if (event.key === "ArrowRight" || event.code === "ArrowRight") return "\x05";
   return null;
+}
+
+/** Native copy/paste chords: the platform's standard shortcut without Shift —
+ *  Cmd+C/Cmd+V on macOS, Ctrl+C/Ctrl+V elsewhere. Shift/Alt must be absent so
+ *  these never collide with the explicit Ctrl+Shift+C/V shortcuts or with
+ *  Alt-modified word ops. Copy is selection-aware at the call site: with no
+ *  selection the caller lets Ctrl+C fall through to the PTY as SIGINT. */
+function isNativeChord(event: TerminalKeyEvent, isMac: boolean): boolean {
+  // A Shift-held chord is the explicit Ctrl+Shift+C/V path, handled separately.
+  if (event.altKey || event.shiftKey) return false;
+  return isMac
+    ? event.metaKey && !event.ctrlKey
+    : event.ctrlKey && !event.metaKey;
+}
+
+export function isTerminalCopyChord(
+  event: TerminalKeyEvent,
+  opts: PlatformOpts,
+): boolean {
+  if (!isNativeChord(event, opts.isMac)) return false;
+  return event.code === "KeyC" || event.key === "c" || event.key === "C";
+}
+
+export function isTerminalPasteChord(
+  event: TerminalKeyEvent,
+  opts: PlatformOpts,
+): boolean {
+  if (!isNativeChord(event, opts.isMac)) return false;
+  return event.code === "KeyV" || event.key === "v" || event.key === "V";
 }
 
 /** Modifier+Backspace deletion:
