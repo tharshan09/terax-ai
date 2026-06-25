@@ -124,6 +124,18 @@ export type GitDiscardEntry = {
   untracked: boolean;
 };
 
+export type GitBranchEntry = {
+  name: string;
+  kind: "local" | "worktree";
+  worktreePath: string | null;
+  isHead: boolean;
+  isDetached: boolean;
+};
+
+export type GitBranchListResult = {
+  branches: GitBranchEntry[];
+};
+
 /**
  * Reject an operation that still runs against the LOCAL filesystem/process when
  * an SSH workspace is active. These ops have no remote routing yet, so calling
@@ -423,6 +435,21 @@ export const native = {
       invoke<string | null>("git_remote_url", {
         repoRoot,
         name: name ?? null,
+        workspace: currentWorkspaceEnv(),
+      }),
+    ),
+  gitListBranches: (repoRoot: string) =>
+    guardSsh("gitListBranches", () =>
+      invoke<GitBranchListResult>("git_list_branches", {
+        repoRoot,
+        workspace: currentWorkspaceEnv(),
+      }),
+    ),
+  gitCheckoutBranch: (repoRoot: string, branch: string) =>
+    guardSsh("gitCheckoutBranch", () =>
+      invoke<void>("git_checkout_branch", {
+        repoRoot,
+        branch,
         workspace: currentWorkspaceEnv(),
       }),
     ),
