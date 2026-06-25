@@ -34,6 +34,7 @@ import {
   setTerminalLetterSpacing,
   setTerminalFontSize,
   setTerminalCursorBlink,
+  setTerminalClipboardWrite,
   setTerminalScrollback,
   setTerminalWebglEnabled,
   setUiFontFamily,
@@ -41,6 +42,7 @@ import {
   setVimMode,
   setZoomLevel,
 } from "@/modules/settings/store";
+import type { ClipboardWriteMode } from "@/modules/terminal/lib/osc-handlers";
 import { useTheme } from "@/modules/theme";
 import {
   ComputerIcon,
@@ -104,6 +106,9 @@ export function GeneralSection() {
   const terminalFontWeight = usePreferencesStore((s) => s.terminalFontWeight);
   const uiFontFamily = usePreferencesStore((s) => s.uiFontFamily);
   const uiMonoFontFamily = usePreferencesStore((s) => s.uiMonoFontFamily);
+  const terminalClipboardWrite = usePreferencesStore(
+    (s) => s.terminalClipboardWrite,
+  );
   const terminalShell = usePreferencesStore((s) => s.terminalShell);
   const [shells, setShells] = useState<ShellInfo[]>([]);
   const terminalLetterSpacing = usePreferencesStore(
@@ -353,6 +358,35 @@ export function GeneralSection() {
                   {w.label}
                 </SelectItem>
               ))}
+            </SelectContent>
+          </Select>
+        </SettingRow>
+        <SettingRow
+          title="Clipboard from terminal apps"
+          description="How to handle a program (tmux, vim) setting the system clipboard via OSC 52. Notify keeps it working but flags each write; Block ignores it; Allow is silent."
+        >
+          <Select
+            value={terminalClipboardWrite}
+            onValueChange={(v) =>
+              void setTerminalClipboardWrite(v as ClipboardWriteMode)
+            }
+          >
+            <SelectTrigger
+              value={terminalClipboardWrite}
+              className="h-8 w-28 text-[12px]"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="notify" className="text-[12px]">
+                Notify
+              </SelectItem>
+              <SelectItem value="allow" className="text-[12px]">
+                Allow
+              </SelectItem>
+              <SelectItem value="block" className="text-[12px]">
+                Block
+              </SelectItem>
             </SelectContent>
           </Select>
         </SettingRow>

@@ -9,6 +9,7 @@ import {
   type VisibleBlocks,
 } from "../block/lib/blockDecorations";
 import type { BlockMode } from "../block/lib/modeMachine";
+import { notifyClipboardWrite } from "./clipboardNotice";
 import { DormantRing } from "./dormantRing";
 import {
   createShellIntegrationState,
@@ -45,6 +46,13 @@ import {
   releaseSlot,
   setSlotFocused,
 } from "./rendererPool";
+
+// Shared OSC 52 policy: read the clipboard-write mode live from settings so a
+// change applies without re-registering, and surface the rate-limited notice.
+const osc52ClipboardOpts = {
+  getMode: () => usePreferencesStore.getState().terminalClipboardWrite,
+  onNotify: notifyClipboardWrite,
+};
 
 type Callbacks = {
   onSearchReady?: (addon: SearchAddon) => void;
@@ -605,7 +613,11 @@ function bindLeafToSlot(leafId: number, s: Session): void {
     rows: s.rows,
     registerOsc: (term) => {
       if (s.blocks) {
-        const osc52 = registerOsc52ClipboardHandler(term);
+        const osc52 = registerOsc52ClipboardHandler(
+          term,
+          undefined,
+          osc52ClipboardOpts,
+        );
         const deco = new BlockDecorations(term, {
           onCwd: (next) => {
             markSessionReady(leafId);
@@ -651,7 +663,11 @@ function bindLeafToSlot(leafId: number, s: Session): void {
         },
         shellState,
       );
-      const osc52 = registerOsc52ClipboardHandler(term);
+      const osc52 = registerOsc52ClipboardHandler(
+        term,
+        undefined,
+        osc52ClipboardOpts,
+      );
       return [prompt.dispose, cwd, osc52];
     },
     onSearchReady: (addon) => s.callbacks.onSearchReady?.(addon),

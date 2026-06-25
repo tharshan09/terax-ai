@@ -217,4 +217,53 @@ describe("OSC 52 clipboard handler", () => {
 
     expect(writeClipboard).not.toHaveBeenCalled();
   });
+
+  it("drops the write in block mode (sequence still consumed)", async () => {
+    const { term, handlers } = makeFakeTerm();
+    const writeClipboard = vi.fn();
+    const onNotify = vi.fn();
+    registerOsc52ClipboardHandler(term, writeClipboard, {
+      getMode: () => "block",
+      onNotify,
+    });
+
+    const result = handlers.get(52)?.("c;SGVsbG8=");
+    await flushClipboardQueue();
+
+    expect(result).toBe(true); // consumed, not re-emitted to the screen
+    expect(writeClipboard).not.toHaveBeenCalled();
+    expect(onNotify).not.toHaveBeenCalled();
+  });
+
+  it("writes and notifies in notify mode", async () => {
+    const { term, handlers } = makeFakeTerm();
+    const writeClipboard = vi.fn();
+    const onNotify = vi.fn();
+    registerOsc52ClipboardHandler(term, writeClipboard, {
+      getMode: () => "notify",
+      onNotify,
+    });
+
+    handlers.get(52)?.("c;SGVsbG8=");
+    await flushClipboardQueue();
+
+    expect(writeClipboard).toHaveBeenCalledWith("Hello");
+    expect(onNotify).toHaveBeenCalledTimes(1);
+  });
+
+  it("writes without notifying in allow mode", async () => {
+    const { term, handlers } = makeFakeTerm();
+    const writeClipboard = vi.fn();
+    const onNotify = vi.fn();
+    registerOsc52ClipboardHandler(term, writeClipboard, {
+      getMode: () => "allow",
+      onNotify,
+    });
+
+    handlers.get(52)?.("c;SGVsbG8=");
+    await flushClipboardQueue();
+
+    expect(writeClipboard).toHaveBeenCalledWith("Hello");
+    expect(onNotify).not.toHaveBeenCalled();
+  });
 });
