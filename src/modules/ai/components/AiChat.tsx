@@ -20,7 +20,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { cn } from "@/lib/utils";
+import { basename, cn } from "@/lib/utils";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   ArrowRight01Icon,
@@ -466,10 +466,6 @@ function readPathFromPart(p: AnyPart): string | null {
   return typeof path === "string" && path.length > 0 ? path : null;
 }
 
-function basename(p: string): string {
-  const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
-  return i >= 0 ? p.slice(i + 1) : p;
-}
 
 const ReadGroup = memo(function ReadGroup({ parts }: { parts: AnyPart[] }) {
   const paths = useMemo(() => {

@@ -7,6 +7,7 @@ import {
   PopoverTitle,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { basename } from "@/lib/utils";
 import { GitBranchIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useRef, useState } from "react";
@@ -21,10 +22,6 @@ interface Props {
   onClearError?: () => void;
 }
 
-function basename(path: string): string {
-  const parts = path.split(/[\\/]/).filter(Boolean);
-  return parts.length > 0 ? parts[parts.length - 1] : path;
-}
 
 /** When creating a worktree from a worktree, extract the project name.
  *  e.g. if inside ~/.terax/worktrees/{project}/{branch}, extract {project}.

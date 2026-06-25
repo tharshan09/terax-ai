@@ -25,7 +25,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { cn } from "@/lib/utils";
+import { basename, cn } from "@/lib/utils";
 import { ExplorerSearch, type ExplorerSearchHandle } from "./ExplorerSearch";
 import { EntryRow, PendingRow, StatusRow, type RowActions } from "./TreeRow";
 import { InlineInput } from "./InlineInput";
@@ -90,10 +90,6 @@ type Row =
 const ROW_HEIGHT = 24;
 const OVERSCAN = 8;
 
-function basename(path: string): string {
-  const parts = path.split(/[\\/]/).filter(Boolean);
-  return parts.length ? parts[parts.length - 1] : path;
-}
 
 function parentOf(path: string, fallback: string): string {
   const i = path.lastIndexOf("/");

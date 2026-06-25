@@ -1,5 +1,5 @@
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { basename, cn } from "@/lib/utils";
 import {
   ArrowDown01Icon,
   Cancel01Icon,
@@ -12,10 +12,6 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { useState } from "react";
 import { usePlanStore, type QueuedEdit } from "../store/planStore";
 
-function basename(p: string): string {
-  const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
-  return i >= 0 ? p.slice(i + 1) : p;
-}
 
 function diffStats(
   original: string,

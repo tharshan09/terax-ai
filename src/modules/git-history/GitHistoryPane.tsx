@@ -6,7 +6,7 @@ import {
 } from "@/components/ui/popover";
 import { Spinner } from "@/components/ui/spinner";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { cn } from "@/lib/utils";
+import { basename, cn } from "@/lib/utils";
 import {
   native,
   type GitCommitFileChange,
@@ -84,10 +84,6 @@ type FilesEntry =
   | { state: "loaded"; files: GitCommitFileChange[] }
   | { state: "error"; error: string };
 
-function basename(path: string): string {
-  const parts = path.split(/[\\/]/).filter(Boolean);
-  return parts.length > 0 ? parts[parts.length - 1] : path;
-}
 
 function dirname(path: string): string {
   const normalized = path.replace(/\\/g, "/");

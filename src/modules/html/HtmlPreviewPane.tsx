@@ -1,13 +1,9 @@
 import { cn } from "@/lib/utils";
+import type { ReadResult } from "@/modules/ai/lib/native";
 import { MarkdownViewToggle } from "@/modules/markdown";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
-
-type ReadResult =
-  | { kind: "text"; content: string; size: number }
-  | { kind: "binary"; size: number }
-  | { kind: "toolarge"; size: number; limit: number };
 
 type Status =
   | { kind: "loading" }

@@ -36,7 +36,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { IS_MAC } from "@/lib/platform";
-import { cn } from "@/lib/utils";
+import { basename, cn } from "@/lib/utils";
 import { type GitBranchEntry, native } from "@/modules/ai/lib/native";
 import {
   copyToClipboard,
@@ -115,10 +115,6 @@ type RowDescriptor =
   | { kind: "list-header"; key: string; count: number }
   | { kind: "entry"; key: string; entry: SourceControlFileEntry };
 
-function basename(path: string): string {
-  const parts = path.split(/[\\/]/).filter(Boolean);
-  return parts.length > 0 ? parts[parts.length - 1] : path;
-}
 
 function dirname(path: string): string {
   const normalized = path.replace(/\\/g, "/");
