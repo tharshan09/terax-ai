@@ -43,3 +43,24 @@ export function terminalDeleteSequence(
   if (event.ctrlKey && !event.altKey && !event.metaKey) return "\x17";
   return null;
 }
+
+/** Linux/IBus delivers a committed non-Latin character (compose key, dead key,
+ * pinyin candidate, Cyrillic, accented letter) through BOTH a keydown and the
+ * textarea input event, so xterm forwards it to the PTY twice. On Linux we
+ * suppress the keydown copy (return false to xterm without preventing default)
+ * and let the single input-event copy through.
+ *
+ * Scoped to a lone non-ASCII code point with no Ctrl/Alt/Meta, so ASCII keys
+ * and shortcuts (including AltGr combos, which carry Ctrl+Alt) are never
+ * touched. NOT applied on macOS/Windows: their WebKit/IME paths deliver such
+ * input once (or under-deliver), where suppressing the keydown would drop the
+ * character. */
+export function isLinuxImeDuplicateKeydown(
+  event: TerminalKeyEvent,
+  opts: { isLinux: boolean },
+): boolean {
+  if (!opts.isLinux) return false;
+  if (event.ctrlKey || event.altKey || event.metaKey) return false;
+  const codePoints = [...event.key];
+  return codePoints.length === 1 && (codePoints[0].codePointAt(0) ?? 0) > 0x7f;
+}

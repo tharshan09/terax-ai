@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  isLinuxImeDuplicateKeydown,
   terminalDeleteSequence,
   terminalLineNavigationSequence,
   terminalWordNavigationSequence,
@@ -133,5 +134,60 @@ describe("terminalDeleteSequence", () => {
         { isMac: true },
       ),
     ).toBeNull();
+  });
+});
+
+describe("isLinuxImeDuplicateKeydown", () => {
+  it("suppresses a bare non-Latin char on Linux (accented latin)", () => {
+    expect(isLinuxImeDuplicateKeydown(evt({ key: "ñ" }), { isLinux: true })).toBe(
+      true,
+    );
+  });
+
+  it("suppresses Cyrillic and CJK on Linux", () => {
+    expect(isLinuxImeDuplicateKeydown(evt({ key: "д" }), { isLinux: true })).toBe(
+      true,
+    );
+    expect(isLinuxImeDuplicateKeydown(evt({ key: "中" }), { isLinux: true })).toBe(
+      true,
+    );
+  });
+
+  it("leaves ASCII keys alone", () => {
+    expect(isLinuxImeDuplicateKeydown(evt({ key: "a" }), { isLinux: true })).toBe(
+      false,
+    );
+  });
+
+  it("leaves modified keys alone (Ctrl/Alt/AltGr/Meta)", () => {
+    expect(
+      isLinuxImeDuplicateKeydown(evt({ key: "ñ", ctrlKey: true }), {
+        isLinux: true,
+      }),
+    ).toBe(false);
+    // AltGr surfaces as Ctrl+Alt; must not be swallowed.
+    expect(
+      isLinuxImeDuplicateKeydown(evt({ key: "@", ctrlKey: true, altKey: true }), {
+        isLinux: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("never fires off Linux (macOS/Windows deliver such input once)", () => {
+    expect(
+      isLinuxImeDuplicateKeydown(evt({ key: "ñ" }), { isLinux: false }),
+    ).toBe(false);
+  });
+
+  it("ignores named keys and empty key strings", () => {
+    expect(
+      isLinuxImeDuplicateKeydown(evt({ key: "Enter" }), { isLinux: true }),
+    ).toBe(false);
+    expect(
+      isLinuxImeDuplicateKeydown(evt({ key: "ArrowLeft" }), { isLinux: true }),
+    ).toBe(false);
+    expect(isLinuxImeDuplicateKeydown(evt({ key: "" }), { isLinux: true })).toBe(
+      false,
+    );
   });
 });
