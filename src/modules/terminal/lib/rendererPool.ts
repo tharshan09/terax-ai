@@ -10,6 +10,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { type FontWeight, Terminal } from "@xterm/xterm";
 import { shouldCursorBlink } from "./cursorBlink";
 import {
+  isLinuxImeDuplicateKeydown,
   terminalDeleteSequence,
   terminalLineNavigationSequence,
   terminalWordNavigationSequence,
@@ -244,6 +245,10 @@ function createSlot(): Slot {
     // keyCode 229 ("Process") is what Chromium reports for every key
     // pressed inside an active IME session when isComposing is not yet set.
     if (event.isComposing || event.keyCode === 229) return false;
+    // Linux/IBus sends a committed non-Latin char via both keydown and the
+    // textarea input event; suppress the keydown copy so it reaches the PTY
+    // once. Returning false (no preventDefault) leaves the input-event copy.
+    if (isLinuxImeDuplicateKeydown(event, { isLinux: IS_LINUX })) return false;
 
     const leafId = slot.currentLeafId;
     if (leafId === null) return false;
@@ -1041,6 +1046,11 @@ export function getLiveSlotForLeaf(leafId: number): Slot | null {
 const IS_MAC =
   typeof navigator !== "undefined" &&
   /Mac|iPhone|iPad/.test(navigator.userAgent);
+
+const IS_LINUX =
+  typeof navigator !== "undefined" &&
+  /Linux/.test(navigator.userAgent) &&
+  !/Android/.test(navigator.userAgent);
 
 function isTerminalCopy(e: KeyboardEvent): boolean {
   return (
