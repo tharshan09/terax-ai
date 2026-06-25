@@ -84,18 +84,38 @@ export function registerPromptTracker(
 
 export type ClipboardWriter = (text: string) => void | Promise<void>;
 
+// Policy for OSC 52 clipboard WRITES (a terminal program asking to set the
+// system clipboard). This is how tmux/vim copy to the host clipboard — but it
+// is unauthenticated: any command output (a `cat` of an attacker file, a
+// compromised SSH host) can forge the sequence and silently replace the
+// clipboard. "notify" keeps it working but surfaces a notice; "block" ignores
+// the write entirely; "allow" is the classic silent behaviour.
+export type ClipboardWriteMode = "notify" | "allow" | "block";
+
+export type Osc52Options = {
+  /** Current policy; read per-event so a settings change applies live. */
+  getMode?: () => ClipboardWriteMode;
+  /** Invoked after a write in "notify" mode (e.g. a rate-limited toast). */
+  onNotify?: () => void;
+};
+
 export function registerOsc52ClipboardHandler(
   term: Terminal,
   writeClipboard: ClipboardWriter = writeSystemClipboard,
+  opts: Osc52Options = {},
 ): () => void {
+  const getMode = opts.getMode ?? ((): ClipboardWriteMode => "allow");
   const d = term.parser.registerOscHandler(52, (data) => {
     const text = parseOsc52Clipboard(data);
     if (text === null) return true;
+    const mode = getMode();
+    if (mode === "block") return true; // consume the sequence, drop the write
     queueMicrotask(() => {
       try {
         void Promise.resolve(writeClipboard(text)).catch(() => {});
       } catch {}
     });
+    if (mode === "notify") opts.onNotify?.();
     return true;
   });
   return () => d.dispose();

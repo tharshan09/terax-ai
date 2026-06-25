@@ -15,6 +15,7 @@ import {
   type SttProvider,
 } from "@/modules/ai/config";
 import type { KeyBinding, ShortcutId } from "@/modules/shortcuts/shortcuts";
+import type { ClipboardWriteMode } from "@/modules/terminal/lib/osc-handlers";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { LazyStore } from "@tauri-apps/plugin-store";
 
@@ -148,6 +149,9 @@ export type Preferences = {
   terminalCursorBlink: boolean;
   terminalFontFamily: string;
   terminalFontWeight: string;
+  // OSC 52 clipboard-write policy: a terminal program (tmux/vim, or forged
+  // command output) asking to set the system clipboard.
+  terminalClipboardWrite: ClipboardWriteMode;
   // App UI fonts, independent of the terminal/editor fonts. Blank = bundled
   // defaults (Inter for sans, the system mono stack for mono).
   uiFontFamily: string;
@@ -204,6 +208,7 @@ const KEY_TERMINAL_WEBGL_ENABLED = "terminalWebglEnabled";
 const KEY_TERMINAL_CURSOR_BLINK = "terminalCursorBlink";
 const KEY_TERMINAL_FONT_FAMILY = "terminalFontFamily";
 const KEY_TERMINAL_FONT_WEIGHT = "terminalFontWeight";
+const KEY_TERMINAL_CLIPBOARD_WRITE = "terminalClipboardWrite";
 const KEY_UI_FONT_FAMILY = "uiFontFamily";
 const KEY_UI_MONO_FONT_FAMILY = "uiMonoFontFamily";
 const KEY_TERMINAL_SHELL = "terminalShell";
@@ -271,6 +276,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   terminalCursorBlink: false,
   terminalFontFamily: "",
   terminalFontWeight: "normal",
+  terminalClipboardWrite: "notify",
   uiFontFamily: "",
   uiMonoFontFamily: "",
   terminalShell: "",
@@ -415,6 +421,10 @@ export async function loadPreferences(): Promise<Preferences> {
     terminalFontWeight: coerceFontWeight(
       get<string>(KEY_TERMINAL_FONT_WEIGHT) ??
         DEFAULT_PREFERENCES.terminalFontWeight,
+    ),
+    terminalClipboardWrite: coerceClipboardWriteMode(
+      get<string>(KEY_TERMINAL_CLIPBOARD_WRITE) ??
+        DEFAULT_PREFERENCES.terminalClipboardWrite,
     ),
     uiFontFamily:
       get<string>(KEY_UI_FONT_FAMILY) ?? DEFAULT_PREFERENCES.uiFontFamily,
@@ -644,6 +654,24 @@ export async function setTerminalFontWeight(value: string): Promise<void> {
   await writePref(KEY_TERMINAL_FONT_WEIGHT, coerceFontWeight(value));
 }
 
+const CLIPBOARD_WRITE_MODES = new Set<ClipboardWriteMode>([
+  "notify",
+  "allow",
+  "block",
+]);
+
+export function coerceClipboardWriteMode(value: string): ClipboardWriteMode {
+  return CLIPBOARD_WRITE_MODES.has(value as ClipboardWriteMode)
+    ? (value as ClipboardWriteMode)
+    : "notify";
+}
+
+export async function setTerminalClipboardWrite(
+  value: ClipboardWriteMode,
+): Promise<void> {
+  await writePref(KEY_TERMINAL_CLIPBOARD_WRITE, coerceClipboardWriteMode(value));
+}
+
 export async function setTerminalShell(value: string): Promise<void> {
   await writePref(KEY_TERMINAL_SHELL, value.trim());
 }
@@ -755,6 +783,7 @@ export async function onPreferencesChange(
     [KEY_TERMINAL_CURSOR_BLINK]: "terminalCursorBlink",
     [KEY_TERMINAL_FONT_FAMILY]: "terminalFontFamily",
     [KEY_TERMINAL_FONT_WEIGHT]: "terminalFontWeight",
+    [KEY_TERMINAL_CLIPBOARD_WRITE]: "terminalClipboardWrite",
     [KEY_UI_FONT_FAMILY]: "uiFontFamily",
     [KEY_UI_MONO_FONT_FAMILY]: "uiMonoFontFamily",
     [KEY_TERMINAL_SHELL]: "terminalShell",
