@@ -608,19 +608,6 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     [],
   );
 
-  const setAiDiffStatus = useCallback(
-    (approvalId: string, status: AiDiffStatus) => {
-      setTabs((curr) =>
-        curr.map((t) =>
-          t.kind === "ai-diff" && t.approvalId === approvalId
-            ? { ...t, status }
-            : t,
-        ),
-      );
-    },
-    [],
-  );
-
   const closeAiDiffTab = useCallback((approvalId: string) => {
     setTabs((curr) => {
       const target = curr.find(
@@ -1207,7 +1194,6 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     openGitDiffTab,
     openCommitHistoryTab,
     openCommitFileDiffTab,
-    setAiDiffStatus,
     closeAiDiffTab,
     closeTab,
     updateTab,

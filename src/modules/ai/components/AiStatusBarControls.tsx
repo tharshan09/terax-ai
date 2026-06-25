@@ -237,6 +237,7 @@ function ModelDropdown() {
     );
   }, [customEndpoints]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: recompute only when `apiKeys` change; `hasKeyFor` reads the same key state and `PROVIDERS` is a module constant.
   const sortedProviders = useMemo(() => {
     const configured: (typeof PROVIDERS)[number][] = [];
     const unconfigured: (typeof PROVIDERS)[number][] = [];
@@ -245,7 +246,6 @@ function ModelDropdown() {
       (hasKeyFor(p.id) ? configured : unconfigured).push(p);
     }
     return { configured, unconfigured };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiKeys]);
 
   const allModels = useMemo(
