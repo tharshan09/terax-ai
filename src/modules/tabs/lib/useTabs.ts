@@ -12,6 +12,7 @@ import {
   splitLeaf,
 } from "@/modules/terminal/lib/panes";
 import { disposeSession } from "@/modules/terminal/lib/useTerminalSession";
+import { currentWorkspaceEnv, type WorkspaceEnv } from "@/modules/workspace";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 // Matches the renderer slot pool size — over this we'd evict an active leaf.
@@ -31,6 +32,12 @@ export type TerminalTab = TabBase & {
   paneTree: PaneNode;
   activeLeafId: number;
   blocks?: boolean;
+  /**
+   * Execution environment for every pane in this tab. Locked at tab creation
+   * (SSH tabs are born remote; local tabs leave it undefined == Local).
+   * Switching a tab's env is not a concept — open a new tab instead.
+   */
+  workspace?: WorkspaceEnv;
   /** AI agent cannot read buffer / context of this terminal. */
   private?: boolean;
   /** User-set label that overrides the cwd-derived name. Survives cd. */
@@ -43,6 +50,8 @@ export type EditorTab = TabBase & {
   title: string;
   path: string;
   dirty: boolean;
+  /** Env the file lives in (e.g. an SSH host), captured when opened. */
+  workspace?: WorkspaceEnv;
   /**
    * True while the tab is in the transient "preview" state — opened by a
    * single-click in the explorer and not yet pinned by the user. A preview tab
@@ -425,6 +434,34 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     return tabId;
   }, []);
 
+  // Opens a remote terminal tab bound to an SSH host. The PTY spawns
+  // `ssh -tt <host>` locally; the tab carries a `ssh` workspace so the
+  // explorer / fs operate on the remote host while it's focused. The cwd is
+  // seeded to "~" so the explorer shows the remote home immediately — remote
+  // cwd-follow via OSC 7 is unreliable (e.g. a server that auto-starts tmux
+  // swallows it), so the explorer doesn't depend on it. The remote helper
+  // expands "~" to the real home.
+  const newSshTab = useCallback((host: string) => {
+    const tabId = nextIdRef.current++;
+    const leafId = nextIdRef.current++;
+    const workspace: WorkspaceEnv = { kind: "ssh", host };
+    setTabs((t) => [
+      ...t,
+      {
+        id: tabId,
+        kind: "terminal",
+        spaceId: activeSpaceIdRef.current,
+        title: host,
+        cwd: "~",
+        paneTree: { kind: "leaf", id: leafId, cwd: "~" },
+        activeLeafId: leafId,
+        workspace,
+      },
+    ]);
+    setActiveId(tabId);
+    return tabId;
+  }, []);
+
   useEffect(() => {
     if (!import.meta.env?.DEV || typeof window === "undefined") return;
     (
@@ -510,6 +547,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
             path,
             dirty: false,
             preview: false,
+            workspace: currentWorkspaceEnv(),
           } satisfies EditorTab,
         ];
       } else {
@@ -545,6 +583,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
           path,
           dirty: false,
           preview: true,
+          workspace: currentWorkspaceEnv(),
         };
         if (previewIdx === -1) return [...curr, tab];
         const next = [...curr];
@@ -1141,6 +1180,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     setOverrideLanguage,
     newTab,
     newBlockTab,
+    newSshTab,
     newAgentTab,
     newPrivateTab,
     openFileTab,

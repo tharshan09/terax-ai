@@ -10,6 +10,7 @@ import type {
   Tab,
   TerminalTab,
 } from "@/modules/tabs/lib/useTabs";
+import type { WorkspaceEnv } from "@/modules/workspace";
 
 export type SerializedNode =
   | { kind: "leaf"; cwd?: string; active?: boolean }
@@ -21,10 +22,21 @@ export type SerializedTab =
       tree: SerializedNode;
       blocks?: boolean;
       customTitle?: string;
+      /** Remote env (SSH/WSL) so a restored tab keeps its identity instead of
+       *  silently respawning/reading on the LOCAL machine. Absent == Local. */
+      workspace?: WorkspaceEnv;
     }
-  | { kind: "editor"; path: string }
+  | { kind: "editor"; path: string; workspace?: WorkspaceEnv }
   | { kind: "preview"; url: string }
   | { kind: "markdown"; path: string };
+
+// Only non-local envs need to survive a reload; Local is the default, so we
+// keep the serialized state minimal by omitting it.
+function persistableWorkspace(
+  ws: WorkspaceEnv | undefined,
+): WorkspaceEnv | undefined {
+  return ws && ws.kind !== "local" ? ws : undefined;
+}
 
 function basename(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean);
@@ -70,15 +82,20 @@ export function isSerializableTab(tab: Tab): boolean {
 function serializeTab(tab: Tab): SerializedTab | null {
   if (!isSerializableTab(tab)) return null;
   switch (tab.kind) {
-    case "terminal":
+    case "terminal": {
+      const ws = persistableWorkspace(tab.workspace);
       return {
         kind: "terminal",
         tree: serializeNode(tab.paneTree, tab.activeLeafId),
         ...(tab.blocks && { blocks: true }),
         ...(tab.customTitle !== undefined && { customTitle: tab.customTitle }),
+        ...(ws && { workspace: ws }),
       };
-    case "editor":
-      return { kind: "editor", path: tab.path };
+    }
+    case "editor": {
+      const ws = persistableWorkspace(tab.workspace);
+      return { kind: "editor", path: tab.path, ...(ws && { workspace: ws }) };
+    }
     case "preview":
       return { kind: "preview", url: tab.url };
     case "markdown":
@@ -163,6 +180,7 @@ function hydrateTab(
         activeLeafId,
         ...(s.blocks && { blocks: true }),
         ...(s.customTitle !== undefined && { customTitle: s.customTitle }),
+        ...(s.workspace && { workspace: s.workspace }),
       } satisfies TerminalTab;
     }
     case "editor":
@@ -175,6 +193,7 @@ function hydrateTab(
         path: s.path,
         dirty: false,
         preview: false,
+        ...(s.workspace && { workspace: s.workspace }),
       } satisfies EditorTab;
     case "preview":
       return {

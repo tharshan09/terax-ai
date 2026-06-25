@@ -95,6 +95,7 @@ export function TerminalStack({
               tabVisible={tabVisible}
               activeLeafId={t.activeLeafId}
               blocks={t.blocks ?? false}
+              workspace={t.workspace}
               onFocusLeaf={(leafId) => onFocusLeaf(t.id, leafId)}
               getBundle={getBundle}
             />

@@ -114,6 +114,7 @@ export function EditorStack({
               <EditorPane
                 ref={getRefCallback(t.id)}
                 path={t.path}
+                workspace={t.workspace}
                 overrideLanguage={t.overrideLanguage}
                 onDirtyChange={getDirtyCallback(t.id)}
                 onClose={getCloseCallback(t.id)}

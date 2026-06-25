@@ -14,7 +14,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
-import { currentWorkspaceEnv } from "@/modules/workspace";
+import { currentWorkspaceEnv, useWorkspaceEnvStore } from "@/modules/workspace";
 import {
   forwardRef,
   useEffect,
@@ -70,6 +70,10 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(function E
   ref,
 ) {
   const showHidden = usePreferencesStore((s) => s.showHidden);
+  // `fs_search` walks the LOCAL filesystem and isn't routed over SSH yet, so the
+  // fuzzy file search is disabled on remote workspaces (it would otherwise list
+  // same-named local files).
+  const isSsh = useWorkspaceEnvStore((s) => s.env.kind === "ssh");
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchHit[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -99,7 +103,7 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(function E
 
   useEffect(() => {
     const q = query.trim();
-    if (q.length < MIN_QUERY_LEN) {
+    if (isSsh || q.length < MIN_QUERY_LEN) {
       setResults([]);
       setSelectedIndex(0);
       setSearching(false);
@@ -138,7 +142,7 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(function E
       alive = false;
       clearTimeout(handle);
     };
-  }, [query, rootPath, showHidden]);
+  }, [query, rootPath, showHidden, isSsh]);
 
   useImperativeHandle(
     ref,
@@ -223,7 +227,11 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(function E
       {active ? (
         <ScrollArea className="min-h-0 flex-1">
           <div className="py-1" ref={scrollRef}>
-            {searching && results.length === 0 ? (
+            {isSsh ? (
+              <div className="px-3 py-2 text-[11px] text-muted-foreground">
+                File search isn’t available on remote workspaces yet.
+              </div>
+            ) : searching && results.length === 0 ? (
               <div className="px-3 py-2 text-[11px] text-muted-foreground">
                 Searching…
               </div>

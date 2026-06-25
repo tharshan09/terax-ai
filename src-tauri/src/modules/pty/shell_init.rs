@@ -57,6 +57,9 @@ pub fn build_command(
     shell: Option<String>,
 ) -> Result<CommandBuilder, String> {
     let shell = sanitize_shell_override(shell);
+    if let WorkspaceEnv::Ssh { host } = &workspace {
+        return build_ssh(host, cwd);
+    }
     #[cfg(unix)]
     {
         let _ = workspace;
@@ -66,6 +69,65 @@ pub fn build_command(
     {
         windows::build(cwd, workspace, blocks, shell)
     }
+}
+
+/// POSIX bootstrap run on the remote host (as the ssh remote command). It
+/// sources the user's normal rc, then installs a prompt hook that emits
+/// **OSC 7** (`file://<host><cwd>`) on every prompt, and re-execs the user's
+/// interactive shell. This is what lets the explorer follow the remote cwd —
+/// the remote shell emits the same OSC 7 the local shell-integration does, so
+/// no Terax binary needs to be installed on the host. bash and zsh get the
+/// hook; any other shell still opens, just without cwd tracking. The temp rc
+/// lives under `mktemp -d` for the session's lifetime.
+const REMOTE_SHELL_INIT: &str = r#"__terax_dir="$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/.terax-$$")"
+mkdir -p "$__terax_dir" 2>/dev/null
+__terax_shell="${SHELL:-/bin/bash}"
+case "$__terax_shell" in
+  *zsh)
+    cat > "$__terax_dir/.zshrc" <<'TZ'
+[ -f "$HOME/.zshrc" ] && source "$HOME/.zshrc"
+__terax_osc7() { printf '\033]7;file://%s%s\007' "${HOST:-$(hostname)}" "$PWD"; }
+autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook precmd __terax_osc7
+__terax_osc7
+TZ
+    ZDOTDIR="$__terax_dir" exec "$__terax_shell" -i
+    ;;
+  *bash)
+    cat > "$__terax_dir/rc" <<'TB'
+[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
+__terax_osc7() { printf '\033]7;file://%s%s\007' "${HOSTNAME:-$(hostname)}" "$PWD"; }
+case ":${PROMPT_COMMAND-}:" in *__terax_osc7*) : ;; *) PROMPT_COMMAND="__terax_osc7${PROMPT_COMMAND:+;${PROMPT_COMMAND}}" ;; esac
+__terax_osc7
+TB
+    exec "$__terax_shell" --rcfile "$__terax_dir/rc" -i
+    ;;
+  *)
+    exec "$__terax_shell" -i
+    ;;
+esac
+"#;
+
+/// Spawn the system `ssh` client inside the local PTY. The remote login shell
+/// runs under a real TTY (`-tt`), OpenSSH multiplexing (see
+/// [`crate::modules::ssh::control_args`]) lets later filesystem calls reuse
+/// this connection, and [`REMOTE_SHELL_INIT`] installs OSC 7 cwd reporting on
+/// the remote shell.
+fn build_ssh(host: &str, _cwd: Option<String>) -> Result<CommandBuilder, String> {
+    crate::modules::ssh::validate_ssh_host(host)?;
+    // The terminal establishes the shared ControlMaster; record it so the socket
+    // is torn down on quit.
+    crate::modules::ssh::note_connected_host(host);
+    let mut cmd = CommandBuilder::new("ssh");
+    cmd.arg("-tt");
+    for arg in crate::modules::ssh::control_args() {
+        cmd.arg(arg);
+    }
+    cmd.arg(host);
+    // Single arg → ssh forwards it verbatim as the remote command (run by the
+    // remote login shell), so the multi-line script needs no extra quoting.
+    cmd.arg(REMOTE_SHELL_INIT);
+    cmd.env("TERM", "xterm-256color");
+    Ok(cmd)
 }
 
 // Honor the override only if it matches an enumerated shell, so a tampered

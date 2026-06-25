@@ -4,7 +4,8 @@ import { setLastWslDistro } from "@/modules/settings/store";
 
 export type WorkspaceEnv =
   | { kind: "local" }
-  | { kind: "wsl"; distro: string };
+  | { kind: "wsl"; distro: string }
+  | { kind: "ssh"; host: string; label?: string };
 
 export type WslDistro = {
   name: string;
@@ -50,7 +51,9 @@ export function currentWorkspaceEnv(): WorkspaceEnv {
 }
 
 export function workspaceScopeKey(env: WorkspaceEnv): string {
-  return env.kind === "wsl" ? `wsl:${env.distro}` : "local";
+  if (env.kind === "wsl") return `wsl:${env.distro}`;
+  if (env.kind === "ssh") return `ssh:${env.host}`;
+  return "local";
 }
 
 export function currentWorkspaceScopeKey(): string {

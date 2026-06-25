@@ -1,6 +1,6 @@
 pub mod modules;
 
-use modules::{agent, fs, git, history, net, pty, secrets, shell, workspace};
+use modules::{agent, fs, git, history, net, pty, secrets, shell, ssh, workspace};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 #[cfg(target_os = "macos")]
@@ -223,6 +223,7 @@ pub fn run() {
             shell::shell_bg_logs,
             shell::shell_bg_kill,
             shell::shell_bg_list,
+            ssh::ssh_list_hosts,
             workspace::wsl_list_distros,
             workspace::wsl_default_distro,
             workspace::wsl_home,
@@ -244,6 +245,13 @@ pub fn run() {
             history::history_record,
             history::history_list,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app_handle, event| {
+            // Tear down lingering SSH ControlMaster sockets when the app exits,
+            // instead of waiting for ControlPersist (~10min) to reap them.
+            if let tauri::RunEvent::Exit = event {
+                ssh::disconnect_all();
+            }
+        });
 }

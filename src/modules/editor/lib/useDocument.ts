@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { currentWorkspaceEnv } from "@/modules/workspace";
+import { toast } from "sonner";
+import { currentWorkspaceEnv, type WorkspaceEnv } from "@/modules/workspace";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 
 type ReadResult =
@@ -17,10 +18,14 @@ export type DocumentState =
 
 type Options = {
   path: string;
+  /** Execution env the file lives in (e.g. an SSH host). Falls back to the
+   *  ambient env. Passed by the editor tab so a remote file is read/written
+   *  remotely even when the ambient env has moved on. */
+  workspace?: WorkspaceEnv;
   onDirtyChange?: (dirty: boolean) => void;
 };
 
-export function useDocument({ path, onDirtyChange }: Options) {
+export function useDocument({ path, workspace, onDirtyChange }: Options) {
   const [doc, setDoc] = useState<DocumentState>({ status: "loading" });
   const [dirty, setDirty] = useState(false);
 
@@ -49,15 +54,25 @@ export function useDocument({ path, onDirtyChange }: Options) {
 
   const saveNow = useCallback(async () => {
     const content = bufferRef.current;
-    await invoke("fs_write_file", {
-      path,
-      content,
-      workspace: currentWorkspaceEnv(),
-      source: "editor",
-    });
+    try {
+      await invoke("fs_write_file", {
+        path,
+        content,
+        workspace: workspace ?? currentWorkspaceEnv(),
+        source: "editor",
+      });
+    } catch (e) {
+      // Surface the failure and keep the buffer dirty — savedRef/setDirty below
+      // are skipped, so the unsaved edits are preserved. Remote saves in
+      // particular can fail (permission denied, dropped connection) and must
+      // never be swallowed. Re-throw so callers don't signal a successful save.
+      const name = path.split(/[\\/]/).pop() || path;
+      toast.error(`Couldn’t save ${name}: ${String(e)}`);
+      throw e;
+    }
     savedRef.current = content;
     setDirty(false);
-  }, [path]);
+  }, [path, workspace]);
 
   // Notify parent of dirty transitions.
   const onDirtyChangeRef = useRef(onDirtyChange);
@@ -74,7 +89,10 @@ export function useDocument({ path, onDirtyChange }: Options) {
     setDoc({ status: "loading" });
     setDirty(false);
 
-    invoke<ReadResult>("fs_read_file", { path, workspace: currentWorkspaceEnv() })
+    invoke<ReadResult>("fs_read_file", {
+      path,
+      workspace: workspace ?? currentWorkspaceEnv(),
+    })
       .then((res) => {
         if (cancelled) return;
         if (res.kind === "text") {
@@ -102,7 +120,7 @@ export function useDocument({ path, onDirtyChange }: Options) {
     return () => {
       cancelled = true;
     };
-  }, [path]);
+  }, [path, workspace]);
 
   // Skipped while dirty (never clobber unsaved edits) and when disk already
   // matches the buffer (self-save / duplicate watcher event → no re-render).
@@ -110,7 +128,7 @@ export function useDocument({ path, onDirtyChange }: Options) {
     if (dirtyRef.current) return false;
     void invoke<ReadResult>("fs_read_file", {
       path,
-      workspace: currentWorkspaceEnv(),
+      workspace: workspace ?? currentWorkspaceEnv(),
     })
       .then((res) => {
         if (res.kind === "text") {
@@ -127,7 +145,7 @@ export function useDocument({ path, onDirtyChange }: Options) {
       })
       .catch((e) => setDoc({ status: "error", message: String(e) }));
     return true;
-  }, [path]);
+  }, [path, workspace]);
 
   const save = useCallback(async () => {
     clearAutoSaveTimer();

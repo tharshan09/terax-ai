@@ -32,6 +32,7 @@ import { type LanguageResult, resolveLanguage } from "./lib/languageResolver";
 import { useEditorThemeExt } from "./lib/useEditorThemeExt";
 import { useDocument } from "./lib/useDocument";
 import { initVimGlobals, vimHandlersExtension } from "./lib/vim";
+import type { WorkspaceEnv } from "@/modules/workspace";
 import { inlineCompletion } from "./lib/autocomplete/inlineExtension";
 
 initVimGlobals();
@@ -55,6 +56,9 @@ export type EditorPaneHandle = {
 
 type Props = {
   path: string;
+  /** Env the file lives in (e.g. an SSH host). Forwarded to the document so a
+   *  remote file is read/written remotely. */
+  workspace?: WorkspaceEnv;
   overrideLanguage?: string | null;
   onDirtyChange?: (dirty: boolean) => void;
   onSaved?: () => void;
@@ -69,10 +73,12 @@ function formatBytes(n: number): string {
 
 export const EditorPane = forwardRef<EditorPaneHandle, Props>(
   function EditorPane(props, ref) {
-    const { path, overrideLanguage, onDirtyChange, onSaved, onClose } = props;
+    const { path, workspace, overrideLanguage, onDirtyChange, onSaved, onClose } =
+      props;
 
     const { doc, onChange, save, reload } = useDocument({
       path,
+      workspace,
       onDirtyChange,
     });
     const reloadRef = useRef(reload);
@@ -171,10 +177,13 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
         ),
         vimHandlersExtension(() => ({
           save: () => {
+            // onSaved must only fire on success; saveRef rejects on failure
+            // (the error is surfaced via a toast in useDocument). Swallow the
+            // rejection here to avoid an unhandled promise.
             void (async () => {
               await saveRef.current();
               onSavedRef.current?.();
-            })();
+            })().catch(() => {});
           },
           close: () => onCloseRef.current?.(),
         })),
@@ -227,7 +236,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
               void (async () => {
                 await saveRef.current();
                 onSavedRef.current?.();
-              })();
+              })().catch(() => {});
               return true;
             },
           },

@@ -11,8 +11,12 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import type { SshHost } from "@/modules/workspace/sshHosts";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { fmtShortcut, MOD_KEY, SHIFT_KEY } from "@/lib/platform";
 import { cn } from "@/lib/utils";
@@ -53,6 +57,10 @@ type Props = {
   onNew: () => void;
   onNewBlock: () => void;
   onNewPrivate: () => void;
+  /** Open a remote terminal connected to the given ~/.ssh/config host. */
+  onNewSsh: (host: string) => void;
+  /** Hosts from ~/.ssh/config shown in the SSH submenu. */
+  sshHosts: SshHost[];
   onNewPreview: () => void;
   onNewEditor: () => void;
   onNewGitGraph: () => void;
@@ -74,6 +82,8 @@ export function TabBar({
   onNew,
   onNewBlock,
   onNewPrivate,
+  onNewSsh,
+  sshHosts,
   onNewPreview,
   onNewEditor,
   onNewGitGraph,
@@ -603,6 +613,41 @@ export function TabBar({
               />
               <span className="flex-1">Git Graph</span>
             </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                <HugeiconsIcon
+                  icon={ComputerTerminal02Icon}
+                  size={14}
+                  strokeWidth={1.75}
+                />
+                <span className="flex-1">SSH</span>
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className="min-w-44">
+                {sshHosts.length === 0 ? (
+                  <DropdownMenuItem disabled>
+                    <span className="flex-1 text-muted-foreground">
+                      No ~/.ssh/config hosts
+                    </span>
+                  </DropdownMenuItem>
+                ) : (
+                  sshHosts.map((h) => (
+                    <DropdownMenuItem
+                      key={h.host}
+                      onSelect={() => onNewSsh(h.host)}
+                    >
+                      <span className="flex-1">{h.host}</span>
+                      {(h.user || h.hostName) && (
+                        <span className="text-xs text-muted-foreground">
+                          {h.user ? `${h.user}@` : ""}
+                          {h.hostName ?? ""}
+                        </span>
+                      )}
+                    </DropdownMenuItem>
+                  ))
+                )}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>

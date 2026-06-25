@@ -28,6 +28,10 @@ export function useContentSearch(
   const run = useCallback(
     async (q: string): Promise<ContentHit[]> => {
       if (!root) return [];
+      // Structural guard: `fs_grep_interactive` walks the LOCAL filesystem and
+      // isn't routed over SSH. The caller also disables this via `enabled`, but
+      // guard here too so the hook can't leak if that contract is refactored.
+      if (currentWorkspaceEnv().kind === "ssh") return [];
       const res = await invoke<GrepResponse>("fs_grep_interactive", {
         pattern: q,
         root,

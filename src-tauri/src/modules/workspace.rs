@@ -146,6 +146,15 @@ pub async fn workspace_authorize(
     registry: tauri::State<'_, WorkspaceRegistry>,
 ) -> Result<String, String> {
     let workspace = WorkspaceEnv::from_option(workspace);
+    // Remote SSH paths live on the remote host — there's nothing to canonicalize
+    // or authorize against the local filesystem, so return the path verbatim.
+    // NOTE: this grants no sandboxing. The remote helper does NOT jail access to
+    // a workspace root — the SSH account can read/write anywhere it has rights
+    // on the host. That's an accepted MVP limit (trust-the-host-account), not a
+    // guarantee enforced here.
+    if workspace.is_ssh() {
+        return Ok(path);
+    }
     let resolved = resolve_path(&path, &workspace);
     let canonical = registry.authorize(&resolved).map_err(|e| e.to_string())?;
     Ok(crate::modules::fs::to_canon(&canonical))
@@ -316,6 +325,12 @@ pub enum WorkspaceEnv {
     Wsl {
         distro: String,
     },
+    /// Remote workspace reached over SSH. `host` is a `~/.ssh/config` Host
+    /// alias (or `user@host`); user/port/identity are resolved by the local
+    /// `ssh` client from the config, so we only need the alias here.
+    Ssh {
+        host: String,
+    },
 }
 
 impl WorkspaceEnv {
@@ -325,6 +340,10 @@ impl WorkspaceEnv {
 
     pub fn is_wsl(&self) -> bool {
         matches!(self, Self::Wsl { .. })
+    }
+
+    pub fn is_ssh(&self) -> bool {
+        matches!(self, Self::Ssh { .. })
     }
 }
 
@@ -340,6 +359,9 @@ pub fn resolve_path(path: &str, workspace: &WorkspaceEnv) -> PathBuf {
     match workspace {
         WorkspaceEnv::Local => PathBuf::from(path),
         WorkspaceEnv::Wsl { distro } => wsl_path_to_host(distro, path),
+        // Remote SSH paths are absolute POSIX paths resolved on the remote
+        // host, never mapped to a local Windows path.
+        WorkspaceEnv::Ssh { .. } => PathBuf::from(path),
     }
 }
 

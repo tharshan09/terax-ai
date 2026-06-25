@@ -17,6 +17,7 @@ import {
   registerPromptTracker,
 } from "./osc-handlers";
 import { openPty, type PtySession } from "./pty-bridge";
+import type { WorkspaceEnv } from "@/modules/workspace";
 import "../block/block.css";
 import { ensureAgentActivityListener, isAgentActivePty } from "./agentActivity";
 import {
@@ -55,6 +56,8 @@ type Session = {
   pty: PtySession | null;
   ptyOpening: boolean;
   initialCwd: string | undefined;
+  /** Execution env for this leaf's PTY. Locked at session creation. */
+  workspace: WorkspaceEnv | undefined;
   lastCwd: string | null;
   pendingExit: number | null;
   shellExited: boolean;
@@ -427,6 +430,7 @@ function ensureSession(
   leafId: number,
   initialCwd?: string,
   blocks = false,
+  workspace?: WorkspaceEnv,
 ): Session {
   const existing = sessions.get(leafId);
   if (existing) return existing;
@@ -435,6 +439,7 @@ function ensureSession(
     pty: null,
     ptyOpening: false,
     initialCwd,
+    workspace,
     lastCwd: null,
     pendingExit: null,
     shellExited: false,
@@ -545,6 +550,7 @@ async function openPtyForSession(
     },
     cwd,
     s.blocks,
+    s.workspace,
     usePreferencesStore.getState().terminalShell || undefined,
   );
   // Only resize if the bound dims changed during the spawn: a same-size
@@ -814,6 +820,9 @@ type Options = {
   focused?: boolean;
   initialCwd?: string;
   blocks?: boolean;
+  /** Execution env for the PTY this leaf spawns. Locked at session creation;
+   *  switching a tab's env is not a concept — open a new tab instead. */
+  workspace?: WorkspaceEnv;
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (code: number) => void;
   onCwd?: (cwd: string) => void;
@@ -826,6 +835,7 @@ export function useTerminalSession({
   focused = true,
   initialCwd,
   blocks = false,
+  workspace,
   onSearchReady,
   onExit,
   onCwd,
@@ -841,7 +851,7 @@ export function useTerminalSession({
 
   useEffect(() => {
     let cancelled = false;
-    const s = ensureSession(leafId, initialCwdRef.current, blocks);
+    const s = ensureSession(leafId, initialCwdRef.current, blocks, workspace);
     s.ready.then(() => {
       if (cancelled || s.disposed) return;
       const node = container.current;
@@ -862,7 +872,7 @@ export function useTerminalSession({
   const [blockMode, setBlockMode] = useState<BlockMode>("prompt");
   useEffect(() => {
     if (!blocks) return;
-    const s = ensureSession(leafId, initialCwdRef.current, blocks);
+    const s = ensureSession(leafId, initialCwdRef.current, blocks, workspace);
     setBlockMode(s.blockMode);
     const cb = () => setBlockMode(sessions.get(leafId)?.blockMode ?? "prompt");
     s.blockListeners.add(cb);

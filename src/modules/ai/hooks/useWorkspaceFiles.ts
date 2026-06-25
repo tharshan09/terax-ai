@@ -25,6 +25,12 @@ function isFresh(entry: CacheEntry): boolean {
 }
 
 function fetchFiles(root: string): Promise<CacheEntry> {
+  // `fs_list_files` walks the LOCAL filesystem and isn't routed over SSH yet.
+  // On a remote workspace, return an empty list instead of silently indexing
+  // the local machine.
+  if (currentWorkspaceEnv().kind === "ssh") {
+    return Promise.resolve({ files: [], truncated: false, fetchedAt: Date.now() });
+  }
   const existing = inflight.get(root);
   if (existing) return existing;
   const promise = invoke<ListFilesResult>("fs_list_files", {

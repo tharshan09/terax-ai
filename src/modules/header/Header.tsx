@@ -4,6 +4,7 @@ import { IS_MAC, USE_CUSTOM_WINDOW_CONTROLS } from "@/lib/platform";
 import { NotificationBell } from "@/modules/agents";
 import type { Tab } from "@/modules/tabs";
 import { TabBar } from "@/modules/tabs";
+import type { SshHost } from "@/modules/workspace/sshHosts";
 import {
   CommandIcon,
   Settings01Icon,
@@ -30,6 +31,8 @@ type Props = {
   onNew: () => void;
   onNewBlock: () => void;
   onNewPrivate: () => void;
+  onNewSsh: (host: string) => void;
+  sshHosts: SshHost[];
   onNewPreview: () => void;
   onNewEditor: () => void;
   onNewGitGraph: () => void;
@@ -60,6 +63,8 @@ export function Header({
   onNew,
   onNewBlock,
   onNewPrivate,
+  onNewSsh,
+  sshHosts,
   onNewPreview,
   onNewEditor,
   onNewGitGraph,
@@ -156,6 +161,8 @@ export function Header({
           onNew={onNew}
           onNewBlock={onNewBlock}
           onNewPrivate={onNewPrivate}
+          onNewSsh={onNewSsh}
+          sshHosts={sshHosts}
           onNewPreview={onNewPreview}
           onNewEditor={onNewEditor}
           onNewGitGraph={onNewGitGraph}

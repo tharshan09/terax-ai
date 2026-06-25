@@ -76,7 +76,12 @@ export function useWorkspaceSwitcher({
       if (
         env.kind === workspaceEnv.kind &&
         (env.kind === "local" ||
-          (workspaceEnv.kind === "wsl" && env.distro === workspaceEnv.distro))
+          (env.kind === "wsl" &&
+            workspaceEnv.kind === "wsl" &&
+            env.distro === workspaceEnv.distro) ||
+          (env.kind === "ssh" &&
+            workspaceEnv.kind === "ssh" &&
+            env.host === workspaceEnv.host))
       ) {
         return false;
       }
