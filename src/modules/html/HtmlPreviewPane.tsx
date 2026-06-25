@@ -1,6 +1,6 @@
 import { cn } from "@/lib/utils";
 import type { ReadResult } from "@/modules/ai/lib/native";
-import { MarkdownViewToggle } from "@/modules/markdown";
+import { DocViewToggle } from "@/components/ui/DocViewToggle";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
@@ -96,7 +96,7 @@ export function HtmlPreviewPane({ path, workspace, visible, onSetView }: Props) 
         !visible && "pointer-events-none",
       )}
     >
-      <MarkdownViewToggle mode="rendered" onChange={onSetView} />
+      <DocViewToggle mode="rendered" onChange={onSetView} />
       {viaAsset && assetSrc ? (
         <iframe
           title={path}

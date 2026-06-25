@@ -9,7 +9,7 @@ type Props = {
   renderedHint?: string;
 };
 
-export function MarkdownViewToggle({
+export function DocViewToggle({
   mode,
   onChange,
   renderedDisabled,

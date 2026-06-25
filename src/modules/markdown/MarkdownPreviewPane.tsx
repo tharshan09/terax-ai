@@ -5,7 +5,7 @@ import type { WorkspaceEnv } from "@/modules/workspace";
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
 import { Streamdown } from "streamdown";
-import { MarkdownViewToggle } from "./MarkdownViewToggle";
+import { DocViewToggle } from "@/components/ui/DocViewToggle";
 
 type Status =
   | { kind: "loading" }
@@ -66,7 +66,7 @@ export function MarkdownPreviewPane({
         !visible && "pointer-events-none",
       )}
     >
-      <MarkdownViewToggle mode="rendered" onChange={onSetView} />
+      <DocViewToggle mode="rendered" onChange={onSetView} />
       <div className="flex-1 overflow-auto">
         <div className="px-8 py-6">
           {status.kind === "loading" && (
