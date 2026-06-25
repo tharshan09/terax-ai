@@ -14,6 +14,7 @@ import {
 import { disposeSession } from "@/modules/terminal/lib/useTerminalSession";
 import { currentWorkspaceEnv, type WorkspaceEnv } from "@/modules/workspace";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { resolveFileTabOpen } from "./resolveFileTabOpen";
 
 // Matches the renderer slot pool size — over this we'd evict an active leaf.
 export const MAX_PANES_PER_TAB = 4;
@@ -540,75 +541,14 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   const openFileTab = useCallback((path: string, pin = true) => {
     let targetId: number | null = null;
     setTabs((curr) => {
-      if (pin) {
-        // Persistent open: find any existing editor tab, pin it if needed.
-        const existing = curr.find(
-          (t) => t.kind === "editor" && t.path === path,
-        );
-        if (existing) {
-          targetId = existing.id;
-          if ((existing as EditorTab).preview) {
-            return curr.map((t) =>
-              t.id === existing.id ? { ...t, preview: false } : t,
-            );
-          }
-          return curr;
-        }
-        const id = nextIdRef.current++;
-        targetId = id;
-        return [
-          ...curr,
-          {
-            id,
-            kind: "editor",
-            spaceId: activeSpaceIdRef.current,
-            title: basename(path),
-            path,
-            dirty: false,
-            preview: false,
-            workspace: currentWorkspaceEnv(),
-          } satisfies EditorTab,
-        ];
-      } else {
-        // Preview open: persistent tab for this path takes priority.
-        const persistent = curr.find(
-          (t) =>
-            t.kind === "editor" && t.path === path && !(t as EditorTab).preview,
-        );
-        if (persistent) {
-          targetId = persistent.id;
-          return curr;
-        }
-        // Reuse the slot if it already shows the same path.
-        const existingPreview = curr.find(
-          (t) =>
-            t.kind === "editor" && t.path === path && (t as EditorTab).preview,
-        );
-        if (existingPreview) {
-          targetId = existingPreview.id;
-          return curr;
-        }
-        // Replace the current preview slot, or append a new one.
-        const previewIdx = curr.findIndex(
-          (t) => t.kind === "editor" && (t as EditorTab).preview,
-        );
-        const id = nextIdRef.current++;
-        targetId = id;
-        const tab: EditorTab = {
-          id,
-          kind: "editor",
-          spaceId: activeSpaceIdRef.current,
-          title: basename(path),
-          path,
-          dirty: false,
-          preview: true,
-          workspace: currentWorkspaceEnv(),
-        };
-        if (previewIdx === -1) return [...curr, tab];
-        const next = [...curr];
-        next[previewIdx] = tab;
-        return next;
-      }
+      const res = resolveFileTabOpen(curr, path, pin, {
+        makeId: () => nextIdRef.current++,
+        spaceId: activeSpaceIdRef.current,
+        workspace: currentWorkspaceEnv(),
+        title: basename(path),
+      });
+      targetId = res.targetId;
+      return res.tabs;
     });
     if (targetId !== null) setActiveId(targetId);
     return targetId as number | null;
