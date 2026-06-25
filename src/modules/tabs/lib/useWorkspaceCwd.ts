@@ -13,7 +13,10 @@ type Result = {
  * skip cwds that belong to a different env — handing a remote `/home/me` path
  * to a local file tree (or vice-versa) yields a wrong / not-found root.
  */
-function envsMatch(a: WorkspaceEnv | undefined, b: WorkspaceEnv): boolean {
+export function envsMatch(
+  a: WorkspaceEnv | undefined,
+  b: WorkspaceEnv,
+): boolean {
   if (!a) return b.kind === "local";
   if (a.kind !== b.kind) return false;
   if (a.kind === "wsl" && b.kind === "wsl") return a.distro === b.distro;
