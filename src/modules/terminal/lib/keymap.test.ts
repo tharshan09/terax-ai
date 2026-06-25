@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  isTerminalCopyChord,
+  isTerminalPasteChord,
   terminalDeleteSequence,
   terminalLineNavigationSequence,
   terminalWordNavigationSequence,
@@ -11,6 +13,7 @@ const evt = (partial: Partial<TerminalKeyEvent>): TerminalKeyEvent => ({
   altKey: false,
   ctrlKey: false,
   metaKey: false,
+  shiftKey: false,
   key: "",
   code: "",
   ...partial,
@@ -133,5 +136,102 @@ describe("terminalDeleteSequence", () => {
         { isMac: true },
       ),
     ).toBeNull();
+  });
+});
+
+describe("isTerminalCopyChord", () => {
+  it("matches Cmd+C on macOS", () => {
+    expect(
+      isTerminalCopyChord(evt({ metaKey: true, code: "KeyC" }), { isMac: true }),
+    ).toBe(true);
+  });
+
+  it("matches Ctrl+C off macOS", () => {
+    expect(
+      isTerminalCopyChord(evt({ ctrlKey: true, code: "KeyC" }), {
+        isMac: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("matches via key as well as code (layout-independent)", () => {
+    expect(
+      isTerminalCopyChord(evt({ ctrlKey: true, key: "c" }), { isMac: false }),
+    ).toBe(true);
+  });
+
+  it("does not match Ctrl+C on macOS (that is SIGINT)", () => {
+    expect(
+      isTerminalCopyChord(evt({ ctrlKey: true, code: "KeyC" }), {
+        isMac: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("does not match Cmd+C off macOS", () => {
+    expect(
+      isTerminalCopyChord(evt({ metaKey: true, code: "KeyC" }), {
+        isMac: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("does not match the explicit Ctrl+Shift+C shortcut", () => {
+    expect(
+      isTerminalCopyChord(evt({ ctrlKey: true, shiftKey: true, code: "KeyC" }), {
+        isMac: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("does not match when Alt is held", () => {
+    expect(
+      isTerminalCopyChord(evt({ ctrlKey: true, altKey: true, code: "KeyC" }), {
+        isMac: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("does not match a different key", () => {
+    expect(
+      isTerminalCopyChord(evt({ ctrlKey: true, code: "KeyX" }), {
+        isMac: false,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("isTerminalPasteChord", () => {
+  it("matches Cmd+V on macOS", () => {
+    expect(
+      isTerminalPasteChord(evt({ metaKey: true, code: "KeyV" }), {
+        isMac: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("matches Ctrl+V off macOS", () => {
+    expect(
+      isTerminalPasteChord(evt({ ctrlKey: true, code: "KeyV" }), {
+        isMac: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("does not match Ctrl+V on macOS", () => {
+    expect(
+      isTerminalPasteChord(evt({ ctrlKey: true, code: "KeyV" }), {
+        isMac: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("does not match the explicit Ctrl+Shift+V shortcut", () => {
+    expect(
+      isTerminalPasteChord(
+        evt({ ctrlKey: true, shiftKey: true, code: "KeyV" }),
+        { isMac: false },
+      ),
+    ).toBe(false);
   });
 });

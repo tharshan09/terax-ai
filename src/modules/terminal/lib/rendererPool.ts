@@ -10,6 +10,8 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { type FontWeight, Terminal } from "@xterm/xterm";
 import { shouldCursorBlink } from "./cursorBlink";
 import {
+  isTerminalCopyChord,
+  isTerminalPasteChord,
   terminalDeleteSequence,
   terminalLineNavigationSequence,
   terminalWordNavigationSequence,
@@ -283,6 +285,34 @@ function createSlot(): Slot {
       return false;
     }
     if (isTerminalPaste(event)) {
+      if (event.type === "keydown") {
+        void navigator.clipboard
+          .readText()
+          .then((text) => {
+            if (text) slot.term.paste(text);
+          })
+          .catch(() => {});
+      }
+      event.preventDefault();
+      return false;
+    }
+    // Native copy chord (Ctrl+C / Cmd+C, no Shift): selection-aware. With a
+    // selection we copy it and clear so a second press still sends SIGINT;
+    // with no selection we let the key through (Ctrl+C → SIGINT, Cmd+C inert).
+    if (isTerminalCopyChord(event, { isMac: IS_MAC })) {
+      if (event.type !== "keydown") return false;
+      if (slot.term.hasSelection()) {
+        const sel = slot.term.getSelection();
+        if (sel) void navigator.clipboard.writeText(sel).catch(() => {});
+        slot.term.clearSelection();
+        event.preventDefault();
+        return false;
+      }
+      return true;
+    }
+    // Native paste chord (Ctrl+V / Cmd+V, no Shift): bracketed paste so an app
+    // that intercepts Ctrl+Shift+V (Claude Code, OpenCode) still receives it.
+    if (isTerminalPasteChord(event, { isMac: IS_MAC })) {
       if (event.type === "keydown") {
         void navigator.clipboard
           .readText()
