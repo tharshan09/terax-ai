@@ -1,4 +1,4 @@
-import { isMarkdownPath } from "@/lib/utils";
+import { isHtmlPath, isMarkdownPath } from "@/lib/utils";
 import {
   findLeafCwd,
   hasLeaf,
@@ -75,6 +75,18 @@ export type MarkdownTab = TabBase & {
   path: string;
 };
 
+export type HtmlTab = TabBase & {
+  id: number;
+  kind: "html";
+  title: string;
+  path: string;
+  /**
+   * Env the file lives in, captured when opened. Drives the render strategy:
+   * Local renders via the asset protocol (full fidelity), remote via srcdoc.
+   */
+  workspace?: WorkspaceEnv;
+};
+
 export type AiDiffStatus = "pending" | "approved" | "rejected";
 
 export type AiDiffTab = TabBase & {
@@ -125,6 +137,7 @@ export type Tab =
   | EditorTab
   | PreviewTab
   | MarkdownTab
+  | HtmlTab
   | AiDiffTab
   | GitDiffTab
   | GitHistoryTab
@@ -725,6 +738,32 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     return targetId;
   }, []);
 
+  const newHtmlTab = useCallback((path: string) => {
+    let targetId: number | null = null;
+    setTabs((curr) => {
+      const existing = curr.find((t) => t.kind === "html" && t.path === path);
+      if (existing) {
+        targetId = existing.id;
+        return curr;
+      }
+      const id = nextIdRef.current++;
+      targetId = id;
+      return [
+        ...curr,
+        {
+          id,
+          kind: "html",
+          spaceId: activeSpaceIdRef.current,
+          title: basename(path),
+          path,
+          workspace: currentWorkspaceEnv(),
+        },
+      ];
+    });
+    if (targetId !== null) setActiveId(targetId);
+    return targetId;
+  }, []);
+
   const setOverrideLanguage = useCallback((id: number, lang: string | null) => {
     setTabs((curr) =>
       curr.map((t) => {
@@ -737,15 +776,16 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     );
   }, []);
 
-  const setMarkdownView = useCallback(
+  // Swaps a tab between its rendered doc kind (markdown / html) and a raw
+  // editor in place, keeping the same tab id. The toggle UI is shared, so the
+  // target kind is derived from the file extension rather than passed in.
+  const setDocView = useCallback(
     (id: number, mode: "rendered" | "raw") => {
       setTabs((curr) =>
         curr.map((t) => {
-          if (
-            t.id !== id ||
-            !isMarkdownPath((t as { path?: string }).path ?? "")
-          )
-            return t;
+          const path = (t as { path?: string }).path ?? "";
+          const html = isHtmlPath(path);
+          if (t.id !== id || (!isMarkdownPath(path) && !html)) return t;
           if (mode === "raw" && t.kind === "markdown") {
             return {
               ...t,
@@ -757,8 +797,33 @@ export function useTabs(initial?: Partial<TerminalTab>) {
                 null,
             };
           }
+          if (mode === "raw" && t.kind === "html") {
+            return {
+              id: t.id,
+              kind: "editor" as const,
+              spaceId: t.spaceId,
+              cold: t.cold,
+              title: t.title,
+              path: t.path,
+              workspace: t.workspace,
+              dirty: false,
+              preview: false,
+              overrideLanguage: null,
+            };
+          }
           if (mode === "rendered" && t.kind === "editor") {
             if (t.dirty) return t;
+            if (html) {
+              return {
+                id: t.id,
+                kind: "html" as const,
+                spaceId: t.spaceId,
+                cold: t.cold,
+                title: t.title,
+                path: t.path,
+                workspace: t.workspace,
+              };
+            }
             return {
               id: t.id,
               kind: "markdown" as const,
@@ -964,10 +1029,11 @@ export function useTabs(initial?: Partial<TerminalTab>) {
             }),
           };
         }
-        if (x.kind === "markdown") {
+        if (x.kind === "markdown" || x.kind === "html") {
           return {
             ...x,
             ...(patch.title !== undefined && { title: patch.title }),
+            ...(patch.path !== undefined && { path: patch.path }),
           };
         }
         // editor tab: auto-promote from preview the moment the file becomes dirty.
@@ -1187,7 +1253,8 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     pinTab,
     newPreviewTab,
     newMarkdownTab,
-    setMarkdownView,
+    newHtmlTab,
+    setDocView,
     openAiDiffTab,
     openGitDiffTab,
     openCommitHistoryTab,

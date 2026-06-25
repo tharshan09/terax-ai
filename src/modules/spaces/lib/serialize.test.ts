@@ -156,4 +156,42 @@ describe("hydrateTabs", () => {
       "README.md",
     ]);
   });
+
+  it("round-trips html tabs, persisting only non-local workspace", () => {
+    const tabs: Tab[] = [
+      {
+        id: 1,
+        kind: "html",
+        spaceId: "s1",
+        title: "index.html",
+        path: "/a/index.html",
+        workspace: { kind: "local" },
+      },
+      {
+        id: 2,
+        kind: "html",
+        spaceId: "s1",
+        title: "page.html",
+        path: "/srv/page.html",
+        workspace: { kind: "ssh", host: "box" },
+      },
+    ];
+    const serialized = serializeTabs(tabs);
+    // Local is the default and is omitted; remote env survives the reload.
+    expect(serialized[0]).toEqual({ kind: "html", path: "/a/index.html" });
+    expect(serialized[1]).toEqual({
+      kind: "html",
+      path: "/srv/page.html",
+      workspace: { kind: "ssh", host: "box" },
+    });
+
+    const restored = hydrateTabs(serialized, "s2", counter());
+    expect(restored.map((t) => t.kind)).toEqual(["html", "html"]);
+    expect(restored.every((t) => t.cold === true)).toBe(true);
+    const [local, remote] = restored as Extract<Tab, { kind: "html" }>[];
+    expect(local.title).toBe("index.html");
+    expect(local.spaceId).toBe("s2");
+    expect(local.workspace).toBeUndefined();
+    expect(remote.workspace).toEqual({ kind: "ssh", host: "box" });
+  });
 });

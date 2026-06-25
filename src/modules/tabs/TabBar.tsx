@@ -665,7 +665,7 @@ function DropIndicator() {
 }
 
 export function TabIcon({ tab }: { tab: Tab }) {
-  if (tab.kind === "editor" || tab.kind === "markdown") {
+  if (tab.kind === "editor" || tab.kind === "markdown" || tab.kind === "html") {
     const url =
       tab.kind === "editor" && tab.overrideLanguage
         ? fileIconUrl(`dummy.${tab.overrideLanguage}`)

@@ -5,6 +5,7 @@ import {
 } from "@/modules/terminal/lib/panes";
 import type {
   EditorTab,
+  HtmlTab,
   MarkdownTab,
   PreviewTab,
   Tab,
@@ -28,7 +29,8 @@ export type SerializedTab =
     }
   | { kind: "editor"; path: string; workspace?: WorkspaceEnv }
   | { kind: "preview"; url: string }
-  | { kind: "markdown"; path: string };
+  | { kind: "markdown"; path: string }
+  | { kind: "html"; path: string; workspace?: WorkspaceEnv };
 
 // Only non-local envs need to survive a reload; Local is the default, so we
 // keep the serialized state minimal by omitting it.
@@ -73,6 +75,7 @@ export function isSerializableTab(tab: Tab): boolean {
     case "editor":
     case "preview":
     case "markdown":
+    case "html":
       return true;
     default:
       return false;
@@ -100,6 +103,10 @@ function serializeTab(tab: Tab): SerializedTab | null {
       return { kind: "preview", url: tab.url };
     case "markdown":
       return { kind: "markdown", path: tab.path };
+    case "html": {
+      const ws = persistableWorkspace(tab.workspace);
+      return { kind: "html", path: tab.path, ...(ws && { workspace: ws }) };
+    }
     default:
       return null;
   }
@@ -213,6 +220,16 @@ function hydrateTab(
         title: basename(s.path),
         path: s.path,
       } satisfies MarkdownTab;
+    case "html":
+      return {
+        id: allocId(),
+        kind: "html",
+        spaceId,
+        cold: true,
+        title: basename(s.path),
+        path: s.path,
+        ...(s.workspace && { workspace: s.workspace }),
+      } satisfies HtmlTab;
     default:
       return null;
   }
