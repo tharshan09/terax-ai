@@ -22,6 +22,18 @@
 
 ---
 
+> ### 🔱 This is a fork
+>
+> A fork of **[crynta/terax-ai](https://github.com/crynta/terax-ai)** maintained by [@tharshan09](https://github.com/tharshan09), focused on an **SSH-native, security-hardened** workspace. The badges, install links and releases below point to upstream; the additions listed here ship from this fork's source, so [build from source](#build-from-source) to get them.
+>
+> **What this fork adds on top of upstream**
+>
+> - **SSH remote workspaces** — open a folder on a remote host over SSH (VSCode-Remote-style); the terminal, editor, file explorer and source control all operate against the remote.
+> - **Security hardening** — tightened iframe asset scope, SSH host-key prompting (no silent first-connect trust), workspace-jailed filesystem mutations, an OSC 52 clipboard-write policy, an "Open with Default App" executable guard, and API-key handling cleanups — each covered by tests.
+> - **Markdown & preview** — KaTeX math in both the markdown preview and the AI chat, a raw/rendered HTML preview toggle, and a unified document stack.
+> - **Terminal** — selection-aware native copy/paste (Ctrl+C / Cmd+C copies a selection, else SIGINT) and IME fixes.
+> - **Editor & UX** — a custom UI font independent of the terminal font, opening unrenderable files with the system default app, and branch checkout + worktrees in source control.
+
 Terax is a lightweight open-source terminal (ADE) built on Tauri 2 + Rust and React 19. A native PTY backend with a WebGL renderer, an agentic AI side-panel that runs against your own keys or fully local models, plus a code editor, file explorer, source control with a git graph, and a web preview pane built in. About 7-8 MB on disk. No telemetry. No account.
 
 ## Screenshots
