@@ -28,6 +28,22 @@ export type BuildModelOptions = {
 
 const modelCache = new Map<string, LanguageModel>();
 
+// Non-cryptographic FNV-1a digest. Collision-resistant enough to namespace the
+// model cache by API key WITHOUT keeping the raw key as a reachable Map-key
+// string (which would otherwise sit in the heap / be visible in DevTools / land
+// in any future crash dump). The built model still holds the key in its SDK
+// object for the Authorization header — that copy is unavoidable; this just
+// removes the extra plaintext copy.
+function cacheToken(s: string): string {
+  if (s === "") return "";
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+
 export async function buildLanguageModel(
   provider: ProviderId,
   keys: ProviderKeys,
@@ -46,7 +62,7 @@ export async function buildLanguageModel(
   const ollamaURL = options.ollamaBaseURL ?? OLLAMA_DEFAULT_BASE_URL;
   const compatURL = options.openaiCompatibleBaseURL ?? "";
   const epKey = customEndpointKey ?? "";
-  const cacheKey = `${provider} ${key} ${epKey} ${resolvedModelId} ${lmstudioURL} ${mlxURL} ${ollamaURL} ${compatURL}`;
+  const cacheKey = `${provider} ${cacheToken(key)} ${cacheToken(epKey)} ${resolvedModelId} ${lmstudioURL} ${mlxURL} ${ollamaURL} ${compatURL}`;
   const hit = modelCache.get(cacheKey);
   if (hit) return hit;
 

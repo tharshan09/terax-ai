@@ -30,4 +30,31 @@ describe("mathPlugin (KaTeX in Streamdown)", () => {
     expect(container.querySelector(".katex")).toBeNull();
     expect(container.textContent).toContain("Just plain text");
   });
+
+  // The math plugin is supplied via Streamdown's `plugins` API specifically so
+  // it APPENDS to the default remark/rehype chain (incl. rehype-sanitize /
+  // rehype-harden) rather than replacing it. This guards that invariant: if a
+  // future change dropped sanitization, raw HTML / javascript: would survive.
+  it("still sanitizes HTML and javascript: links when math is active", () => {
+    const dirty =
+      "Math $x^2$ and <script>globalThis.__pwned = 1</script> then " +
+      "[evil](javascript:globalThis.__pwned=1) and ![x](javascript:alert(1)).";
+    const { container } = renderMarkdown(dirty);
+
+    // Math still renders…
+    expect(container.querySelector(".katex")).not.toBeNull();
+    // …but the script element is stripped and never ran…
+    expect(container.querySelector("script")).toBeNull();
+    expect(
+      (globalThis as { __pwned?: unknown }).__pwned,
+    ).toBeUndefined();
+    // …and no javascript: URL survives on a link or image.
+    const urls = [
+      ...[...container.querySelectorAll("a")].map((a) => a.getAttribute("href")),
+      ...[...container.querySelectorAll("img")].map((i) => i.getAttribute("src")),
+    ];
+    expect(
+      urls.some((u) => (u ?? "").toLowerCase().includes("javascript:")),
+    ).toBe(false);
+  });
 });
