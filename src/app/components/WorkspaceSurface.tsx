@@ -2,6 +2,7 @@ import type { ComponentProps } from "react";
 import { cn } from "@/lib/utils";
 import { AiDiffStack, EditorStack, GitDiffStack } from "@/modules/editor";
 import { GitHistoryStack } from "@/modules/git-history";
+import { HtmlStack } from "@/modules/html";
 import { MarkdownStack } from "@/modules/markdown";
 import { PreviewStack } from "@/modules/preview";
 import type { Tab } from "@/modules/tabs";
@@ -31,7 +32,7 @@ type Props = {
   onAiDiffReject: AiDiffStackProps["onReject"];
   onOpenCommitFile: GitHistoryStackProps["onOpenCommitFile"];
   onGitHistorySearchHandle: GitHistoryStackProps["onSearchHandle"];
-  onSetMarkdownView: EditorStackProps["onSetMarkdownView"];
+  onSetDocView: EditorStackProps["onSetDocView"];
 };
 
 /**
@@ -57,13 +58,14 @@ export function WorkspaceSurface({
   onAiDiffReject,
   onOpenCommitFile,
   onGitHistorySearchHandle,
-  onSetMarkdownView,
+  onSetDocView,
 }: Props) {
   const kind = activeTab?.kind;
   const isTerminalTab = kind === "terminal";
   const isEditorTab = kind === "editor";
   const isPreviewTab = kind === "preview";
   const isMarkdownTab = kind === "markdown";
+  const isHtmlTab = kind === "html";
   const isAiDiffTab = kind === "ai-diff";
   const isGitDiffTab = kind === "git-diff" || kind === "git-commit-file";
   const isGitHistoryTab = kind === "git-history";
@@ -100,7 +102,7 @@ export function WorkspaceSurface({
           registerHandle={registerEditorHandle}
           onDirtyChange={onEditorDirtyChange}
           onCloseTab={onEditorCloseTab}
-          onSetMarkdownView={onSetMarkdownView}
+          onSetDocView={onSetDocView}
         />
       </div>
       <div
@@ -127,7 +129,20 @@ export function WorkspaceSurface({
         <MarkdownStack
           tabs={tabs}
           activeId={activeId}
-          onSetMarkdownView={onSetMarkdownView}
+          onSetDocView={onSetDocView}
+        />
+      </div>
+      <div
+        className={cn(
+          "absolute inset-0 px-3 pt-2 pb-2",
+          !isHtmlTab && "invisible pointer-events-none",
+        )}
+        aria-hidden={!isHtmlTab}
+      >
+        <HtmlStack
+          tabs={tabs}
+          activeId={activeId}
+          onSetDocView={onSetDocView}
         />
       </div>
       <div

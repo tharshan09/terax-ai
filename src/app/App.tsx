@@ -42,7 +42,7 @@ import {
 import type { PreviewPaneHandle } from "@/modules/preview";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import { isMarkdownPath } from "@/lib/utils";
+import { isHtmlPath, isMarkdownPath } from "@/lib/utils";
 import {
   useGlobalShortcuts,
   type ShortcutHandlers,
@@ -127,7 +127,8 @@ export default function App() {
     pinTab,
     newPreviewTab,
     newMarkdownTab,
-    setMarkdownView,
+    newHtmlTab,
+    setDocView,
     setOverrideLanguage,
     openAiDiffTab,
     closeAiDiffTab,
@@ -569,19 +570,21 @@ export default function App() {
 
   const handleOpenFile = useCallback(
     (path: string, pin?: boolean) => {
-      // Markdown opens in its rendered view by default; a per-tab toggle flips
-      // it to the raw editor. Other files default to preview (pin=false);
-      // explicit actions like context-menu "Open" pass pin=true to persist.
+      // Markdown and HTML open in their rendered view by default; a per-tab
+      // toggle flips to the raw editor. Other files default to preview
+      // (pin=false); explicit actions like context-menu "Open" pass pin=true.
       if (isMarkdownPath(path)) newMarkdownTab(path);
+      else if (isHtmlPath(path)) newHtmlTab(path);
       else openFileTab(path, pin ?? false);
     },
-    [openFileTab, newMarkdownTab],
+    [openFileTab, newMarkdownTab, newHtmlTab],
   );
 
   const handlePathRenamed = useCallback(
     (from: string, to: string) => {
       for (const t of tabs) {
-        if (t.kind !== "editor") continue;
+        if (t.kind !== "editor" && t.kind !== "markdown" && t.kind !== "html")
+          continue;
         if (t.path === from) {
           const i = to.lastIndexOf("/");
           updateTab(t.id, { path: to, title: i === -1 ? to : to.slice(i + 1) });
@@ -622,7 +625,9 @@ export default function App() {
     return null;
   })();
   const explorerActiveFilePath =
-    activeTab?.kind === "editor" || activeTab?.kind === "markdown"
+    activeTab?.kind === "editor" ||
+    activeTab?.kind === "markdown" ||
+    activeTab?.kind === "html"
       ? activeTab.path
       : null;
   const { sourceControl, toggleSourceControl, openGitGraphFromContext } =
@@ -1201,7 +1206,7 @@ export default function App() {
                       onAiDiffReject={(id) => respondToApproval(id, false)}
                       onOpenCommitFile={openCommitFileDiffTab}
                       onGitHistorySearchHandle={setGitHistoryHandle}
-                      onSetMarkdownView={setMarkdownView}
+                      onSetDocView={setDocView}
                     />
                   </div>
 

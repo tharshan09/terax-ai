@@ -8,3 +8,7 @@ export function cn(...inputs: ClassValue[]) {
 export function isMarkdownPath(path: string): boolean {
   return /\.(md|markdown|mdx)$/i.test(path)
 }
+
+export function isHtmlPath(path: string): boolean {
+  return /\.html?$/i.test(path)
+}

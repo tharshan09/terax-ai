@@ -1,0 +1,124 @@
+import { cn } from "@/lib/utils";
+import { MarkdownViewToggle } from "@/modules/markdown";
+import type { WorkspaceEnv } from "@/modules/workspace";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { useEffect, useState } from "react";
+
+type ReadResult =
+  | { kind: "text"; content: string; size: number }
+  | { kind: "binary"; size: number }
+  | { kind: "toolarge"; size: number; limit: number };
+
+type Status =
+  | { kind: "loading" }
+  | { kind: "ready"; content: string }
+  | { kind: "binary" }
+  | { kind: "toolarge"; size: number; limit: number }
+  | { kind: "error"; message: string };
+
+type Props = {
+  path: string;
+  workspace?: WorkspaceEnv;
+  visible: boolean;
+  onSetView: (mode: "rendered" | "raw") => void;
+};
+
+// Local files render through the asset protocol so the page's own relative
+// CSS / JS / images resolve and the document gets full fidelity. Remote files
+// (SSH / WSL) have no local asset URL, so we read the source and render it via
+// a sandboxed srcdoc instead. Relative resources can't resolve there.
+function rendersViaAsset(ws: WorkspaceEnv | undefined): boolean {
+  return !ws || ws.kind === "local";
+}
+
+// Local: cross-origin to the app (asset.localhost), so same-origin is safe and
+// lets the doc use its own fetch / storage. Remote: opaque srcdoc origin, never
+// same-origin, so the embedded HTML can never reach the host app.
+const LOCAL_SANDBOX = "allow-scripts allow-same-origin allow-forms allow-popups allow-modals";
+const REMOTE_SANDBOX = "allow-scripts allow-forms allow-popups allow-modals";
+
+// The asset protocol sends no cache validators, so the webview can serve a
+// byte-identical asset URL from cache after the file is edited and saved. A
+// per-mount token makes each render a distinct URL and forces a fresh read.
+// The remote (srcdoc) path re-reads via fs_read_file instead, so it needs none.
+let assetMountSeq = 0;
+
+export function HtmlPreviewPane({ path, workspace, visible, onSetView }: Props) {
+  const viaAsset = rendersViaAsset(workspace);
+  const [assetToken] = useState(() => (assetMountSeq += 1));
+  const [status, setStatus] = useState<Status>(
+    viaAsset ? { kind: "ready", content: "" } : { kind: "loading" },
+  );
+
+  useEffect(() => {
+    if (viaAsset) return;
+    let cancelled = false;
+    setStatus({ kind: "loading" });
+    invoke<ReadResult>("fs_read_file", { path, workspace })
+      .then((res) => {
+        if (cancelled) return;
+        if (res.kind === "text") {
+          setStatus({ kind: "ready", content: res.content });
+        } else if (res.kind === "binary") {
+          setStatus({ kind: "binary" });
+        } else {
+          setStatus({ kind: "toolarge", size: res.size, limit: res.limit });
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) setStatus({ kind: "error", message: String(e) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [path, workspace, viaAsset]);
+
+  return (
+    <div
+      className={cn(
+        "relative flex h-full w-full flex-col overflow-hidden rounded-md border border-border/60 bg-background",
+        !visible && "pointer-events-none",
+      )}
+    >
+      <MarkdownViewToggle mode="rendered" onChange={onSetView} />
+      {viaAsset ? (
+        <iframe
+          title={path}
+          src={`${convertFileSrc(path)}?v=${assetToken}`}
+          sandbox={LOCAL_SANDBOX}
+          className="h-full w-full border-none bg-white"
+        />
+      ) : status.kind === "ready" ? (
+        <iframe
+          title={path}
+          srcDoc={status.content}
+          sandbox={REMOTE_SANDBOX}
+          className="h-full w-full border-none bg-white"
+        />
+      ) : (
+        <div className="flex-1 overflow-auto">
+          <div className="px-8 py-6">
+            {status.kind === "loading" && (
+              <p className="text-[12px] text-muted-foreground">Loading…</p>
+            )}
+            {status.kind === "error" && (
+              <p className="text-[12px] text-destructive">
+                Failed to read file: {status.message}
+              </p>
+            )}
+            {status.kind === "binary" && (
+              <p className="text-[12px] text-muted-foreground">
+                Binary file, cannot render as HTML.
+              </p>
+            )}
+            {status.kind === "toolarge" && (
+              <p className="text-[12px] text-muted-foreground">
+                File is {status.size} bytes; limit {status.limit}.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
