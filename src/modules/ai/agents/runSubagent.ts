@@ -1,6 +1,6 @@
 import { generateText, stepCountIs } from "ai";
 import { DEFAULT_MODEL_ID, getModel, type ModelId } from "../config";
-import { buildLanguageModel } from "../lib/agent";
+import { buildLanguageModel } from "../lib/modelFactory";
 import type { ProviderKeys } from "../lib/keyring";
 import type { ToolContext } from "../tools/context";
 import { buildFsTools } from "../tools/fs";
