@@ -46,9 +46,29 @@ let assetMountSeq = 0;
 export function HtmlPreviewPane({ path, workspace, visible, onSetView }: Props) {
   const viaAsset = rendersViaAsset(workspace);
   const [assetToken] = useState(() => (assetMountSeq += 1));
-  const [status, setStatus] = useState<Status>(
-    viaAsset ? { kind: "ready", content: "" } : { kind: "loading" },
-  );
+  const [status, setStatus] = useState<Status>({ kind: "loading" });
+  const [assetSrc, setAssetSrc] = useState<string | null>(null);
+
+  // Local: authorize the file (and its directory, for relative CSS/JS/images)
+  // on the asset-protocol scope before pointing the iframe at it. The scope is
+  // empty by default, so the page can reach only its own folder, never an
+  // arbitrary path like ~/.ssh/id_rsa.
+  useEffect(() => {
+    if (!viaAsset) return;
+    let cancelled = false;
+    setAssetSrc(null);
+    setStatus({ kind: "loading" });
+    invoke("asset_allow", { path, directory: true })
+      .then(() => {
+        if (!cancelled) setAssetSrc(`${convertFileSrc(path)}?v=${assetToken}`);
+      })
+      .catch((e) => {
+        if (!cancelled) setStatus({ kind: "error", message: String(e) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [path, viaAsset, assetToken]);
 
   useEffect(() => {
     if (viaAsset) return;
@@ -81,14 +101,14 @@ export function HtmlPreviewPane({ path, workspace, visible, onSetView }: Props) 
       )}
     >
       <MarkdownViewToggle mode="rendered" onChange={onSetView} />
-      {viaAsset ? (
+      {viaAsset && assetSrc ? (
         <iframe
           title={path}
-          src={`${convertFileSrc(path)}?v=${assetToken}`}
+          src={assetSrc}
           sandbox={LOCAL_SANDBOX}
           className="h-full w-full border-none bg-white"
         />
-      ) : status.kind === "ready" ? (
+      ) : !viaAsset && status.kind === "ready" ? (
         <iframe
           title={path}
           srcDoc={status.content}
