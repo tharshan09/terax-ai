@@ -1,3 +1,4 @@
+pub mod asset;
 pub mod file;
 pub mod grep;
 pub mod mutate;

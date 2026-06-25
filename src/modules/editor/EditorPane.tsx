@@ -20,8 +20,9 @@ import {
   useImperativeHandle,
   useMemo,
   useRef,
+  useState,
 } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import {
   buildSharedExtensions,
   languageCompartment,
@@ -69,6 +70,17 @@ function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+const MEDIA_EXTS = new Set([
+  "png", "jpg", "jpeg", "gif", "webp", "svg", "ico",
+  "mp4", "webm", "ogg", "mov",
+  "mp3", "wav", "flac", "aac", "m4a",
+  "pdf",
+]);
+
+function isMediaPath(p: string): boolean {
+  return MEDIA_EXTS.has(p.split(".").pop()?.toLowerCase() ?? "");
 }
 
 export const EditorPane = forwardRef<EditorPaneHandle, Props>(
@@ -347,6 +359,30 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
       [path, applyPendingGoto],
     );
 
+    // Media (image/video/audio/pdf) renders through the asset protocol, whose
+    // scope is empty by default. Authorize this single file before pointing the
+    // tag at it; media can't exfiltrate, but the viewer would be blank without
+    // the allow.
+    const [mediaReadyPath, setMediaReadyPath] = useState<string | null>(null);
+    useEffect(() => {
+      const showsMedia =
+        (doc.status === "binary" || doc.status === "toolarge") &&
+        isMediaPath(path);
+      if (!showsMedia) return;
+      let cancelled = false;
+      setMediaReadyPath(null);
+      invoke("asset_allow", { path, directory: false })
+        .then(() => {
+          if (!cancelled) setMediaReadyPath(path);
+        })
+        .catch(() => {
+          if (!cancelled) setMediaReadyPath(path);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }, [path, doc.status]);
+
     if (doc.status === "loading") {
       return (
         <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
@@ -369,6 +405,13 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
       const isPdf = ext === "pdf";
 
       if (isImage || isVideo || isAudio || isPdf) {
+        if (mediaReadyPath !== path) {
+          return (
+            <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+              Loading…
+            </div>
+          );
+        }
         const assetUrl = convertFileSrc(path);
         return (
           <div className="flex h-full min-h-0 flex-col items-center justify-center bg-background p-4 overflow-auto">
