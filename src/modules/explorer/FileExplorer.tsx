@@ -208,12 +208,10 @@ export const FileExplorer = memo(
     const containerRef = useRef<HTMLDivElement>(null);
     const scrollRef = useRef<HTMLDivElement>(null);
 
+    // biome-ignore lint/correctness/useExhaustiveDependencies: `tree` is intentionally omitted (its identity changes every render); the listed fields are the only inputs buildRows actually reads.
     const { rows, entryIndexByPath } = useMemo(() => {
       if (!rootPath) return { rows: [] as Row[], entryIndexByPath: new Map<string, number>() };
       return buildRows(rootPath, tree, lookupGitStatus);
-      // `tree` is intentionally omitted: its identity changes every render, but
-      // the listed fields are the only inputs buildRows actually reads.
-      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [
       rootPath,
       tree.nodes,

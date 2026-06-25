@@ -106,6 +106,7 @@ export function AiComposerProvider({ children }: ProviderProps) {
   }, [isBusy, textareaRef]);
 
   // Listen for explorer's "Attach to Agent" event.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: register the listener once; attachFileByPath is stable for our purposes (closes over setFiles only).
   useEffect(() => {
     const onAttach = (e: Event) => {
       const path = (e as CustomEvent<string>).detail;
@@ -115,8 +116,6 @@ export function AiComposerProvider({ children }: ProviderProps) {
     };
     window.addEventListener("terax:ai-attach-file", onAttach);
     return () => window.removeEventListener("terax:ai-attach-file", onAttach);
-    // attachFileByPath is stable for our purposes (closes over setFiles only)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
