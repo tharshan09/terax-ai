@@ -1,4 +1,4 @@
-import { isHtmlPath, isMarkdownPath } from "@/lib/utils";
+import { basename, isHtmlPath, isMarkdownPath, titleFromUrl } from "@/lib/utils";
 import {
   findLeafCwd,
   hasLeaf,
@@ -160,20 +160,6 @@ export type TabPatch = Partial<{
   customTitle: string;
   overrideLanguage: string | null;
 }>;
-
-function basename(path: string): string {
-  const parts = path.split(/[\\/]/).filter(Boolean);
-  return parts.length ? parts[parts.length - 1] : path;
-}
-
-function titleFromUrl(url: string): string {
-  try {
-    const u = new URL(url);
-    return u.host || url;
-  } catch {
-    return url || "preview";
-  }
-}
 
 export const DEFAULT_SPACE_ID = "default";
 

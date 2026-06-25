@@ -3,6 +3,7 @@ import {
   type PaneNode,
   type SplitDir,
 } from "@/modules/terminal/lib/panes";
+import { basename, titleFromUrl } from "@/lib/utils";
 import type {
   EditorTab,
   HtmlTab,
@@ -38,19 +39,6 @@ function persistableWorkspace(
   ws: WorkspaceEnv | undefined,
 ): WorkspaceEnv | undefined {
   return ws && ws.kind !== "local" ? ws : undefined;
-}
-
-function basename(path: string): string {
-  const parts = path.split(/[\\/]/).filter(Boolean);
-  return parts.length ? parts[parts.length - 1] : path;
-}
-
-function titleFromUrl(url: string): string {
-  try {
-    return new URL(url).host || url;
-  } catch {
-    return url || "preview";
-  }
 }
 
 function serializeNode(node: PaneNode, activeLeafId: number): SerializedNode {

@@ -8,6 +8,7 @@ import {
   CommandShortcut,
 } from "@/components/ui/command";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { basename } from "@/lib/utils";
 import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
@@ -517,10 +518,6 @@ function EmptyHint() {
   );
 }
 
-function basename(rel: string): string {
-  const parts = rel.split(/[\\/]/);
-  return parts[parts.length - 1] || rel;
-}
 
 function formatShortcut(
   shortcutId: ShortcutId | undefined,
