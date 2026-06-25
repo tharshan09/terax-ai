@@ -1,5 +1,5 @@
 import { cn, isHtmlPath, isMarkdownPath } from "@/lib/utils";
-import { MarkdownViewToggle } from "@/modules/markdown";
+import { DocViewToggle } from "@/components/ui/DocViewToggle";
 import type { EditorTab, Tab } from "@/modules/tabs";
 import { useEffect, useRef } from "react";
 import { EditorPane, type EditorPaneHandle } from "./EditorPane";
@@ -104,7 +104,7 @@ export function EditorStack({
           >
             <div className="relative h-full overflow-hidden rounded-md border border-border/60 bg-background">
               {(isMarkdownPath(t.path) || isHtmlPath(t.path)) && (
-                <MarkdownViewToggle
+                <DocViewToggle
                   mode="raw"
                   onChange={(mode) => onSetDocView(t.id, mode)}
                   renderedDisabled={t.dirty}
