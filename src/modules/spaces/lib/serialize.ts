@@ -29,7 +29,7 @@ export type SerializedTab =
     }
   | { kind: "editor"; path: string; workspace?: WorkspaceEnv }
   | { kind: "preview"; url: string }
-  | { kind: "markdown"; path: string }
+  | { kind: "markdown"; path: string; workspace?: WorkspaceEnv }
   | { kind: "html"; path: string; workspace?: WorkspaceEnv };
 
 // Only non-local envs need to survive a reload; Local is the default, so we
@@ -101,8 +101,10 @@ function serializeTab(tab: Tab): SerializedTab | null {
     }
     case "preview":
       return { kind: "preview", url: tab.url };
-    case "markdown":
-      return { kind: "markdown", path: tab.path };
+    case "markdown": {
+      const ws = persistableWorkspace(tab.workspace);
+      return { kind: "markdown", path: tab.path, ...(ws && { workspace: ws }) };
+    }
     case "html": {
       const ws = persistableWorkspace(tab.workspace);
       return { kind: "html", path: tab.path, ...(ws && { workspace: ws }) };
@@ -219,6 +221,7 @@ function hydrateTab(
         cold: true,
         title: basename(s.path),
         path: s.path,
+        ...(s.workspace && { workspace: s.workspace }),
       } satisfies MarkdownTab;
     case "html":
       return {

@@ -73,6 +73,12 @@ export type MarkdownTab = TabBase & {
   kind: "markdown";
   title: string;
   path: string;
+  /**
+   * Env the file lives in, captured when opened. A markdown tab opened on an
+   * SSH/WSL host must keep reading from that host after the ambient workspace
+   * changes, instead of resolving the env at render time.
+   */
+  workspace?: WorkspaceEnv;
 };
 
 export type HtmlTab = TabBase & {
@@ -731,6 +737,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
           spaceId: activeSpaceIdRef.current,
           title: basename(path),
           path,
+          workspace: currentWorkspaceEnv(),
         },
       ];
     });
@@ -831,6 +838,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
               cold: t.cold,
               title: t.title,
               path: t.path,
+              workspace: t.workspace,
               overrideLanguage: t.overrideLanguage ?? null,
             };
           }
