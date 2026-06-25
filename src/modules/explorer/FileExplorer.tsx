@@ -25,6 +25,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { openWithDefaultApp } from "@/lib/openWith";
 import { basename, cn } from "@/lib/utils";
 import { ExplorerSearch, type ExplorerSearchHandle } from "./ExplorerSearch";
 import { EntryRow, PendingRow, StatusRow, type RowActions } from "./TreeRow";
@@ -666,6 +667,14 @@ export const FileExplorer = memo(
                       onSelect={() => onOpenFile(menuTarget.path, true)}
                     >
                       Open
+                    </ContextMenuItem>
+                  )}
+                  {!menuTarget.isDir && (
+                    <ContextMenuItem
+                      className={COMPACT_ITEM}
+                      onSelect={() => void openWithDefaultApp(menuTarget.path)}
+                    >
+                      Open with Default App
                     </ContextMenuItem>
                   )}
                   {menuTarget.isDir && onRevealInTerminal && (
