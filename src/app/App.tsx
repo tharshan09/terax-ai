@@ -1168,6 +1168,7 @@ export default function App() {
                         onOpenGitGraph={openGitGraphFromContext}
                         onOpenFile={handleOpenFile}
                         onNavigateToPath={cdInNewTab}
+                        onOpenTerminal={newTab}
                       />
                     )}
                   </div>

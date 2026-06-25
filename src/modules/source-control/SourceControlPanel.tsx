@@ -51,6 +51,7 @@ import { joinPath } from "@/modules/explorer/lib/useFileTree";
 import {
   AiContentGenerator02Icon,
   Alert02Icon,
+  Add01Icon,
   ArrowDown01Icon,
   ArrowRight01Icon,
   ArrowUp01Icon,
@@ -82,6 +83,7 @@ import {
   type CheckState,
   type SourceControlFileEntry,
 } from "./useSourceControlPanel";
+import { NewWorktreePopover } from "./NewWorktreePopover";
 
 type Props = {
   open: boolean;
@@ -96,6 +98,7 @@ type Props = {
   }) => void;
   onOpenFile?: (absolutePath: string) => void;
   onNavigateToPath?: (path: string) => void;
+  onOpenTerminal?: (cwd: string) => void;
 };
 
 const SOURCE_CONTROL_TOOLTIP_CLASS =
@@ -337,6 +340,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
   onOpenDiff,
   onOpenFile,
   onNavigateToPath,
+  onOpenTerminal,
 }: Props) {
   const scm = useSourceControlPanel(open, sourceControl, onOpenDiff);
   const refreshAnimationRef = useRef<number | null>(null);
@@ -604,7 +608,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
 
   return (
     <TooltipProvider delayDuration={800} skipDelayDuration={300}>
-      <aside className="flex h-full min-w-0 flex-col bg-card/80 backdrop-blur [contain:layout_style]">
+      <aside className="flex h-full min-w-0 flex-col bg-card/80 backdrop-blur contain-[layout_style]">
         <header className="flex shrink-0 items-center justify-between gap-2 border-b border-border/50 px-3 pb-2.5 pt-3">
           <div className="flex min-w-0 items-center gap-1.5">
             <BranchDropdown
@@ -644,6 +648,28 @@ export const SourceControlPanel = memo(function SourceControlPanel({
             ) : null}
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
+            {scm.panelState === "ready" && scm.repo ? (
+              <NewWorktreePopover
+                repoRoot={scm.repo?.repoRoot ?? null}
+                suggestedName={scm.suggestedWorktreeName}
+                onCreate={async (branchName) => {
+                  const path = await scm.createWorktree(branchName);
+                  if (path) onOpenTerminal?.(path);
+                  return path;
+                }}
+                busy={scm.worktreeBusy}
+                error={scm.worktreeError}
+                onClearError={scm.clearWorktreeError}
+              >
+                <button
+                  type="button"
+                  aria-label="New worktree"
+                  className="inline-flex size-6 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground/6 hover:text-foreground"
+                >
+                  <HugeiconsIcon icon={Add01Icon} size={13} strokeWidth={2} />
+                </button>
+              </NewWorktreePopover>
+            ) : null}
             <IconActionButton
               label={fetchBusy ? "Fetching…" : "Fetch from remote"}
               disabled={!canFetch}
