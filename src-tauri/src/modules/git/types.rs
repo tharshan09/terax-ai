@@ -109,10 +109,40 @@ pub struct GitLogEntry {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GitWorktreeAddResult {
+    pub worktree_path: String,
+    pub branch_name: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitWorktreeNameSuggestion {
+    pub branch_name: String,
+    pub display_name: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GitPushResult {
     pub remote: Option<String>,
     pub branch: Option<String>,
     pub pushed: bool,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBranchEntry {
+    pub name: String,
+    pub kind: String, // "local" | "worktree"
+    pub worktree_path: Option<String>,
+    pub is_head: bool,
+    pub is_detached: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBranchListResult {
+    pub branches: Vec<GitBranchEntry>,
 }
 
 pub(crate) struct GitOutput {

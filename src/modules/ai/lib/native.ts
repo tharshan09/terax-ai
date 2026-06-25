@@ -124,6 +124,28 @@ export type GitDiscardEntry = {
   untracked: boolean;
 };
 
+export type GitBranchEntry = {
+  name: string;
+  kind: "local" | "worktree";
+  worktreePath: string | null;
+  isHead: boolean;
+  isDetached: boolean;
+};
+
+export type GitBranchListResult = {
+  branches: GitBranchEntry[];
+};
+
+export type GitAddWorktreeResult = {
+  worktreePath: string;
+  branchName: string;
+};
+
+export type GitWorktreeNameSuggestion = {
+  branchName: string;
+  displayName: string;
+};
+
 /**
  * Reject an operation that still runs against the LOCAL filesystem/process when
  * an SSH workspace is active. These ops have no remote routing yet, so calling
@@ -423,6 +445,37 @@ export const native = {
       invoke<string | null>("git_remote_url", {
         repoRoot,
         name: name ?? null,
+        workspace: currentWorkspaceEnv(),
+      }),
+    ),
+  gitListBranches: (repoRoot: string) =>
+    guardSsh("gitListBranches", () =>
+      invoke<GitBranchListResult>("git_list_branches", {
+        repoRoot,
+        workspace: currentWorkspaceEnv(),
+      }),
+    ),
+  gitCheckoutBranch: (repoRoot: string, branch: string) =>
+    guardSsh("gitCheckoutBranch", () =>
+      invoke<void>("git_checkout_branch", {
+        repoRoot,
+        branch,
+        workspace: currentWorkspaceEnv(),
+      }),
+    ),
+  gitSuggestWorktreeName: (repoRoot: string, userInput?: string | null) =>
+    guardSsh("gitSuggestWorktreeName", () =>
+      invoke<GitWorktreeNameSuggestion>("git_suggest_worktree_name", {
+        repoRoot,
+        userInput: userInput ?? null,
+        workspace: currentWorkspaceEnv(),
+      }),
+    ),
+  gitWorktreeAdd: (repoRoot: string, branchName: string) =>
+    guardSsh("gitWorktreeAdd", () =>
+      invoke<GitAddWorktreeResult>("git_add_worktree", {
+        repoRoot,
+        branchName,
         workspace: currentWorkspaceEnv(),
       }),
     ),

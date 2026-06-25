@@ -512,3 +512,20 @@ fn unauthorized_path_is_rejected() {
         Ok(_) => panic!("expected error for unauthorized dir"),
     }
 }
+
+#[test]
+fn checkout_branch_rejects_unsafe_names() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    
+    let err_empty = operations::checkout_branch(&fx.registry, &fx.repo_str(), "", &fx.workspace).unwrap_err();
+    assert!(matches!(err_empty, GitError::InvalidPath(p) if p.is_empty()));
+
+    let err_dash = operations::checkout_branch(&fx.registry, &fx.repo_str(), "-f", &fx.workspace).unwrap_err();
+    assert!(matches!(err_dash, GitError::InvalidPath(p) if p == "-f"));
+
+    let err_dash_long = operations::checkout_branch(&fx.registry, &fx.repo_str(), "--detach", &fx.workspace).unwrap_err();
+    assert!(matches!(err_dash_long, GitError::InvalidPath(p) if p == "--detach"));
+}

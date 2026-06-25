@@ -2,20 +2,23 @@ use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
 use crate::modules::git::errors::{GitError, Result};
+use crate::modules::git::names;
 use crate::modules::git::parser::parse_porcelain_v2;
 use crate::modules::git::process::{
     ensure_git_available, ensure_success, git_show_text, git_stdout_line_opt, git_stdout_lines,
     read_text_file, run_git,
 };
 use crate::modules::git::types::{
-    DiscardEntry, GitCommitFileChange, GitCommitResult, GitDiffContentResult, GitDiffResult,
-    GitLogEntry, GitOutput, GitPanelSnapshot, GitPushResult, GitRepoInfo, GitStatusSnapshot,
-    TextSource, DEFAULT_TIMEOUT_SECS, NETWORK_TIMEOUT_SECS,
+    DiscardEntry, GitBranchEntry, GitBranchListResult, GitCommitFileChange, GitCommitResult,
+    GitDiffContentResult, GitDiffResult, GitLogEntry, GitOutput, GitPanelSnapshot, GitPushResult,
+    GitRepoInfo, GitStatusSnapshot, GitWorktreeAddResult, GitWorktreeNameSuggestion, TextSource,
+    DEFAULT_TIMEOUT_SECS, NETWORK_TIMEOUT_SECS,
 };
 use crate::modules::git::utils::{
-    authorized_repo_root, canonical_dir, resolve_within_repo, split_upstream, ResolvedGitDirectory,
+    authorized_repo_root, canonical_dir, resolve_within_repo, split_upstream,
+    ResolvedGitDirectory,
 };
-use crate::modules::workspace::{WorkspaceEnv, WorkspaceRegistry};
+use crate::modules::workspace::{resolve_path, workspace_home, WorkspaceEnv, WorkspaceRegistry};
 
 pub fn resolve_repo(
     registry: &WorkspaceRegistry,
@@ -811,6 +814,144 @@ fn is_remote_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'
 }
 
+pub fn suggest_worktree_name(
+    registry: &WorkspaceRegistry,
+    repo_root: &str,
+    user_input: Option<&str>,
+    workspace: &WorkspaceEnv,
+) -> Result<GitWorktreeNameSuggestion> {
+    let repo_root = authorized_repo_root(registry, repo_root, workspace)?;
+    ensure_git_available(&repo_root.workspace)?;
+    names::suggest_branch_name(&repo_root.workspace, &repo_root.git_path, user_input)
+}
+
+pub fn add_worktree(
+    registry: &WorkspaceRegistry,
+    repo_root: &str,
+    branch_name: &str,
+    workspace: &WorkspaceEnv,
+) -> Result<GitWorktreeAddResult> {
+    let repo_root = authorized_repo_root(registry, repo_root, workspace)?;
+    ensure_git_available(&repo_root.workspace)?;
+
+    validate_worktree_branch_name(&repo_root.workspace, &repo_root.git_path, branch_name)?;
+
+    let project_name = {
+        let terax_prefix = ".terax/worktrees/";
+        let repo_path = &repo_root.git_path;
+        if let Some(pos) = repo_path.find(terax_prefix) {
+            let after = &repo_path[pos + terax_prefix.len()..];
+            let end = after.find('/').unwrap_or(after.len());
+            let name = after[..end].to_string();
+            if !name.is_empty() {
+                name
+            } else {
+                Path::new(repo_path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "project".to_string())
+            }
+        } else {
+            Path::new(repo_path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "project".to_string())
+        }
+    };
+
+    let home = workspace_home(workspace).map_err(|e| GitError::command("worktree", e))?;
+    let worktree_base = join_git_path(&home, &[".terax", "worktrees", &project_name]);
+    let target_display = join_git_path(&worktree_base, &[branch_name]);
+    let target_local = resolve_path(&target_display, workspace);
+
+    let parent_local = target_local
+        .parent()
+        .ok_or_else(|| GitError::command("worktree", "invalid worktree path"))?;
+    std::fs::create_dir_all(parent_local).map_err(|e| {
+        GitError::command(
+            "worktree",
+            format!("failed to create worktree directory: {e}"),
+        )
+    })?;
+
+    if target_local.exists() {
+        return Err(GitError::command(
+            "worktree",
+            format!("directory already exists: {target_display}"),
+        ));
+    }
+
+    let output = run_git(
+        &repo_root.workspace,
+        Some(&repo_root.git_path),
+        [
+            OsStr::new("worktree"),
+            OsStr::new("add"),
+            OsStr::new(&target_display),
+            OsStr::new("-b"),
+            OsStr::new(branch_name),
+        ],
+        DEFAULT_TIMEOUT_SECS,
+    )?;
+    ensure_success(&output, "git worktree add failed")?;
+
+    Ok(GitWorktreeAddResult {
+        worktree_path: target_display,
+        branch_name: branch_name.to_string(),
+    })
+}
+
+fn validate_worktree_branch_name(
+    workspace: &WorkspaceEnv,
+    repo_root: &str,
+    branch_name: &str,
+) -> Result<()> {
+    if locally_invalid_worktree_branch_name(branch_name) {
+        return Err(GitError::command("worktree", "invalid branch name"));
+    }
+
+    let output = run_git(
+        workspace,
+        Some(repo_root),
+        [
+            OsStr::new("check-ref-format"),
+            OsStr::new("--branch"),
+            OsStr::new(branch_name),
+        ],
+        DEFAULT_TIMEOUT_SECS,
+    )?;
+    if output.timed_out {
+        return Err(GitError::TimedOut("git check-ref-format"));
+    }
+    if output.exit_code != Some(0) {
+        return Err(GitError::command("worktree", "invalid branch name"));
+    }
+    Ok(())
+}
+
+fn locally_invalid_worktree_branch_name(branch_name: &str) -> bool {
+    branch_name.is_empty()
+        || branch_name.len() > 200
+        || branch_name.contains(' ')
+        || branch_name.contains("..")
+        || branch_name.contains(':')
+        || branch_name.contains('\0')
+        || branch_name.contains("@{")
+        || branch_name == "@"
+        || branch_name.starts_with('-')
+        || branch_name.ends_with('/')
+        || branch_name.ends_with('.')
+}
+
+fn join_git_path(base: &str, parts: &[&str]) -> String {
+    let mut out = base.trim_end_matches(['/', '\\']).replace('\\', "/");
+    for part in parts {
+        out.push('/');
+        out.push_str(part.trim_matches(['/', '\\']));
+    }
+    out
+}
+
 fn parse_diff_tree_name_status(bytes: &[u8]) -> Vec<GitCommitFileChange> {
     let s = std::str::from_utf8(bytes).unwrap_or("");
     let mut tokens = s.split('\0').filter(|t| !t.is_empty());
@@ -976,6 +1117,178 @@ fn pathspec(repo_root: &Path, absolute: &Path) -> String {
         .unwrap_or_else(|_| absolute.to_string_lossy().replace('\\', "/"))
 }
 
+pub fn list_branches(
+    registry: &WorkspaceRegistry,
+    repo_root: &str,
+    workspace: &WorkspaceEnv,
+) -> Result<GitBranchListResult> {
+    let repo_root = authorized_repo_root(registry, repo_root, workspace)?;
+    ensure_git_available(&repo_root.workspace)?;
+
+    let mut branches: Vec<GitBranchEntry> = Vec::new();
+
+    let current_branch = git_stdout_line_opt(
+        &repo_root.workspace,
+        &repo_root.git_path,
+        ["rev-parse", "--abbrev-ref", "HEAD"],
+    )
+    .ok()
+    .flatten();
+    let is_detached_head = current_branch.as_deref() == Some("HEAD");
+
+    if let Ok(lines) = git_stdout_lines(
+        &repo_root.workspace,
+        &repo_root.git_path,
+        ["branch", "--format=%(refname:short)%00%(HEAD)"],
+    ) {
+        for line in &lines {
+            let mut parts = line.split('\0');
+            let name = parts.next().unwrap_or("").to_string();
+            let head_marker = parts.next().unwrap_or("");
+            let is_head = head_marker == "*";
+            if !name.is_empty() {
+                branches.push(GitBranchEntry {
+                    name,
+                    kind: "local".into(),
+                    worktree_path: None,
+                    is_head,
+                    is_detached: is_head && is_detached_head,
+                });
+            }
+        }
+    }
+
+    if let Ok(lines) = git_stdout_lines(
+        &repo_root.workspace,
+        &repo_root.git_path,
+        ["worktree", "list", "--porcelain"],
+    ) {
+        let mut current_worktree: Option<String> = None;
+        let mut worktree_branch: Option<String> = None;
+        let mut worktree_bare = false;
+        let mut head_sha: Option<String> = None;
+        for line in &lines {
+            if line.starts_with("worktree ") {
+                if let Some(wt_path) = current_worktree.take() {
+                    if !worktree_bare {
+                        push_worktree(
+                            &mut branches,
+                            wt_path,
+                            worktree_branch.take(),
+                            head_sha.take(),
+                        );
+                    }
+                }
+                current_worktree = Some(line[9..].trim().to_string());
+                worktree_branch = None;
+                worktree_bare = false;
+                head_sha = None;
+            } else if line.starts_with("HEAD ") {
+                head_sha = Some(line[5..].trim().to_string());
+            } else if line.starts_with("branch ") {
+                let raw = line[7..].trim();
+                worktree_branch = Some(
+                    raw.strip_prefix("refs/heads/")
+                        .unwrap_or(raw)
+                        .to_string(),
+                );
+            } else if line.starts_with("bare") {
+                worktree_bare = true;
+            }
+        }
+        if let Some(wt_path) = current_worktree.take() {
+            if !worktree_bare {
+                push_worktree(
+                    &mut branches,
+                    wt_path,
+                    worktree_branch.take(),
+                    head_sha.take(),
+                );
+            }
+        }
+    }
+
+    // dedupe: a worktree branch can also appear in local branches
+    // -> prefer the worktree entry (it has the path) but preserve is_head from local.
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut deduped: Vec<GitBranchEntry> = Vec::with_capacity(branches.len());
+    for b in branches {
+        if let Some(&existing_idx) = seen.get(&b.name) {
+            let existing = &deduped[existing_idx];
+            let should_replace = b.kind == "worktree"
+                && existing.kind == "local"
+                && existing.worktree_path.is_none();
+            if should_replace {
+                let is_head = existing.is_head || b.is_head;
+                deduped[existing_idx] = GitBranchEntry {
+                    is_head,
+                    ..b
+                };
+            } else if b.is_head && !existing.is_head {
+                let mut updated = deduped[existing_idx].clone();
+                updated.is_head = true;
+                deduped[existing_idx] = updated;
+            }
+        } else {
+            seen.insert(b.name.clone(), deduped.len());
+            deduped.push(b);
+        }
+    }
+
+    deduped.sort_by(|a, b| {
+        let kind_ord = |k: &str| if k == "local" { 0u8 } else { 1u8 };
+        kind_ord(&a.kind)
+            .cmp(&kind_ord(&b.kind))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    Ok(GitBranchListResult { branches: deduped })
+}
+
+fn push_worktree(
+    branches: &mut Vec<GitBranchEntry>,
+    path: String,
+    branch: Option<String>,
+    head_sha: Option<String>,
+) {
+    let name = if let Some(ref b) = branch {
+        b.clone()
+    } else if let Some(ref sha) = head_sha {
+        // if detached HEAD with no branch — show shortened SHA as name
+        let short = if sha.len() >= 7 { &sha[..7] } else { sha.as_str() };
+        format!("(detached @ {})", short)
+    } else {
+        return;
+    };
+    branches.push(GitBranchEntry {
+        name,
+        kind: "worktree".into(),
+        worktree_path: Some(path),
+        is_head: false,
+        is_detached: branch.is_none(),
+    });
+}
+
+pub fn checkout_branch(
+    registry: &WorkspaceRegistry,
+    repo_root: &str,
+    branch_name: &str,
+    workspace: &WorkspaceEnv,
+) -> Result<()> {
+    let repo_root = authorized_repo_root(registry, repo_root, workspace)?;
+    ensure_git_available(&repo_root.workspace)?;
+    if branch_name.starts_with('-') || branch_name.is_empty() {
+        return Err(GitError::InvalidPath(branch_name.into()));
+    }
+    let output = run_git(
+        &repo_root.workspace,
+        Some(&repo_root.git_path),
+        ["checkout", branch_name],
+        DEFAULT_TIMEOUT_SECS,
+    )?;
+    ensure_success(&output, "git checkout failed")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1053,5 +1366,47 @@ mod tests {
             "fatal: your current branch 'main' does not have any commits yet"
         )));
         assert!(!looks_like_no_head(&mk("fatal: pathspec did not match")));
+    }
+
+    #[test]
+    fn join_git_path_normalizes_separators() {
+        assert_eq!(
+            join_git_path(r"C:\Users\me", &[".terax", "worktrees", "repo", "branch"]),
+            "C:/Users/me/.terax/worktrees/repo/branch"
+        );
+        assert_eq!(
+            join_git_path("/home/me/", &["/.terax/", "worktrees", "repo"]),
+            "/home/me/.terax/worktrees/repo"
+        );
+    }
+
+    #[test]
+    fn validate_worktree_branch_name_reject_path_escapes() {
+        assert!(!locally_invalid_worktree_branch_name("feature/new-panel"));
+        assert!(locally_invalid_worktree_branch_name("../escape"));
+        assert!(locally_invalid_worktree_branch_name("-bad"));
+        assert!(locally_invalid_worktree_branch_name("bad name"));
+        assert!(locally_invalid_worktree_branch_name("bad:ref"));
+        assert!(locally_invalid_worktree_branch_name("bad@{ref"));
+    }
+
+    #[test]
+    fn validate_worktree_branch_name_uses_git_ref_rules() {
+        let git = std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .ok()
+            .is_some_and(|o| o.status.success());
+        if !git {
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_string_lossy().to_string();
+        assert!(
+            validate_worktree_branch_name(&WorkspaceEnv::Local, &root, "feature/new-panel").is_ok()
+        );
+        assert!(validate_worktree_branch_name(&WorkspaceEnv::Local, &root, "bad.lock").is_err());
+        assert!(validate_worktree_branch_name(&WorkspaceEnv::Local, &root, "bad?ref").is_err());
     }
 }

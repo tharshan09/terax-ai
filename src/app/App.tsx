@@ -1167,6 +1167,8 @@ export default function App() {
                         onOpenDiff={openGitDiffTab}
                         onOpenGitGraph={openGitGraphFromContext}
                         onOpenFile={handleOpenFile}
+                        onNavigateToPath={cdInNewTab}
+                        onOpenTerminal={newTab}
                       />
                     )}
                   </div>
