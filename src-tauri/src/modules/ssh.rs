@@ -94,8 +94,14 @@ pub fn control_args() -> Vec<String> {
     {
         let dir = control_dir();
         vec![
+            // `ask`, not `accept-new`: the interactive terminal (ssh -tt)
+            // prompts for an unknown host key in the PTY so the user verifies
+            // the fingerprint. The BatchMode FS path then fails fast on an
+            // unknown host instead of silently trusting it (closes the
+            // MITM-on-first-connect window), reusing the key once the terminal
+            // has accepted it.
             "-o".into(),
-            "StrictHostKeyChecking=accept-new".into(),
+            "StrictHostKeyChecking=ask".into(),
             // Override any `RemoteCommand` set in ~/.ssh/config for this host —
             // otherwise our own remote command (the shell bootstrap / python
             // helper) collides with it ("Cannot execute command-line and
@@ -113,8 +119,10 @@ pub fn control_args() -> Vec<String> {
     #[cfg(not(unix))]
     {
         vec![
+            // See the unix arm: `ask` so the terminal prompts for unknown hosts
+            // rather than silently trusting them on first connect.
             "-o".into(),
-            "StrictHostKeyChecking=accept-new".into(),
+            "StrictHostKeyChecking=ask".into(),
             "-o".into(),
             "RemoteCommand=none".into(),
         ]
@@ -768,6 +776,19 @@ pub fn copy(host: &str, sources: &[String], dest_dir: &str) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_args_prompt_instead_of_trusting_unknown_host_keys() {
+        let args = control_args();
+        assert!(
+            args.iter().any(|a| a == "StrictHostKeyChecking=ask"),
+            "host-key policy must be `ask` so the terminal prompts: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a.contains("accept-new")),
+            "`accept-new` silently trusts unknown hosts (MITM on first connect): {args:?}"
+        );
+    }
 
     #[test]
     fn parses_aliases_and_skips_wildcards() {
