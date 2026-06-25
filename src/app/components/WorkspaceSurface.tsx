@@ -2,8 +2,7 @@ import type { ComponentProps } from "react";
 import { cn } from "@/lib/utils";
 import { AiDiffStack, EditorStack, GitDiffStack } from "@/modules/editor";
 import { GitHistoryStack } from "@/modules/git-history";
-import { HtmlStack } from "@/modules/html";
-import { MarkdownStack } from "@/modules/markdown";
+import { DocStack } from "@/modules/doc";
 import { PreviewStack } from "@/modules/preview";
 import type { Tab } from "@/modules/tabs";
 import { TerminalStack } from "@/modules/terminal";
@@ -126,7 +125,8 @@ export function WorkspaceSurface({
         )}
         aria-hidden={!isMarkdownTab}
       >
-        <MarkdownStack
+        <DocStack
+          kind="markdown"
           tabs={tabs}
           activeId={activeId}
           onSetDocView={onSetDocView}
@@ -139,7 +139,8 @@ export function WorkspaceSurface({
         )}
         aria-hidden={!isHtmlTab}
       >
-        <HtmlStack
+        <DocStack
+          kind="html"
           tabs={tabs}
           activeId={activeId}
           onSetDocView={onSetDocView}
