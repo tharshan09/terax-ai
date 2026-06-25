@@ -1,6 +1,7 @@
 import { LazyStore } from "@tauri-apps/plugin-store";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import type { SerializedTab } from "./serialize";
+import { isSpaceMeta, isSpaceState } from "./validate";
 
 export type SpaceMeta = {
   id: string;
@@ -38,10 +39,12 @@ export async function loadAll(): Promise<LoadedSpaces> {
   let activeId: string | null = null;
   const states = new Map<string, SpaceState>();
   for (const [k, v] of entries) {
-    if (k === KEY_SPACES) spaces = (v as SpaceMeta[]) ?? [];
-    else if (k === KEY_ACTIVE) activeId = (v as string | null) ?? null;
-    else if (k.startsWith(STATE_PREFIX)) {
-      states.set(k.slice(STATE_PREFIX.length), v as SpaceState);
+    // Persisted JSON is untrusted (stale schema, partial write, hand edit);
+    // validate each entry and drop anything malformed instead of casting it.
+    if (k === KEY_SPACES) spaces = Array.isArray(v) ? v.filter(isSpaceMeta) : [];
+    else if (k === KEY_ACTIVE) activeId = typeof v === "string" ? v : null;
+    else if (k.startsWith(STATE_PREFIX) && isSpaceState(v)) {
+      states.set(k.slice(STATE_PREFIX.length), v);
     }
   }
   return { spaces, activeId, states };
