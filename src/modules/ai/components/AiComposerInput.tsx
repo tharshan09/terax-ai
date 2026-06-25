@@ -1,5 +1,6 @@
 import { Popover, PopoverAnchor } from "@/components/ui/popover";
 import { Spinner } from "@/components/ui/spinner";
+import { isImeComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 import { usePresence } from "@/lib/usePresence";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -218,6 +219,17 @@ export function AiComposerInput() {
               onClick={updateTrigger}
               onSelect={updateTrigger}
               onKeyDown={(e) => {
+                // Pressing Enter to commit an IME candidate must confirm it,
+                // not pick a file/snippet or submit the message. Bail before any
+                // key handling while the IME is mid-composition.
+                if (
+                  isImeComposing({
+                    isComposing: e.nativeEvent.isComposing,
+                    keyCode: e.keyCode,
+                  })
+                ) {
+                  return;
+                }
                 if (pickerOpen) {
                   const items = fileTrigger ? filteredFiles : filteredItems;
                   if (e.key === "ArrowDown") {
