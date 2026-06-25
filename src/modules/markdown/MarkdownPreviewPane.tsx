@@ -1,4 +1,5 @@
 import { MarkdownCode } from "@/components/ai-elements/markdown-code";
+import { mathPlugin } from "@/components/ai-elements/markdown-math";
 import { cn } from "@/lib/utils";
 import type { ReadResult } from "@/modules/ai/lib/native";
 import type { WorkspaceEnv } from "@/modules/workspace";
@@ -91,6 +92,7 @@ export function MarkdownPreviewPane({
             <Streamdown
               className="select-text [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
               components={components}
+              plugins={{ math: mathPlugin }}
             >
               {status.content}
             </Streamdown>
