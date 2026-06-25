@@ -148,6 +148,10 @@ export type Preferences = {
   terminalCursorBlink: boolean;
   terminalFontFamily: string;
   terminalFontWeight: string;
+  // App UI fonts, independent of the terminal/editor fonts. Blank = bundled
+  // defaults (Inter for sans, the system mono stack for mono).
+  uiFontFamily: string;
+  uiMonoFontFamily: string;
   terminalShell: string;
   terminalLetterSpacing: number;
   terminalFontSize: number;
@@ -200,6 +204,8 @@ const KEY_TERMINAL_WEBGL_ENABLED = "terminalWebglEnabled";
 const KEY_TERMINAL_CURSOR_BLINK = "terminalCursorBlink";
 const KEY_TERMINAL_FONT_FAMILY = "terminalFontFamily";
 const KEY_TERMINAL_FONT_WEIGHT = "terminalFontWeight";
+const KEY_UI_FONT_FAMILY = "uiFontFamily";
+const KEY_UI_MONO_FONT_FAMILY = "uiMonoFontFamily";
 const KEY_TERMINAL_SHELL = "terminalShell";
 const KEY_TERMINAL_LETTER_SPACING = "terminalLetterSpacing";
 const KEY_TERMINAL_FONT_SIZE = "terminalFontSize";
@@ -265,6 +271,8 @@ export const DEFAULT_PREFERENCES: Preferences = {
   terminalCursorBlink: false,
   terminalFontFamily: "",
   terminalFontWeight: "normal",
+  uiFontFamily: "",
+  uiMonoFontFamily: "",
   terminalShell: "",
   terminalLetterSpacing: 0,
   terminalFontSize: TERMINAL_FONT_SIZE_DEFAULT,
@@ -408,6 +416,11 @@ export async function loadPreferences(): Promise<Preferences> {
       get<string>(KEY_TERMINAL_FONT_WEIGHT) ??
         DEFAULT_PREFERENCES.terminalFontWeight,
     ),
+    uiFontFamily:
+      get<string>(KEY_UI_FONT_FAMILY) ?? DEFAULT_PREFERENCES.uiFontFamily,
+    uiMonoFontFamily:
+      get<string>(KEY_UI_MONO_FONT_FAMILY) ??
+      DEFAULT_PREFERENCES.uiMonoFontFamily,
     terminalShell:
       get<string>(KEY_TERMINAL_SHELL) ?? DEFAULT_PREFERENCES.terminalShell,
     terminalLetterSpacing:
@@ -612,6 +625,14 @@ export async function setTerminalFontFamily(value: string): Promise<void> {
   await writePref(KEY_TERMINAL_FONT_FAMILY, value.trim());
 }
 
+export async function setUiFontFamily(value: string): Promise<void> {
+  await writePref(KEY_UI_FONT_FAMILY, value.trim());
+}
+
+export async function setUiMonoFontFamily(value: string): Promise<void> {
+  await writePref(KEY_UI_MONO_FONT_FAMILY, value.trim());
+}
+
 const TERMINAL_FONT_WEIGHT_VALUES = new Set(["normal", "500", "600", "bold"]);
 
 export function coerceFontWeight(value: string): string {
@@ -734,6 +755,8 @@ export async function onPreferencesChange(
     [KEY_TERMINAL_CURSOR_BLINK]: "terminalCursorBlink",
     [KEY_TERMINAL_FONT_FAMILY]: "terminalFontFamily",
     [KEY_TERMINAL_FONT_WEIGHT]: "terminalFontWeight",
+    [KEY_UI_FONT_FAMILY]: "uiFontFamily",
+    [KEY_UI_MONO_FONT_FAMILY]: "uiMonoFontFamily",
     [KEY_TERMINAL_SHELL]: "terminalShell",
     [KEY_TERMINAL_LETTER_SPACING]: "terminalLetterSpacing",
     [KEY_TERMINAL_FONT_SIZE]: "terminalFontSize",

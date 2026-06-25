@@ -36,6 +36,8 @@ import {
   setTerminalCursorBlink,
   setTerminalScrollback,
   setTerminalWebglEnabled,
+  setUiFontFamily,
+  setUiMonoFontFamily,
   setVimMode,
   setZoomLevel,
 } from "@/modules/settings/store";
@@ -100,6 +102,8 @@ export function GeneralSection() {
   );
   const terminalFontFamily = usePreferencesStore((s) => s.terminalFontFamily);
   const terminalFontWeight = usePreferencesStore((s) => s.terminalFontWeight);
+  const uiFontFamily = usePreferencesStore((s) => s.uiFontFamily);
+  const uiMonoFontFamily = usePreferencesStore((s) => s.uiMonoFontFamily);
   const terminalShell = usePreferencesStore((s) => s.terminalShell);
   const [shells, setShells] = useState<ShellInfo[]>([]);
   const terminalLetterSpacing = usePreferencesStore(
@@ -172,6 +176,24 @@ export function GeneralSection() {
           For theme, background and customization, see the{" "}
           <strong className="font-medium text-foreground">Themes</strong> tab.
         </p>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <Label>Interface font</Label>
+        <FontFamilyInput
+          title="UI font"
+          description="Font for menus, panels, chat and labels. Leave blank for the bundled Inter. Independent of the terminal and editor fonts."
+          placeholder="Default (Inter)"
+          value={uiFontFamily}
+          onCommit={(v) => void setUiFontFamily(v)}
+        />
+        <FontFamilyInput
+          title="UI mono font"
+          description="Monospace font for code blocks, file paths and hashes in the UI. Leave blank for the system default."
+          placeholder="Default (system mono)"
+          value={uiMonoFontFamily}
+          onCommit={(v) => void setUiMonoFontFamily(v)}
+        />
       </div>
 
       <div className="flex flex-col gap-2">
@@ -301,6 +323,9 @@ export function GeneralSection() {
           />
         </SettingRow>
         <FontFamilyInput
+          title="Font family"
+          description='Nerd Font name for icons (e.g. "CaskaydiaCove Nerd Font Mono"). Leave blank to auto-detect.'
+          placeholder="Auto-detect"
           value={terminalFontFamily}
           onCommit={(v) => void setTerminalFontFamily(v)}
         />
@@ -479,9 +504,15 @@ function Label({ children }: { children: React.ReactNode }) {
 }
 
 function FontFamilyInput({
+  title,
+  description,
+  placeholder,
   value,
   onCommit,
 }: {
+  title: string;
+  description: string;
+  placeholder: string;
   value: string;
   onCommit: (v: string) => void;
 }) {
@@ -500,14 +531,11 @@ function FontFamilyInput({
   };
 
   return (
-    <SettingRow
-      title="Font family"
-      description='Nerd Font name for icons (e.g. "CaskaydiaCove Nerd Font Mono"). Leave blank to auto-detect.'
-    >
+    <SettingRow title={title} description={description}>
       <input
         type="text"
         value={draft}
-        placeholder="Auto-detect"
+        placeholder={placeholder}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={commit}
         onKeyDown={(e) => {
