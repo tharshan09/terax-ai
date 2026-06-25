@@ -1,4 +1,5 @@
 import { useTheme } from "@/modules/theme";
+import type { WorkspaceEnv } from "@/modules/workspace";
 import type { SearchAddon } from "@xterm/addon-search";
 import {
   forwardRef,
@@ -32,6 +33,8 @@ type Props = {
   initialCwd?: string;
   /** Enable command-block decorations (OSC 133) for this terminal. */
   blocks?: boolean;
+  /** Per-tab execution env (Local / WSL / SSH). Locked at first mount. */
+  workspace?: WorkspaceEnv;
   onSearchReady?: (leafId: number, addon: SearchAddon) => void;
   onExit?: (leafId: number, code: number) => void;
   onCwd?: (leafId: number, cwd: string) => void;
@@ -45,6 +48,7 @@ export const TerminalPane = memo(
       focused = true,
       initialCwd,
       blocks = false,
+      workspace,
       onSearchReady,
       onExit,
       onCwd,
@@ -62,6 +66,7 @@ export const TerminalPane = memo(
       focused,
       initialCwd,
       blocks,
+      workspace,
       onSearchReady: (a) => onSearchReady?.(leafId, a),
       onExit: (c) => onExit?.(leafId, c),
       onCwd: (c) => onCwd?.(leafId, c),

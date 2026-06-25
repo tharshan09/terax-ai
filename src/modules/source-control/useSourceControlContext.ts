@@ -2,6 +2,7 @@ import { useCallback, useMemo } from "react";
 import { native } from "@/modules/ai/lib/native";
 import type { SidebarViewId } from "@/modules/sidebar";
 import type { Tab } from "@/modules/tabs";
+import { useWorkspaceEnvStore } from "@/modules/workspace";
 import { useSourceControl } from "./useSourceControl";
 
 function dirname(path: string | null): string | null {
@@ -76,7 +77,11 @@ export function useSourceControlContext({
   const sourceControlPath = sourceControlActive
     ? sourceControlContextPath
     : badgeContextPath;
-  const sourceControl = useSourceControl(sourceControlPath, true);
+  // Git is not routed over SSH yet — disabling the summary stops it from running
+  // the local `git` binary against a remote-named path (which would surface /
+  // mutate a same-named local repo) and clears the rail badge.
+  const isSsh = useWorkspaceEnvStore((s) => s.env.kind === "ssh");
+  const sourceControl = useSourceControl(sourceControlPath, !isSsh);
 
   const toggleSourceControl = useCallback(() => {
     cycleSidebarView("source-control");

@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::UNIX_EPOCH;
 use std::{fs, io::Write};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 use tempfile::NamedTempFile;
 
@@ -11,7 +11,7 @@ use crate::modules::workspace::{resolve_path, WorkspaceEnv};
 const MAX_READ_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
 const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ReadResult {
     Text {
@@ -28,7 +28,7 @@ pub enum ReadResult {
     },
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StatKind {
     File,
@@ -36,7 +36,7 @@ pub enum StatKind {
     Symlink,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct FileStat {
     pub size: u64,
     pub mtime: u64,
@@ -46,6 +46,9 @@ pub struct FileStat {
 #[tauri::command]
 pub fn fs_read_file(path: String, workspace: Option<WorkspaceEnv>) -> Result<ReadResult, String> {
     let workspace = WorkspaceEnv::from_option(workspace);
+    if let WorkspaceEnv::Ssh { host } = &workspace {
+        return crate::modules::ssh::read_file(host, &path);
+    }
     let p = resolve_path(&path, &workspace);
     let meta = std::fs::metadata(&p).map_err(|e| {
         log::debug!("fs_read_file stat({}) failed: {e}", p.display());
@@ -107,6 +110,17 @@ pub fn fs_write_file(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     let workspace = WorkspaceEnv::from_option(workspace);
+    if let WorkspaceEnv::Ssh { host } = &workspace {
+        crate::modules::ssh::write_file(host, &path, &content)?;
+        let _ = app.emit(
+            "fs:file-written",
+            FileWrittenEvent {
+                path: path.clone(),
+                source,
+            },
+        );
+        return Ok(());
+    }
     let target = resolve_path(&path, &workspace);
     let original_permissions = fs::metadata(&target).ok().map(|m| m.permissions());
     write_atomic(&target, content.as_bytes()).map_err(|e| {
@@ -131,6 +145,11 @@ pub fn fs_write_file(
 #[tauri::command]
 pub fn fs_canonicalize(path: String, workspace: Option<WorkspaceEnv>) -> Result<String, String> {
     let workspace = WorkspaceEnv::from_option(workspace);
+    // Remote paths can't be canonicalized locally; return verbatim (they're
+    // already absolute POSIX paths from the remote shell / explorer).
+    if workspace.is_ssh() {
+        return Ok(path);
+    }
     let p = resolve_path(&path, &workspace);
     let canon = std::fs::canonicalize(&p).map_err(|e| e.to_string())?;
     Ok(super::to_canon(&canon))
@@ -139,6 +158,9 @@ pub fn fs_canonicalize(path: String, workspace: Option<WorkspaceEnv>) -> Result<
 #[tauri::command]
 pub fn fs_stat(path: String, workspace: Option<WorkspaceEnv>) -> Result<FileStat, String> {
     let workspace = WorkspaceEnv::from_option(workspace);
+    if let WorkspaceEnv::Ssh { host } = &workspace {
+        return crate::modules::ssh::stat(host, &path);
+    }
     let p = resolve_path(&path, &workspace);
     let meta = std::fs::metadata(&p).map_err(|e| e.to_string())?;
     let kind = if meta.is_dir() {

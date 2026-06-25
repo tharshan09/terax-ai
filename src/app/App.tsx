@@ -86,7 +86,12 @@ import {
 import { DEFAULT_SPACE_ID } from "@/modules/tabs/lib/useTabs";
 import { ThemeProvider, useThemeFileEditing } from "@/modules/theme";
 import { UpdaterDialog } from "@/modules/updater";
-import { useWorkspaceEnvStore, type WorkspaceEnv } from "@/modules/workspace";
+import {
+  LOCAL_WORKSPACE,
+  useWorkspaceEnvStore,
+  type WorkspaceEnv,
+} from "@/modules/workspace";
+import { listSshHosts, type SshHost } from "@/modules/workspace/sshHosts";
 import type { SearchAddon } from "@xterm/addon-search";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CloseDialogs } from "./components/CloseDialogs";
@@ -115,6 +120,7 @@ export default function App() {
     setActiveSpaceForNewTabs,
     newTab,
     newBlockTab,
+    newSshTab,
     newAgentTab,
     newPrivateTab,
     openFileTab,
@@ -305,9 +311,38 @@ export default function App() {
     activeTab,
     tabs,
     launchCwd ?? home,
+    workspaceEnv,
   );
 
   useWindowTitle(activeTab, explorerRoot);
+
+  // Ambient env follows the active SSH tab so the explorer / fs / AI operate
+  // on the remote host while it's focused. Surgical: only the SSH path drives
+  // ambient env from the tab — Local/WSL keep using the space-env switcher.
+  useEffect(() => {
+    const tabEnv =
+      activeTab?.kind === "terminal" || activeTab?.kind === "editor"
+        ? activeTab.workspace
+        : undefined;
+    if (tabEnv?.kind === "ssh") {
+      if (workspaceEnv.kind !== "ssh" || workspaceEnv.host !== tabEnv.host) {
+        setWorkspaceEnv(tabEnv);
+      }
+    } else if (
+      workspaceEnv.kind === "ssh" &&
+      (activeTab?.kind === "terminal" || activeTab?.kind === "editor")
+    ) {
+      // Focus moved to a NON-ssh terminal/editor → leave the remote env and
+      // restore the space's env (Local on macOS). Tabs without an env
+      // (markdown/preview/git) are intentionally NOT handled here, so the
+      // ambient env stays sticky and a remote file they show keeps reading
+      // remotely instead of flipping to a local path.
+      const spaceEnv =
+        useSpaces.getState().spaces.find((s) => s.id === activeSpaceId)?.env ??
+        LOCAL_WORKSPACE;
+      setWorkspaceEnv(spaceEnv);
+    }
+  }, [activeTab, activeSpaceId, workspaceEnv, setWorkspaceEnv]);
 
   useEffect(() => {
     setActiveSearchAddon(
@@ -492,6 +527,19 @@ export default function App() {
   const openNewBlockTab = useCallback(() => {
     newBlockTab(inheritedCwdForNewTab());
   }, [newBlockTab, inheritedCwdForNewTab]);
+
+  const openSshTab = useCallback(
+    (host: string) => {
+      newSshTab(host);
+    },
+    [newSshTab],
+  );
+
+  // Hosts for the `+` → SSH submenu, read once from ~/.ssh/config.
+  const [sshHosts, setSshHosts] = useState<SshHost[]>([]);
+  useEffect(() => {
+    void listSshHosts().then(setSshHosts);
+  }, []);
 
   const sendCd = useCallback(
     (path: string) => {
@@ -1053,6 +1101,8 @@ export default function App() {
               onNew={openNewTab}
               onNewBlock={openNewBlockTab}
               onNewPrivate={openNewPrivateTab}
+              onNewSsh={openSshTab}
+              sshHosts={sshHosts}
               onNewPreview={() => openPreviewTab("")}
               onNewEditor={() => setNewEditorOpen(true)}
               onNewGitGraph={openGitGraphFromContext}
@@ -1105,6 +1155,11 @@ export default function App() {
                         onRevealInTerminal={cdInNewTab}
                         onAttachToAgent={handleAttachFileToAgent}
                       />
+                    ) : workspaceEnv.kind === "ssh" ? (
+                      <div className="flex h-full items-center justify-center px-6 text-center text-[11px] text-muted-foreground">
+                        Source control isn’t available on remote SSH workspaces
+                        yet.
+                      </div>
                     ) : (
                       <SourceControlPanel
                         open

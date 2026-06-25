@@ -235,6 +235,12 @@ pub fn fs_watch_add(
     registry: State<'_, WorkspaceRegistry>,
 ) -> Result<(), String> {
     let workspace = WorkspaceEnv::from_option(workspace);
+    // No live FS events over ssh — remote watching isn't wired up; the explorer
+    // refreshes on navigation instead. (A local watcher can't observe a remote
+    // path anyway.)
+    if workspace.is_ssh() {
+        return Ok(());
+    }
     let prepared = prepare_add(&registry, &workspace, paths);
     if prepared.is_empty() {
         return Ok(());
@@ -254,6 +260,9 @@ pub fn fs_watch_remove(
     state: State<'_, FsWatchState>,
 ) -> Result<(), String> {
     let workspace = WorkspaceEnv::from_option(workspace);
+    if workspace.is_ssh() {
+        return Ok(());
+    }
     // A removed/renamed dir no longer canonicalizes; fall back so the refcount
     // entry is still released.
     let prepared: Vec<PathBuf> = paths

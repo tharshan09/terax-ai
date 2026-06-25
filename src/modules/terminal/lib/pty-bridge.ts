@@ -1,5 +1,5 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
-import { currentWorkspaceEnv } from "@/modules/workspace";
+import { currentWorkspaceEnv, type WorkspaceEnv } from "@/modules/workspace";
 
 const textEncoder = new TextEncoder();
 
@@ -21,6 +21,7 @@ export async function openPty(
   handlers: PtyHandlers,
   cwd?: string,
   blocks?: boolean,
+  workspace?: WorkspaceEnv,
   shell?: string,
 ): Promise<PtySession> {
   // Raw bytes — no base64/JSON round-trip; messages arrive as ArrayBuffer.
@@ -46,7 +47,10 @@ export async function openPty(
     cols,
     rows,
     cwd: cwd ?? null,
-    workspace: currentWorkspaceEnv(),
+    // Per-tab env if the caller passed one (SSH tabs always do); otherwise the
+    // ambient env. The ambient env mirrors the active tab, so local callers
+    // still get the right value.
+    workspace: workspace ?? currentWorkspaceEnv(),
     blocks: blocks ?? false,
     shell: shell ?? null,
     onData,
