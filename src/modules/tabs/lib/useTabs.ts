@@ -1,4 +1,4 @@
-import { basename, isHtmlPath, isMarkdownPath, titleFromUrl } from "@/lib/utils";
+import { basename, titleFromUrl } from "@/lib/utils";
 import {
   findLeafCwd,
   hasLeaf,
@@ -14,6 +14,7 @@ import {
 import { disposeSession } from "@/modules/terminal/lib/useTerminalSession";
 import { currentWorkspaceEnv, type WorkspaceEnv } from "@/modules/workspace";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { applyDocView } from "./applyDocView";
 import { resolveFileTabOpen } from "./resolveFileTabOpen";
 
 // Matches the renderer slot pool size — over this we'd evict an active leaf.
@@ -701,63 +702,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   // target kind is derived from the file extension rather than passed in.
   const setDocView = useCallback(
     (id: number, mode: "rendered" | "raw") => {
-      setTabs((curr) =>
-        curr.map((t) => {
-          const path = (t as { path?: string }).path ?? "";
-          const html = isHtmlPath(path);
-          if (t.id !== id || (!isMarkdownPath(path) && !html)) return t;
-          if (mode === "raw" && t.kind === "markdown") {
-            return {
-              ...t,
-              kind: "editor" as const,
-              dirty: false,
-              preview: false,
-              overrideLanguage:
-                (t as { overrideLanguage?: string | null }).overrideLanguage ??
-                null,
-            };
-          }
-          if (mode === "raw" && t.kind === "html") {
-            return {
-              id: t.id,
-              kind: "editor" as const,
-              spaceId: t.spaceId,
-              cold: t.cold,
-              title: t.title,
-              path: t.path,
-              workspace: t.workspace,
-              dirty: false,
-              preview: false,
-              overrideLanguage: null,
-            };
-          }
-          if (mode === "rendered" && t.kind === "editor") {
-            if (t.dirty) return t;
-            if (html) {
-              return {
-                id: t.id,
-                kind: "html" as const,
-                spaceId: t.spaceId,
-                cold: t.cold,
-                title: t.title,
-                path: t.path,
-                workspace: t.workspace,
-              };
-            }
-            return {
-              id: t.id,
-              kind: "markdown" as const,
-              spaceId: t.spaceId,
-              cold: t.cold,
-              title: t.title,
-              path: t.path,
-              workspace: t.workspace,
-              overrideLanguage: t.overrideLanguage ?? null,
-            };
-          }
-          return t;
-        }),
-      );
+      setTabs((curr) => curr.map((t) => applyDocView(t, id, mode)));
     },
     [],
   );
