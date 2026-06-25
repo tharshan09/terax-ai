@@ -1,3 +1,5 @@
+import { Button } from "@/components/ui/button";
+import { openWithDefaultApp } from "@/lib/openWith";
 import { getCustomEndpointKey, getKey } from "@/modules/ai/lib/keyring";
 import { endpointIdFromCompatModel } from "@/modules/ai/config";
 import { usePreferencesStore } from "@/modules/settings/preferences";
@@ -465,6 +467,14 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
           <div className="text-xs text-muted-foreground">
             {formatBytes(doc.size)} · preview not supported
           </div>
+          <Button
+            variant="outline"
+            size="sm"
+            className="mt-2"
+            onClick={() => void openWithDefaultApp(path)}
+          >
+            Open with default app
+          </Button>
         </div>
       );
     }
