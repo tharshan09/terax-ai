@@ -4,6 +4,7 @@ import {
   checkReadableCanonical,
   checkShellCommand,
   checkWritable,
+  checkWritableCanonical,
 } from "./security";
 
 describe("checkReadable — secret basenames", () => {
@@ -159,6 +160,67 @@ describe("checkReadableCanonical — symlink defense + always-recheck", () => {
     );
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.canonical).toBe("/home/me/Documents/notes.txt");
+  });
+});
+
+describe("checkWritableCanonical — symlink defense for writes + new-file parent", () => {
+  it("catches a symlinked target that resolves into ~/.ssh", async () => {
+    const resolves = async (p: string) =>
+      p === "/home/me/innocent.txt" ? "/home/me/.ssh/id_rsa" : p;
+    const r = await checkWritableCanonical("/home/me/innocent.txt", resolves);
+    expect(r.ok).toBe(false);
+  });
+
+  it("catches a new file whose parent dir symlinks into a secret dir", async () => {
+    // Target doesn't exist (canonicalize throws), so the parent is canonicalized
+    // instead; the symlinked parent resolves into ~/.aws.
+    const resolves = async (p: string) => {
+      if (p === "/home/me/work/aws") return "/home/me/.aws";
+      throw new Error("ENOENT");
+    };
+    const r = await checkWritableCanonical(
+      "/home/me/work/aws/credentials",
+      resolves,
+    );
+    expect(r.ok).toBe(false);
+  });
+
+  it("rejects a literal secret path before canonicalizing", async () => {
+    const identity = async (p: string) => p;
+    const r = await checkWritableCanonical("/home/me/.env", identity);
+    expect(r.ok).toBe(false);
+  });
+
+  it("allows a new file under a normal parent, returning the joined canonical", async () => {
+    const resolves = async (p: string) => {
+      if (p === "/home/me/project") return "/home/me/project";
+      throw new Error("ENOENT");
+    };
+    const r = await checkWritableCanonical(
+      "/home/me/project/newfile.ts",
+      resolves,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.canonical).toBe("/home/me/project/newfile.ts");
+  });
+
+  it("passes a normal existing-file write through with its canonical path", async () => {
+    const identity = async (p: string) => p;
+    const r = await checkWritableCanonical(
+      "/home/me/project/notes.txt",
+      identity,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.canonical).toBe("/home/me/project/notes.txt");
+  });
+
+  it("falls through to ok when neither target nor parent exists", async () => {
+    const missing = async (_p: string) => {
+      throw new Error("ENOENT");
+    };
+    const r = await checkWritableCanonical("/home/me/ghost/file.txt", missing);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.canonical).toBe("/home/me/ghost/file.txt");
   });
 });
 
