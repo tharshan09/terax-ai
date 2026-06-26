@@ -63,6 +63,8 @@ export type GitStatusSnapshot = {
   ahead: number;
   behind: number;
   isDetached: boolean;
+  insertions: number;
+  deletions: number;
   truncated: boolean;
   changedFiles: GitChangedFile[];
 };

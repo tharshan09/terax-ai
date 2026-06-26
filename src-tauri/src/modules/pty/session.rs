@@ -123,7 +123,11 @@ pub fn spawn(
     };
     let pair = pty_system.openpty(size).map_err(|e| e.to_string())?;
 
-    let cmd = shell_init::build_command(cwd, workspace, blocks, shell)?;
+    let mut cmd = shell_init::build_command(cwd, workspace, blocks, shell)?;
+    // Lets a Claude Code statusLine wrapper attribute its stats to this exact
+    // tab (see modules::claude). Set parallel to TERAX_TERMINAL so it crosses
+    // the same boundaries; harmless over SSH (never reaches the remote host).
+    cmd.env("TERAX_PTY_ID", id.to_string());
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     drop(pair.slave);
 

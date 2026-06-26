@@ -64,7 +64,7 @@ fn merge_hooks(mut root: Value) -> Value {
     root
 }
 
-fn existing_config(contents: Option<&str>, path: &std::path::Path) -> Result<Value, String> {
+pub(crate) fn existing_config(contents: Option<&str>, path: &std::path::Path) -> Result<Value, String> {
     match contents {
         Some(s) if !s.trim().is_empty() => serde_json::from_str::<Value>(s).map_err(|e| {
             format!("{} is not valid JSON ({e}); refusing to overwrite", path.display())
@@ -73,7 +73,7 @@ fn existing_config(contents: Option<&str>, path: &std::path::Path) -> Result<Val
     }
 }
 
-fn settings_path() -> Result<std::path::PathBuf, String> {
+pub(crate) fn settings_path() -> Result<std::path::PathBuf, String> {
     Ok(dirs::home_dir()
         .ok_or_else(|| "could not resolve home dir".to_string())?
         .join(".claude")

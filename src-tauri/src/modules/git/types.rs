@@ -38,6 +38,9 @@ pub struct GitStatusSnapshot {
     pub ahead: u32,
     pub behind: u32,
     pub is_detached: bool,
+    // Working-tree line changes vs HEAD (tracked files), best-effort.
+    pub insertions: u32,
+    pub deletions: u32,
     pub truncated: bool,
     pub changed_files: Vec<GitChangedFile>,
 }

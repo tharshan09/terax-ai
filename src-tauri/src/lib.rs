@@ -1,6 +1,8 @@
 pub mod modules;
 
-use modules::{agent, fs, git, history, net, pty, secrets, shell, ssh, workspace};
+use modules::{
+    agent, claude, fs, git, history, net, pty, secrets, shell, ssh, workspace,
+};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 #[cfg(target_os = "macos")]
@@ -238,6 +240,10 @@ pub fn run() {
             open_settings_window,
             agent::agent_enable_claude_hooks,
             agent::agent_claude_hooks_status,
+            claude::claude_enable_statusline,
+            claude::claude_disable_statusline,
+            claude::claude_statusline_enabled,
+            claude::claude_status,
             secrets::secrets_get,
             secrets::secrets_set,
             secrets::secrets_delete,

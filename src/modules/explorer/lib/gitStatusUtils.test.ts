@@ -29,6 +29,8 @@ function snapshot(changedFiles: GitChangedFile[]): GitStatusSnapshot {
     ahead: 0,
     behind: 0,
     isDetached: false,
+    insertions: 0,
+    deletions: 0,
     truncated: false,
     changedFiles,
   };

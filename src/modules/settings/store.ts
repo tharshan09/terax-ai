@@ -15,6 +15,11 @@ import {
   type SttProvider,
 } from "@/modules/ai/config";
 import type { KeyBinding, ShortcutId } from "@/modules/shortcuts/shortcuts";
+import {
+  coerceStatusbarLayout,
+  DEFAULT_STATUSBAR_LAYOUT,
+  type StatusbarLayout,
+} from "@/modules/statusbar/layout";
 import type { ClipboardWriteMode } from "@/modules/terminal/lib/osc-handlers";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { LazyStore } from "@tauri-apps/plugin-store";
@@ -166,6 +171,7 @@ export type Preferences = {
   shortcuts: Record<ShortcutId, KeyBinding[]>;
   editorAutoSave: boolean;
   editorAutoSaveDelay: number;
+  statusbarLayout: StatusbarLayout;
 };
 
 const STORE_PATH = "terax-settings.json";
@@ -221,6 +227,7 @@ const KEY_AGENT_NOTIFICATIONS = "agentNotifications";
 const KEY_SHORTCUTS = "shortcuts";
 const KEY_EDITOR_AUTO_SAVE = "editorAutoSave";
 const KEY_EDITOR_AUTO_SAVE_DELAY = "editorAutoSaveDelay";
+const KEY_STATUSBAR_LAYOUT = "statusbarLayout";
 
 export const TERMINAL_FONT_SIZE_DEFAULT = 14;
 export const TERMINAL_FONT_SIZE_MIN = 8;
@@ -289,6 +296,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   shortcuts: {} as Record<ShortcutId, KeyBinding[]>,
   editorAutoSave: false,
   editorAutoSaveDelay: 1000,
+  statusbarLayout: DEFAULT_STATUSBAR_LAYOUT,
 };
 
 const store = new LazyStore(STORE_PATH, { defaults: {}, autoSave: 200 });
@@ -460,6 +468,7 @@ export async function loadPreferences(): Promise<Preferences> {
       get<number>(KEY_EDITOR_AUTO_SAVE_DELAY) ??
         DEFAULT_PREFERENCES.editorAutoSaveDelay,
     ),
+    statusbarLayout: coerceStatusbarLayout(get(KEY_STATUSBAR_LAYOUT)),
   };
 }
 
@@ -738,6 +747,16 @@ export async function resetShortcuts(): Promise<void> {
   await writePref(KEY_SHORTCUTS, DEFAULT_PREFERENCES.shortcuts);
 }
 
+export async function setStatusbarLayout(
+  value: StatusbarLayout,
+): Promise<void> {
+  await writePref(KEY_STATUSBAR_LAYOUT, value);
+}
+
+export async function resetStatusbarLayout(): Promise<void> {
+  await writePref(KEY_STATUSBAR_LAYOUT, DEFAULT_STATUSBAR_LAYOUT);
+}
+
 export type PrefKey = keyof Preferences;
 
 /** Subscribe to changes from any window (settings → main). */
@@ -796,6 +815,7 @@ export async function onPreferencesChange(
     [KEY_SHORTCUTS]: "shortcuts",
     [KEY_EDITOR_AUTO_SAVE]: "editorAutoSave",
     [KEY_EDITOR_AUTO_SAVE_DELAY]: "editorAutoSaveDelay",
+    [KEY_STATUSBAR_LAYOUT]: "statusbarLayout",
   };
   // Same-process writes still fire onChange immediately; cross-window writes
   // arrive via the Tauri event emitted by writePref().

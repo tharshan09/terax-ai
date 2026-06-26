@@ -1240,6 +1240,8 @@ export default function App() {
               privateActive={
                 activeTab?.kind === "terminal" && activeTab.private === true
               }
+              sourceControl={sourceControl}
+              activeLeafId={activeLeafId}
             />
           )}
 

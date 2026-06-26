@@ -146,6 +146,7 @@ fn status_inner(repo_root: &ResolvedGitDirectory) -> Result<GitStatusSnapshot> {
 
     let stdout = std::str::from_utf8(&output.stdout).unwrap_or("");
     let parsed = parse_porcelain_v2(stdout);
+    let (insertions, deletions) = working_tree_line_changes(repo_root);
 
     Ok(GitStatusSnapshot {
         repo_root: repo_root.git_path.clone(),
@@ -154,9 +155,32 @@ fn status_inner(repo_root: &ResolvedGitDirectory) -> Result<GitStatusSnapshot> {
         ahead: parsed.ahead,
         behind: parsed.behind,
         is_detached: parsed.is_detached,
+        insertions,
+        deletions,
         truncated: output.truncated,
         changed_files: parsed.files,
     })
+}
+
+/// Total insertions/deletions in the working tree vs HEAD (tracked files).
+/// Best-effort: an unborn branch or any git failure yields (0, 0) rather than
+/// failing the whole status snapshot. Mirrors `git diff HEAD`, so untracked
+/// files are not counted.
+fn working_tree_line_changes(repo_root: &ResolvedGitDirectory) -> (u32, u32) {
+    let Ok(output) = run_git(
+        &repo_root.workspace,
+        Some(&repo_root.git_path),
+        ["diff", "HEAD", "--shortstat", "--no-ext-diff"],
+        DEFAULT_TIMEOUT_SECS,
+    ) else {
+        return (0, 0);
+    };
+    if output.exit_code != Some(0) {
+        return (0, 0);
+    }
+    let stdout = std::str::from_utf8(&output.stdout).unwrap_or("");
+    let (_files, insertions, deletions) = parse_shortstat(stdout);
+    (insertions, deletions)
 }
 
 pub fn diff(
@@ -1408,5 +1432,49 @@ mod tests {
         );
         assert!(validate_worktree_branch_name(&WorkspaceEnv::Local, &root, "bad.lock").is_err());
         assert!(validate_worktree_branch_name(&WorkspaceEnv::Local, &root, "bad?ref").is_err());
+    }
+
+    #[test]
+    fn working_tree_line_changes_counts_diff_vs_head() {
+        let git_ok = std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .ok()
+            .is_some_and(|o| o.status.success());
+        if !git_ok {
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let run = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .output()
+                .expect("git")
+                .status
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@example.com"]);
+        run(&["config", "user.name", "Test"]);
+        std::fs::write(root.join("f.txt"), "a\nb\nc\n").expect("write");
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "init"]);
+
+        let rgd = ResolvedGitDirectory {
+            workspace: WorkspaceEnv::Local,
+            git_path: root.to_string_lossy().to_string(),
+            local_path: root.to_path_buf(),
+        };
+
+        // Clean tree: nothing changed vs HEAD.
+        assert_eq!(working_tree_line_changes(&rgd), (0, 0));
+
+        // Modify "b" -> "B" (1 ins + 1 del) and append "d" (1 ins) => (2, 1).
+        std::fs::write(root.join("f.txt"), "a\nB\nc\nd\n").expect("write");
+        assert_eq!(working_tree_line_changes(&rgd), (2, 1));
     }
 }

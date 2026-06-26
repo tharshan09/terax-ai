@@ -33,6 +33,8 @@ export type SourceControlSummary = {
   upstream: string | null;
   ahead: number;
   behind: number;
+  insertions: number;
+  deletions: number;
   hasRepo: boolean;
   isLoading: boolean;
   localError: string | null;
@@ -482,6 +484,8 @@ export function useSourceControl(
       upstream: state.status?.upstream ?? state.repo?.upstream ?? null,
       ahead: state.status?.ahead ?? 0,
       behind: state.status?.behind ?? 0,
+      insertions: state.status?.insertions ?? 0,
+      deletions: state.status?.deletions ?? 0,
       hasRepo: state.hasRepo,
       isLoading: state.isLoading,
       localError: state.localError,
