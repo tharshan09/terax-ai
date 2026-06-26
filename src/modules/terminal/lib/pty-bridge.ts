@@ -23,6 +23,7 @@ export async function openPty(
   blocks?: boolean,
   workspace?: WorkspaceEnv,
   shell?: string,
+  tmuxSession?: string,
 ): Promise<PtySession> {
   // Raw bytes — no base64/JSON round-trip; messages arrive as ArrayBuffer.
   const onData = new Channel<ArrayBuffer>();
@@ -53,6 +54,7 @@ export async function openPty(
     workspace: workspace ?? currentWorkspaceEnv(),
     blocks: blocks ?? false,
     shell: shell ?? null,
+    tmuxSession: tmuxSession ?? null,
     onData,
     onExit,
   });

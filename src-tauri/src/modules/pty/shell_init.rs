@@ -55,19 +55,34 @@ pub fn build_command(
     workspace: WorkspaceEnv,
     blocks: bool,
     shell: Option<String>,
+    tmux_session: Option<String>,
 ) -> Result<CommandBuilder, String> {
+    let tmux_session = validate_tmux_session(tmux_session)?;
     let shell = sanitize_shell_override(shell);
     if let WorkspaceEnv::Ssh { host } = &workspace {
-        return build_ssh(host, cwd);
+        return build_ssh(host, cwd, tmux_session.as_deref());
     }
     #[cfg(unix)]
     {
         let _ = workspace;
-        unix::build(cwd, blocks, shell)
+        unix::build(cwd, blocks, shell, tmux_session.as_deref())
     }
     #[cfg(windows)]
     {
-        windows::build(cwd, workspace, blocks, shell)
+        windows::build(cwd, workspace, blocks, shell, tmux_session.as_deref())
+    }
+}
+
+/// Validate a tmux session-name override from the frontend. `None` stays `None`;
+/// a present but unsafe name is a hard error (never silently dropped, unlike a
+/// shell override) since it dictates what the terminal launches. The allowlist
+/// lives in [`crate::modules::tmux`] so the listing and the launch agree on what
+/// is attachable.
+fn validate_tmux_session(name: Option<String>) -> Result<Option<String>, String> {
+    match name.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        None => Ok(None),
+        Some(name) if crate::modules::tmux::is_valid_session_name(&name) => Ok(Some(name)),
+        Some(name) => Err(format!("invalid tmux session name: {name:?}")),
     }
 }
 
@@ -79,7 +94,14 @@ pub fn build_command(
 /// no Terax binary needs to be installed on the host. bash and zsh get the
 /// hook; any other shell still opens, just without cwd tracking. The temp rc
 /// lives under `mktemp -d` for the session's lifetime.
-const REMOTE_SHELL_INIT: &str = r#"__terax_dir="$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/.terax-$$")"
+///
+/// `TERAX_REMOTE=1` is exported first so a user's own `~/.bashrc` login hook
+/// (e.g. an interactive tmux session picker) can skip itself under Terax, which
+/// drives session selection through the in-app switcher instead. It is a
+/// dedicated marker, kept distinct from `TERAX_TERMINAL` so it cannot trip the
+/// Claude Code agent-notification hooks that gate on the latter.
+const REMOTE_SHELL_INIT: &str = r#"export TERAX_REMOTE=1
+__terax_dir="$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/.terax-$$")"
 mkdir -p "$__terax_dir" 2>/dev/null
 __terax_shell="${SHELL:-/bin/bash}"
 case "$__terax_shell" in
@@ -112,7 +134,11 @@ esac
 /// [`crate::modules::ssh::control_args`]) lets later filesystem calls reuse
 /// this connection, and [`REMOTE_SHELL_INIT`] installs OSC 7 cwd reporting on
 /// the remote shell.
-fn build_ssh(host: &str, _cwd: Option<String>) -> Result<CommandBuilder, String> {
+fn build_ssh(
+    host: &str,
+    _cwd: Option<String>,
+    tmux_session: Option<&str>,
+) -> Result<CommandBuilder, String> {
     crate::modules::ssh::validate_ssh_host(host)?;
     // The terminal establishes the shared ControlMaster; record it so the socket
     // is torn down on quit.
@@ -124,10 +150,26 @@ fn build_ssh(host: &str, _cwd: Option<String>) -> Result<CommandBuilder, String>
     }
     cmd.arg(host);
     // Single arg → ssh forwards it verbatim as the remote command (run by the
-    // remote login shell), so the multi-line script needs no extra quoting.
-    cmd.arg(REMOTE_SHELL_INIT);
+    // remote login shell), so neither script needs extra quoting.
+    match tmux_session {
+        Some(session) => {
+            cmd.arg(remote_tmux_command(session));
+        }
+        None => {
+            cmd.arg(REMOTE_SHELL_INIT);
+        }
+    }
     cmd.env("TERM", "xterm-256color");
     Ok(cmd)
+}
+
+/// Remote command that attaches to, or creates, `session` in tmux. `session` is
+/// allowlist-validated upstream (`[A-Za-z0-9_-]`), so single-quoting is
+/// injection-safe with no escaping. The OSC 7 rc bootstrap is intentionally
+/// skipped: tmux runs its own shells and does not reliably propagate it, so cwd
+/// tracking inside tmux is best-effort and simply absent rather than wrong.
+fn remote_tmux_command(session: &str) -> String {
+    format!("exec tmux new-session -A -s '{session}'")
 }
 
 // Honor the override only if it matches an enumerated shell, so a tampered
@@ -342,7 +384,20 @@ mod unix {
         cwd: Option<String>,
         blocks: bool,
         shell_override: Option<String>,
+        tmux_session: Option<&str>,
     ) -> Result<CommandBuilder, String> {
+        if let Some(session) = tmux_session {
+            // Attach-or-create the session directly. tmux runs the user's login
+            // shell inside, without our OSC 7/133 hooks, so cwd tracking in a
+            // tmux tab is best-effort (absent) rather than wrong.
+            let mut cmd = CommandBuilder::new("tmux");
+            cmd.arg("new-session");
+            cmd.arg("-A");
+            cmd.arg("-s");
+            cmd.arg(session);
+            super::apply_common(&mut cmd, cwd, blocks);
+            return Ok(cmd);
+        }
         let (shell, shell_path) = Shell::resolve(shell_override);
         let mut cmd = CommandBuilder::new(&shell_path);
         super::apply_common(&mut cmd, cwd, blocks);
@@ -545,11 +600,15 @@ mod windows {
         workspace: WorkspaceEnv,
         blocks: bool,
         shell: Option<String>,
+        tmux_session: Option<&str>,
     ) -> Result<CommandBuilder, String> {
         if let WorkspaceEnv::Wsl { distro } = workspace {
             let _ = (blocks, shell);
-            return build_wsl(cwd, distro);
+            return build_wsl(cwd, distro, tmux_session);
         }
+        // Native Windows has no tmux; the remote (SSH) tmux path is handled
+        // before the platform split, so a Windows host still drives remote ones.
+        let _ = tmux_session;
         let shell_path = shell
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -605,8 +664,29 @@ mod windows {
         Ok(cmd)
     }
 
-    fn build_wsl(cwd: Option<String>, distro: String) -> Result<CommandBuilder, String> {
+    fn build_wsl(
+        cwd: Option<String>,
+        distro: String,
+        tmux_session: Option<&str>,
+    ) -> Result<CommandBuilder, String> {
         crate::modules::workspace::validate_wsl_distro_name(&distro)?;
+        if let Some(session) = tmux_session {
+            // Attach-or-create the session inside the distro. `--exec` runs tmux
+            // via execvp (no shell), and the name is allowlist-validated upstream
+            // (validate_tmux_session), so no quoting is needed. tmux runs its own
+            // shells, so the OSC 7/133 integration is intentionally skipped, like
+            // the unix and SSH tmux paths.
+            let mut cmd = CommandBuilder::new("wsl.exe");
+            for arg in wsl_tmux_args(cwd.as_deref(), &distro, session) {
+                cmd.arg(arg);
+            }
+            cmd.env("TERM", "xterm-256color");
+            cmd.env("COLORTERM", "truecolor");
+            cmd.env("TERAX_TERMINAL", "1");
+            super::ensure_utf8_locale(&mut cmd);
+            log::info!("spawning WSL tmux: {distro} -> {session}");
+            return Ok(cmd);
+        }
         let shell_path = crate::modules::workspace::wsl_login_shell(distro.clone())?;
         let shell_kind = ShellKind::from_path(&shell_path);
         let integration = match shell_kind {
@@ -669,6 +749,25 @@ mod windows {
         super::ensure_utf8_locale(&mut cmd);
         log::info!("spawning WSL shell: {distro} ({shell_path})");
         Ok(cmd)
+    }
+
+    /// `wsl.exe` argv for attaching/creating a tmux session inside `distro`.
+    /// Pure so the launch contract is unit-testable without a live WSL probe.
+    /// `session` is allowlist-validated upstream; `--exec` bypasses the shell, so
+    /// each arg is passed verbatim to execvp (no quoting/splice surface).
+    fn wsl_tmux_args(cwd: Option<&str>, distro: &str, session: &str) -> Vec<String> {
+        vec![
+            "-d".to_string(),
+            distro.to_string(),
+            "--cd".to_string(),
+            cwd.filter(|s| !s.is_empty()).unwrap_or("~").to_string(),
+            "--exec".to_string(),
+            "tmux".to_string(),
+            "new-session".to_string(),
+            "-A".to_string(),
+            "-s".to_string(),
+            session.to_string(),
+        ]
     }
 
     fn build_wsl_launch_spec(
@@ -901,6 +1000,19 @@ mod windows {
         use super::*;
 
         #[test]
+        fn wsl_tmux_args_attach_or_create_with_no_shell_splice() {
+            assert_eq!(
+                wsl_tmux_args(Some("/home/u/repo"), "Ubuntu", "main").join(" "),
+                "-d Ubuntu --cd /home/u/repo --exec tmux new-session -A -s main"
+            );
+            // Empty/None cwd falls back to the home shorthand.
+            assert_eq!(
+                wsl_tmux_args(None, "Debian", "work_1").join(" "),
+                "-d Debian --cd ~ --exec tmux new-session -A -s work_1"
+            );
+        }
+
+        #[test]
         fn builds_wsl_zsh_launch_spec_with_env_and_login() {
             let spec = build_wsl_launch_spec(
                 Some("/home/vinicios/repo"),
@@ -1098,7 +1210,7 @@ fn which_in_path(name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_shell_override;
+    use super::{remote_tmux_command, sanitize_shell_override, validate_tmux_session};
 
     #[test]
     fn rejects_non_enumerated_override() {
@@ -1113,5 +1225,59 @@ mod tests {
     fn empty_or_missing_override_is_none() {
         assert_eq!(sanitize_shell_override(Some("   ".into())), None);
         assert_eq!(sanitize_shell_override(None), None);
+    }
+
+    #[test]
+    fn validate_tmux_session_accepts_safe_names() {
+        assert_eq!(validate_tmux_session(None).unwrap(), None);
+        assert_eq!(
+            validate_tmux_session(Some("  main ".into())).unwrap(),
+            Some("main".to_string())
+        );
+        assert_eq!(
+            validate_tmux_session(Some("review-pr_2".into())).unwrap(),
+            Some("review-pr_2".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_tmux_session_rejects_injection() {
+        for bad in [
+            "a;rm -rf ~",
+            "a b",
+            "$(id)",
+            "a'b",
+            "a`id`",
+            "a|b",
+            "a.b",
+            "-x",
+            "a$(touch /tmp/x)",
+        ] {
+            assert!(
+                validate_tmux_session(Some(bad.into())).is_err(),
+                "must reject {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_tmux_command_single_quotes_the_name() {
+        assert_eq!(
+            remote_tmux_command("main"),
+            "exec tmux new-session -A -s 'main'"
+        );
+        assert_eq!(
+            remote_tmux_command("review-pr_2"),
+            "exec tmux new-session -A -s 'review-pr_2'"
+        );
+    }
+
+    #[test]
+    fn remote_shell_init_exports_terax_remote_first() {
+        // The marker must be exported before the user's rc is sourced so a
+        // ~/.bashrc login picker can self-skip under Terax.
+        assert!(super::REMOTE_SHELL_INIT.starts_with("export TERAX_REMOTE=1\n"));
+        // It must stay distinct from TERAX_TERMINAL (agent-hook gating).
+        assert!(!super::REMOTE_SHELL_INIT.contains("TERAX_TERMINAL"));
     }
 }

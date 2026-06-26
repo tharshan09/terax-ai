@@ -110,6 +110,28 @@ describe("hydrateTabs", () => {
     expect(restored.cwd).toBe("/b");
   });
 
+  it("round-trips the tmux session binding (tab + leaf) and titles by it", () => {
+    const tabs: Tab[] = [
+      term({
+        paneTree: { kind: "leaf", id: 2, cwd: "~", tmuxSession: "main" },
+        activeLeafId: 2,
+        tmuxSession: "main",
+        title: "main",
+      }),
+    ];
+    const serialized = serializeTabs(tabs);
+    const node = serialized[0] as Extract<SerializedTab, { kind: "terminal" }>;
+    expect(node.tmuxSession).toBe("main");
+
+    const [restored] = hydrateTabs(serialized, "s1", counter());
+    if (restored.kind !== "terminal") throw new Error("expected terminal");
+    expect(restored.tmuxSession).toBe("main");
+    // No customTitle, cwd "~": the session name must drive the restored title.
+    expect(restored.title).toBe("main");
+    const leaf = restored.paneTree;
+    expect(leaf.kind === "leaf" && leaf.tmuxSession).toBe("main");
+  });
+
   it("allocates fresh, unique, monotonic ids across all tabs and leaves", () => {
     const tree: PaneNode = {
       kind: "split",

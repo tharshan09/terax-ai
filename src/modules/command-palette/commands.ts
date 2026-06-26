@@ -43,6 +43,7 @@ export type CommandPaletteActionContext = {
   openNewPrivate: () => void;
   openNewEditor: () => void;
   openNewPreview: () => void;
+  openTmuxSwitcher: () => void;
   openGitGraph: () => void;
   toggleSourceControl: () => void;
   closeActiveTabOrPane: () => void;
@@ -159,6 +160,15 @@ export function createCommandItems(
       icon: IncognitoIcon,
       shortcutId: "tab.newPrivate",
       run: ctx.openNewPrivate,
+    },
+    {
+      id: "terminal.tmux_sessions",
+      title: "Tmux: Switch session",
+      group: "Tabs",
+      keywords: ["tmux", "session", "switch", "attach", "terminal", "multiplex"],
+      icon: TerminalIcon,
+      shortcutId: "terminal.tmux_sessions",
+      run: ctx.openTmuxSwitcher,
     },
     {
       id: "tab.newEditor",
