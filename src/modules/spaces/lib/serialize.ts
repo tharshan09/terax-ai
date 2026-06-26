@@ -15,7 +15,7 @@ import type {
 import type { WorkspaceEnv } from "@/modules/workspace";
 
 export type SerializedNode =
-  | { kind: "leaf"; cwd?: string; active?: boolean }
+  | { kind: "leaf"; cwd?: string; active?: boolean; tmuxSession?: string }
   | { kind: "split"; dir: SplitDir; children: SerializedNode[] };
 
 export type SerializedTab =
@@ -27,6 +27,9 @@ export type SerializedTab =
       /** Remote env (SSH/WSL) so a restored tab keeps its identity instead of
        *  silently respawning/reading on the LOCAL machine. Absent == Local. */
       workspace?: WorkspaceEnv;
+      /** tmux session this tab is attached to, so a restored tab re-attaches
+       *  (`tmux new-session -A`) instead of respawning a plain shell. */
+      tmuxSession?: string;
     }
   | { kind: "editor"; path: string; workspace?: WorkspaceEnv }
   | { kind: "preview"; url: string }
@@ -47,6 +50,7 @@ function serializeNode(node: PaneNode, activeLeafId: number): SerializedNode {
       kind: "leaf",
       ...(node.cwd !== undefined && { cwd: node.cwd }),
       ...(node.id === activeLeafId && { active: true }),
+      ...(node.tmuxSession !== undefined && { tmuxSession: node.tmuxSession }),
     };
   }
   return {
@@ -81,6 +85,7 @@ function serializeTab(tab: Tab): SerializedTab | null {
         ...(tab.blocks && { blocks: true }),
         ...(tab.customTitle !== undefined && { customTitle: tab.customTitle }),
         ...(ws && { workspace: ws }),
+        ...(tab.tmuxSession !== undefined && { tmuxSession: tab.tmuxSession }),
       };
     }
     case "editor": {
@@ -129,6 +134,7 @@ function hydrateNode(
       kind: "leaf",
       id,
       ...(node.cwd !== undefined && { cwd: node.cwd }),
+      ...(node.tmuxSession !== undefined && { tmuxSession: node.tmuxSession }),
     };
   }
   const children = node.children.map((c) => hydrateNode(c, allocId, acc));
@@ -165,6 +171,7 @@ function hydrateTab(
       const { tree, activeLeafId, firstLeafCwd } = hydrateTree(s.tree, allocId);
       const title =
         s.customTitle ??
+        s.tmuxSession ??
         (firstLeafCwd ? basename(firstLeafCwd) : s.blocks ? "blocks" : "shell");
       return {
         id: allocId(),
@@ -178,6 +185,7 @@ function hydrateTab(
         ...(s.blocks && { blocks: true }),
         ...(s.customTitle !== undefined && { customTitle: s.customTitle }),
         ...(s.workspace && { workspace: s.workspace }),
+        ...(s.tmuxSession !== undefined && { tmuxSession: s.tmuxSession }),
       } satisfies TerminalTab;
     }
     case "editor":

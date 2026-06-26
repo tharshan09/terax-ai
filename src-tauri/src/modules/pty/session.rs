@@ -108,6 +108,7 @@ pub fn spawn(
     workspace: WorkspaceEnv,
     blocks: bool,
     shell: Option<String>,
+    tmux_session: Option<String>,
     on_data: Channel<Response>,
     on_exit: Channel<i32>,
 ) -> Result<(Arc<Session>, PtySize), String> {
@@ -123,7 +124,8 @@ pub fn spawn(
     };
     let pair = pty_system.openpty(size).map_err(|e| e.to_string())?;
 
-    let mut cmd = shell_init::build_command(cwd, workspace, blocks, shell)?;
+    let mut cmd =
+        shell_init::build_command(cwd, workspace, blocks, shell, tmux_session)?;
     // Lets a Claude Code statusLine wrapper attribute its stats to this exact
     // tab (see modules::claude). Set parallel to TERAX_TERMINAL so it crosses
     // the same boundaries; harmless over SSH (never reaches the remote host).

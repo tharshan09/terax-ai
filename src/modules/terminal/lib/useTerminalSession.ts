@@ -63,9 +63,15 @@ type Callbacks = {
 type Session = {
   pty: PtySession | null;
   ptyOpening: boolean;
+  /** Bumped on every open/respawn so a superseded async open closes its now
+   *  orphaned PTY instead of overwriting the latest one (a leaked live ssh/tmux
+   *  connection). The last spawn wins. */
+  spawnEpoch: number;
   initialCwd: string | undefined;
   /** Execution env for this leaf's PTY. Locked at session creation. */
   workspace: WorkspaceEnv | undefined;
+  /** tmux session to attach on spawn (a tmux tab's first pane only). */
+  tmuxSession: string | undefined;
   lastCwd: string | null;
   pendingExit: number | null;
   shellExited: boolean;
@@ -443,6 +449,7 @@ function ensureSession(
   initialCwd?: string,
   blocks = false,
   workspace?: WorkspaceEnv,
+  tmuxSession?: string,
 ): Session {
   const existing = sessions.get(leafId);
   if (existing) return existing;
@@ -450,8 +457,10 @@ function ensureSession(
   const session: Session = {
     pty: null,
     ptyOpening: false,
+    spawnEpoch: 0,
     initialCwd,
     workspace,
+    tmuxSession,
     lastCwd: null,
     pendingExit: null,
     shellExited: false,
@@ -564,6 +573,7 @@ async function openPtyForSession(
     s.blocks,
     s.workspace,
     usePreferencesStore.getState().terminalShell || undefined,
+    s.tmuxSession,
   );
   // Only resize if the bound dims changed during the spawn: a same-size
   // ResizePseudoConsole during conhost warmup is a known ConPTY trigger for
@@ -711,13 +721,16 @@ function attachSession(
 
   if (!s.pty && !s.ptyOpening && !s.shellExited) {
     s.ptyOpening = true;
+    const epoch = ++s.spawnEpoch;
     openPtyWithRetry(leafId, s, s.initialCwd)
       .then((pty) => {
-        s.ptyOpening = false;
-        if (s.disposed) {
+        // A respawn/reattach superseded this open while it was in flight: close
+        // the now orphaned PTY instead of clobbering the latest one.
+        if (s.disposed || epoch !== s.spawnEpoch) {
           pty.close();
           return;
         }
+        s.ptyOpening = false;
         s.pty = pty;
         if (s.pendingInput) {
           void pty.write(s.pendingInput);
@@ -726,6 +739,7 @@ function attachSession(
         if (s.cols > 0 && s.rows > 0) pty.resize(s.cols, s.rows);
       })
       .catch((e) => {
+        if (epoch !== s.spawnEpoch) return;
         s.ptyOpening = false;
         if (!s.disposed) surfaceSpawnFailure(leafId, s, e);
       });
@@ -746,7 +760,15 @@ export async function respawnSession(
 ): Promise<void> {
   const s = sessions.get(leafId);
   if (!s || s.disposed) return;
-  s.pty?.close();
+  // Claim this respawn: a later respawn/reattach (e.g. attaching a second tmux
+  // session before the slow SSH close resolves) bumps the epoch, and the loser
+  // bails instead of stomping the winner's state or orphaning its PTY.
+  const epoch = ++s.spawnEpoch;
+  // Await the close so the old ssh client (and any ControlMaster it owns) is
+  // fully torn down before the replacement connects; reopening into a master
+  // mid-teardown loses the remote pty (a tmux attach then dies in 0ms).
+  await s.pty?.close();
+  if (s.disposed || epoch !== s.spawnEpoch) return;
   s.pty = null;
   s.snapshot = null;
   s.dormantRing = new DormantRing();
@@ -772,21 +794,45 @@ export async function respawnSession(
   try {
     pty = await openPtyWithRetry(leafId, s, cwd ?? s.initialCwd);
   } catch (e) {
+    if (epoch !== s.spawnEpoch) return;
     s.ptyOpening = false;
     if (!s.disposed) surfaceSpawnFailure(leafId, s, e);
     return;
   }
-  s.ptyOpening = false;
-  if (s.disposed) {
+  if (s.disposed || epoch !== s.spawnEpoch) {
     pty.close();
     return;
   }
+  s.ptyOpening = false;
   s.pty = pty;
   if (s.pendingInput) {
     void pty.write(s.pendingInput);
     s.pendingInput = "";
   }
   if (s.cols > 0 && s.rows > 0) pty.resize(s.cols, s.rows);
+}
+
+/** Re-attach this leaf to a different tmux session in place: rebinds the
+ *  session and respawns the PTY, which re-runs `tmux new-session -A -s <name>`.
+ *  Safe regardless of what runs in the foreground - the old tmux session is
+ *  detached on the server, not killed, so nothing is typed into it. */
+export async function reattachLeafTmux(
+  leafId: number,
+  session: string,
+): Promise<void> {
+  const s = sessions.get(leafId);
+  if (!s || s.disposed) return;
+  s.tmuxSession = session;
+  await respawnSession(leafId);
+}
+
+/** Update a leaf's in-memory tmux binding without respawning. Used when the
+ *  live shell is already inside the session (the typed `tmux new-session -A`
+ *  attach, or a server-side rename), so a later respawn re-runs the same
+ *  attach instead of dropping back to a plain shell. */
+export function setLeafTmuxBinding(leafId: number, session: string): void {
+  const s = sessions.get(leafId);
+  if (s && !s.disposed) s.tmuxSession = session;
 }
 
 export async function leafHasForegroundProcess(
@@ -839,6 +885,8 @@ type Options = {
   visible: boolean;
   focused?: boolean;
   initialCwd?: string;
+  /** tmux session this leaf attaches on spawn (tmux tab's first pane only). */
+  tmuxSession?: string;
   blocks?: boolean;
   /** Execution env for the PTY this leaf spawns. Locked at session creation;
    *  switching a tab's env is not a concept — open a new tab instead. */
@@ -854,6 +902,7 @@ export function useTerminalSession({
   visible,
   focused = true,
   initialCwd,
+  tmuxSession,
   blocks = false,
   workspace,
   onSearchReady,
@@ -871,7 +920,13 @@ export function useTerminalSession({
 
   useEffect(() => {
     let cancelled = false;
-    const s = ensureSession(leafId, initialCwdRef.current, blocks, workspace);
+    const s = ensureSession(
+      leafId,
+      initialCwdRef.current,
+      blocks,
+      workspace,
+      tmuxSession,
+    );
     s.ready.then(() => {
       if (cancelled || s.disposed) return;
       const node = container.current;
@@ -892,7 +947,13 @@ export function useTerminalSession({
   const [blockMode, setBlockMode] = useState<BlockMode>("prompt");
   useEffect(() => {
     if (!blocks) return;
-    const s = ensureSession(leafId, initialCwdRef.current, blocks, workspace);
+    const s = ensureSession(
+      leafId,
+      initialCwdRef.current,
+      blocks,
+      workspace,
+      tmuxSession,
+    );
     setBlockMode(s.blockMode);
     const cb = () => setBlockMode(sessions.get(leafId)?.blockMode ?? "prompt");
     s.blockListeners.add(cb);

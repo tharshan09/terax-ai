@@ -2,7 +2,6 @@ import { useCallback, useMemo } from "react";
 import { native } from "@/modules/ai/lib/native";
 import type { SidebarViewId } from "@/modules/sidebar";
 import type { Tab } from "@/modules/tabs";
-import { useWorkspaceEnvStore } from "@/modules/workspace";
 import { useSourceControl } from "./useSourceControl";
 
 function dirname(path: string | null): string | null {
@@ -77,11 +76,10 @@ export function useSourceControlContext({
   const sourceControlPath = sourceControlActive
     ? sourceControlContextPath
     : badgeContextPath;
-  // Git is not routed over SSH yet — disabling the summary stops it from running
-  // the local `git` binary against a remote-named path (which would surface /
-  // mutate a same-named local repo) and clears the rail badge.
-  const isSsh = useWorkspaceEnvStore((s) => s.env.kind === "ssh");
-  const sourceControl = useSourceControl(sourceControlPath, !isSsh);
+  // Git is routed over SSH now: the Rust git layer runs on the host over the
+  // shared ControlMaster, so the summary stays enabled on every workspace and
+  // the rail badge reflects the remote repo you are navigating.
+  const sourceControl = useSourceControl(sourceControlPath, true);
 
   const toggleSourceControl = useCallback(() => {
     cycleSidebarView("source-control");

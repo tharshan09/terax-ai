@@ -8,6 +8,7 @@ import {
   removeLeaf,
   type SplitDir,
   setLeafCwd as setLeafCwdInTree,
+  setLeafTmuxSession as setLeafTmuxSessionInTree,
   siblingLeafOf,
   splitLeaf,
 } from "@/modules/terminal/lib/panes";
@@ -40,6 +41,12 @@ export type TerminalTab = TabBase & {
    * Switching a tab's env is not a concept — open a new tab instead.
    */
   workspace?: WorkspaceEnv;
+  /** tmux session this tab is attached to, if any. Drives the title and marks
+   *  the tab as tmux-bound for the session switcher. */
+  tmuxSession?: string;
+  /** Transient: an SSH tab that should pop the tmux picker once its shell
+   *  connects (cleared after the first prompt). Not meant to persist. */
+  pickTmuxOnConnect?: boolean;
   /** AI agent cannot read buffer / context of this terminal. */
   private?: boolean;
   /** User-set label that overrides the cwd-derived name. Survives cd. */
@@ -463,10 +470,70 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         paneTree: { kind: "leaf", id: leafId, cwd: "~" },
         activeLeafId: leafId,
         workspace,
+        pickTmuxOnConnect: true,
       },
     ]);
     setActiveId(tabId);
     return tabId;
+  }, []);
+
+  // Opens a terminal tab attached to (or creating) a tmux session. Only the
+  // initial leaf carries the session, so it alone launches
+  // `tmux new-session -A -s <session>`; later splits are plain shells. The tab
+  // inherits the current workspace so the session lands on the host the user is
+  // already on (the SSH box), not a fresh local shell.
+  const newTmuxTab = useCallback(
+    (session: string, workspace: WorkspaceEnv = currentWorkspaceEnv()) => {
+      const tabId = nextIdRef.current++;
+      const leafId = nextIdRef.current++;
+      const cwd = workspace.kind === "ssh" ? "~" : undefined;
+      setTabs((t) => [
+        ...t,
+        {
+          id: tabId,
+          kind: "terminal",
+          spaceId: activeSpaceIdRef.current,
+          title: session,
+          cwd,
+          paneTree: { kind: "leaf", id: leafId, cwd, tmuxSession: session },
+          activeLeafId: leafId,
+          workspace,
+          tmuxSession: session,
+        },
+      ]);
+      setActiveId(tabId);
+      return tabId;
+    },
+    [],
+  );
+
+  // Re-points the active tab (and its focused leaf) at a different tmux session.
+  // The live re-attach is driven by reattachLeafTmux; this keeps the tab's
+  // binding and title in sync so the switcher and tab strip reflect the change.
+  const rebindTmuxSession = useCallback((tabId: number, session: string) => {
+    setTabs((ts) =>
+      ts.map((t) => {
+        if (t.id !== tabId || t.kind !== "terminal") return t;
+        const paneTree = setLeafTmuxSessionInTree(
+          t.paneTree,
+          t.activeLeafId,
+          session,
+        );
+        return { ...t, tmuxSession: session, title: session, paneTree };
+      }),
+    );
+  }, []);
+
+  // Clears the one-shot "pop the tmux picker on connect" flag for an SSH tab
+  // once it has fired, so a later `cd` does not re-open the picker.
+  const consumeTmuxPick = useCallback((tabId: number) => {
+    setTabs((ts) =>
+      ts.map((t) =>
+        t.id === tabId && t.kind === "terminal" && t.pickTmuxOnConnect
+          ? { ...t, pickTmuxOnConnect: false }
+          : t,
+      ),
+    );
   }, []);
 
   useEffect(() => {
@@ -1113,6 +1180,9 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     newTab,
     newBlockTab,
     newSshTab,
+    newTmuxTab,
+    rebindTmuxSession,
+    consumeTmuxPick,
     newAgentTab,
     newPrivateTab,
     openFileTab,

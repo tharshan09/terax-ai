@@ -15,6 +15,7 @@ use crate::modules::git::types::{
     GitOutput, TextSource, DEFAULT_TIMEOUT_SECS, MAX_FILE_BYTES, MAX_OUTPUT_BYTES,
     MAX_TIMEOUT_SECS, MIN_GIT_VERSION,
 };
+use crate::modules::ssh::{control_args, note_connected_host, validate_ssh_host};
 use crate::modules::workspace::WorkspaceEnv;
 #[cfg(windows)]
 use crate::modules::workspace::validate_wsl_distro_name;
@@ -306,12 +307,12 @@ where
 }
 
 fn build_git_command(
-    _workspace: &WorkspaceEnv,
+    workspace: &WorkspaceEnv,
     cwd: Option<&str>,
     args: &[OsString],
 ) -> Result<Command> {
     #[cfg(windows)]
-    if let WorkspaceEnv::Wsl { distro } = _workspace {
+    if let WorkspaceEnv::Wsl { distro } = workspace {
         validate_wsl_distro_name(distro)
             .map_err(|_| GitError::command("unsafe WSL distro name", distro.clone()))?;
         let mut cmd = Command::new("wsl.exe");
@@ -324,12 +325,102 @@ fn build_git_command(
         return Ok(cmd);
     }
 
+    // Remote workspace: run git on the host over the shared ControlMaster, the
+    // same multiplexed connection the terminal/FS already use. The whole git
+    // invocation is one shell-quoted string so no arg can break argument
+    // parsing or inject into the remote shell. BatchMode means a host with no
+    // open master fails fast (auth error) rather than hanging on a prompt; the
+    // fix is to open the terminal first, which classify_auth_error surfaces.
+    if let WorkspaceEnv::Ssh { host } = workspace {
+        validate_ssh_host(host)
+            .map_err(|_| GitError::command("unsafe ssh host", host.clone()))?;
+        note_connected_host(host);
+        let remote = remote_git_command(cwd, args);
+        let mut cmd = Command::new("ssh");
+        cmd.arg("-T")
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg("ConnectTimeout=10");
+        for opt in control_args() {
+            cmd.arg(opt);
+        }
+        cmd.arg(host).arg(remote);
+        return Ok(cmd);
+    }
+
     let mut cmd = Command::new("git");
     cmd.args(args);
     if let Some(dir) = cwd.filter(|s| !s.is_empty()) {
         cmd.current_dir(Path::new(dir));
     }
     Ok(cmd)
+}
+
+/// Build the single remote shell command for `ssh <host> <cmd>`. Every arg is
+/// POSIX single-quoted so paths, refs, pathspecs and format strings reach the
+/// remote git verbatim with zero shell-injection surface. The env prefix
+/// reaches the *remote* git (ssh does not forward our local env), pinning
+/// non-interactive, lock-free, locale-stable behaviour.
+fn remote_git_command(cwd: Option<&str>, args: &[OsString]) -> String {
+    let mut cmd = String::from("GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 LC_ALL=C git");
+    if let Some(dir) = cwd.filter(|s| !s.is_empty()) {
+        cmd.push_str(" -C ");
+        cmd.push_str(&quote_remote_path(dir));
+    }
+    for arg in args {
+        cmd.push(' ');
+        cmd.push_str(&quote_remote_arg(&arg.to_string_lossy()));
+    }
+    cmd
+}
+
+/// POSIX single-quote: wrap in `'…'`, rewriting any embedded `'` as `'\''`.
+/// The result expands to the literal input in any POSIX shell.
+fn quote_remote_arg(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Quote a remote path for `git -C`. A leading `~` / `~user` segment is emitted
+/// unquoted so the remote shell expands it to the home directory (the ssh tab
+/// seeds its cwd to `~`, and the first `git -C ~ rev-parse` must resolve it);
+/// the remainder is single-quoted. A non-word tilde segment (e.g. `~$(x)`) is
+/// quoted whole so it can never expand.
+fn quote_remote_path(path: &str) -> String {
+    if path == "~" {
+        return "~".to_string();
+    }
+    if let Some(rest) = path.strip_prefix('~') {
+        let (user, tail) = match rest.find('/') {
+            Some(i) => (&rest[..i], &rest[i..]),
+            None => (rest, ""),
+        };
+        let user_ok = user
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if user_ok {
+            let mut out = String::from("~");
+            out.push_str(user);
+            if let Some(after) = tail.strip_prefix('/') {
+                out.push('/');
+                if !after.is_empty() {
+                    out.push_str(&quote_remote_arg(after));
+                }
+            }
+            return out;
+        }
+    }
+    quote_remote_arg(path)
 }
 
 pub fn ensure_success(output: &GitOutput, context: &'static str) -> Result<()> {
@@ -409,18 +500,19 @@ fn drain<R: Read>(reader: &mut R, prealloc: usize) -> (Vec<u8>, bool) {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(windows)]
-    use super::build_git_command;
     use super::{
-        parse_git_version, prune_expired_availability_entries, version_meets_minimum, Availability,
-        AvailabilityCache, AVAILABILITY_TTL,
+        build_git_command, parse_git_version, prune_expired_availability_entries,
+        quote_remote_arg, quote_remote_path, remote_git_command, version_meets_minimum,
+        Availability, AvailabilityCache, AVAILABILITY_TTL,
     };
-    #[cfg(windows)]
     use crate::modules::workspace::WorkspaceEnv;
     use std::collections::HashMap;
-    #[cfg(windows)]
     use std::ffi::OsString;
     use std::time::{Duration, Instant};
+
+    fn osargs(parts: &[&str]) -> Vec<OsString> {
+        parts.iter().map(OsString::from).collect()
+    }
 
     #[test]
     fn extracts_simple_version() {
@@ -519,5 +611,110 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("unsafe WSL distro name"));
+    }
+
+    #[test]
+    fn quote_remote_arg_wraps_and_escapes() {
+        assert_eq!(quote_remote_arg("status"), "'status'");
+        assert_eq!(quote_remote_arg("a b"), "'a b'");
+        // A literal single quote becomes the classic '\'' close-escape-reopen.
+        assert_eq!(quote_remote_arg("it's"), "'it'\\''s'");
+        // Shell metacharacters survive verbatim inside the quotes — no expansion.
+        assert_eq!(quote_remote_arg("$(id)"), "'$(id)'");
+        assert_eq!(quote_remote_arg("a;rm -rf /"), "'a;rm -rf /'");
+        assert_eq!(quote_remote_arg("%H%x1f%s"), "'%H%x1f%s'");
+    }
+
+    #[test]
+    fn quote_remote_path_handles_absolute_and_tilde() {
+        assert_eq!(quote_remote_path("/home/u/repo"), "'/home/u/repo'");
+        assert_eq!(quote_remote_path("~"), "~");
+        assert_eq!(quote_remote_path("~/repo"), "~/'repo'");
+        assert_eq!(quote_remote_path("~/sub dir/x"), "~/'sub dir/x'");
+        assert_eq!(quote_remote_path("~deploy/repo"), "~deploy/'repo'");
+        assert_eq!(quote_remote_path("~deploy"), "~deploy");
+    }
+
+    #[test]
+    fn quote_remote_path_quotes_crafted_tilde_segment_whole() {
+        // A non-word char in the tilde segment must NOT be left unquoted, or it
+        // could expand on the remote shell. Fall back to quoting the whole path.
+        assert_eq!(quote_remote_path("~$(evil)/x"), "'~$(evil)/x'");
+        assert_eq!(quote_remote_path("~a b/x"), "'~a b/x'");
+    }
+
+    #[test]
+    fn remote_git_command_builds_quoted_invocation() {
+        let cmd = remote_git_command(
+            Some("/home/u/repo"),
+            &osargs(&["status", "--porcelain=v2", "-z"]),
+        );
+        assert_eq!(
+            cmd,
+            "GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 LC_ALL=C git -C '/home/u/repo' \
+             'status' '--porcelain=v2' '-z'"
+        );
+    }
+
+    #[test]
+    fn remote_git_command_omits_dash_c_without_cwd() {
+        let cmd = remote_git_command(None, &osargs(&["--version"]));
+        assert_eq!(
+            cmd,
+            "GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 LC_ALL=C git '--version'"
+        );
+        // Empty cwd is treated as no cwd (no `-C ''`).
+        let cmd = remote_git_command(Some(""), &osargs(&["--version"]));
+        assert!(!cmd.contains(" -C "));
+    }
+
+    #[test]
+    fn remote_git_command_neutralizes_injection_in_path_and_args() {
+        let cmd = remote_git_command(
+            Some("/repo; rm -rf /"),
+            &osargs(&["log", "$(touch pwned)"]),
+        );
+        // The dangerous fragments are inside single quotes — the remote shell
+        // sees them as literal git arguments, never as commands.
+        assert!(cmd.contains("'/repo; rm -rf /'"));
+        assert!(cmd.contains("'$(touch pwned)'"));
+        assert!(!cmd.contains("; rm -rf / "));
+    }
+
+    #[test]
+    fn build_git_command_ssh_wraps_remote_invocation() {
+        let cmd = build_git_command(
+            &WorkspaceEnv::Ssh {
+                host: "litha-claude".into(),
+            },
+            Some("/home/claude/repo"),
+            &osargs(&["status", "--porcelain=v2"]),
+        )
+        .expect("valid ssh host");
+        assert_eq!(cmd.get_program().to_string_lossy(), "ssh");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.iter().any(|a| a == "-T"));
+        assert!(args.iter().any(|a| a == "BatchMode=yes"));
+        assert!(args.iter().any(|a| a == "litha-claude"));
+        // The final arg is the single shell-quoted remote command string.
+        let remote = args.last().expect("remote command arg");
+        assert!(remote.starts_with("GIT_TERMINAL_PROMPT=0"));
+        assert!(remote.contains("git -C '/home/claude/repo' 'status' '--porcelain=v2'"));
+    }
+
+    #[test]
+    fn build_git_command_ssh_rejects_unsafe_host() {
+        let err = build_git_command(
+            &WorkspaceEnv::Ssh {
+                host: "-oProxyCommand=evil".into(),
+            },
+            None,
+            &[],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unsafe ssh host"));
     }
 }

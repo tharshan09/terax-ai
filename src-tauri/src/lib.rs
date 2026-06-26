@@ -1,7 +1,7 @@
 pub mod modules;
 
 use modules::{
-    agent, claude, fs, git, history, net, pty, secrets, shell, ssh, workspace,
+    agent, claude, fs, git, history, net, pty, secrets, shell, ssh, tmux, workspace,
 };
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -231,6 +231,9 @@ pub fn run() {
             shell::shell_bg_kill,
             shell::shell_bg_list,
             ssh::ssh_list_hosts,
+            tmux::tmux_list_sessions,
+            tmux::tmux_kill_session,
+            tmux::tmux_rename_session,
             workspace::wsl_list_distros,
             workspace::wsl_default_distro,
             workspace::wsl_home,

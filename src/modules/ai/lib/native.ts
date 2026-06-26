@@ -301,170 +301,137 @@ export const native = {
         exit_code: number | null;
       }[]
     >("shell_bg_list"),
-  // Git is not routed over SSH yet — every git op below runs the LOCAL `git`
-  // binary, so a same-named local repo could be shown/committed/pushed while an
-  // SSH workspace is active. Guard them all until git is SSH-aware.
+  // Git is routed over SSH: each op threads the active workspace and the Rust
+  // git layer runs the command on the host over the shared ControlMaster (read,
+  // diff, log, branches, checkout, stage/commit, fetch/pull/push). Only remote
+  // worktree CREATION stays guarded — it needs remote home resolution + mkdir,
+  // which the SSH workspace does not provide yet.
   gitResolveRepo: (cwd: string) =>
-    guardSsh("gitResolveRepo", () =>
-      invoke<GitRepoInfo | null>("git_resolve_repo", {
-        cwd,
-        workspace: currentWorkspaceEnv(),
-      }),
-    ),
+    invoke<GitRepoInfo | null>("git_resolve_repo", {
+      cwd,
+      workspace: currentWorkspaceEnv(),
+    }),
   gitPanelSnapshot: (cwd: string) =>
-    guardSsh("gitPanelSnapshot", () =>
-      invoke<GitPanelSnapshot>("git_panel_snapshot", {
-        cwd,
-        workspace: currentWorkspaceEnv(),
-      }),
-    ),
+    invoke<GitPanelSnapshot>("git_panel_snapshot", {
+      cwd,
+      workspace: currentWorkspaceEnv(),
+    }),
   gitStatus: (repoRoot: string) =>
-    guardSsh("gitStatus", () =>
-      invoke<GitStatusSnapshot>("git_status", {
-        repoRoot,
-        workspace: currentWorkspaceEnv(),
-      }),
-    ),
+    invoke<GitStatusSnapshot>("git_status", {
+      repoRoot,
+      workspace: currentWorkspaceEnv(),
+    }),
   gitDiff: (repoRoot: string, path: string | null, staged: boolean) =>
-    guardSsh("gitDiff", () =>
-      invoke<GitDiffResult>("git_diff", {
-        repoRoot,
-        path,
-        staged,
-        workspace: currentWorkspaceEnv(),
-      }),
-    ),
+    invoke<GitDiffResult>("git_diff", {
+      repoRoot,
+      path,
+      staged,
+      workspace: currentWorkspaceEnv(),
+    }),
   gitDiffContent: (
     repoRoot: string,
     path: string,
     staged: boolean,
     originalPath?: string | null,
   ) =>
-    guardSsh("gitDiffContent", () =>
-      invoke<GitDiffContentResult>("git_diff_content", {
-        repoRoot,
-        path,
-        staged,
-        originalPath: originalPath ?? null,
-        workspace: currentWorkspaceEnv(),
-      }),
-    ),
+    invoke<GitDiffContentResult>("git_diff_content", {
+      repoRoot,
+      path,
+      staged,
+      originalPath: originalPath ?? null,
+      workspace: currentWorkspaceEnv(),
+    }),
   gitStage: (repoRoot: string, paths: string[]) =>
-    guardSsh("gitStage", () =>
-      invoke<void>("git_stage", {
-        repoRoot,
-        paths,
-        workspace: currentWorkspaceEnv(),
-      }),
-    ),
+    invoke<void>("git_stage", {
+      repoRoot,
+      paths,
+      workspace: currentWorkspaceEnv(),
+    }),
   gitUnstage: (repoRoot: string, paths: string[]) =>
-    guardSsh("gitUnstage", () =>
-      invoke<void>("git_unstage", {
-        repoRoot,
-        paths,
-        workspace: currentWorkspaceEnv(),
-      }),
-    ),
+    invoke<void>("git_unstage", {
+      repoRoot,
+      paths,
+      workspace: currentWorkspaceEnv(),
+    }),
   gitDiscard: (repoRoot: string, entries: GitDiscardEntry[]) =>
-    guardSsh("gitDiscard", () =>
-      invoke<void>("git_discard", {
-        repoRoot,
-        entries,
-        workspace: currentWorkspaceEnv(),
-      }),
-    ),
+    invoke<void>("git_discard", {
+      repoRoot,
+      entries,
+      workspace: currentWorkspaceEnv(),
+    }),
   gitCommit: (repoRoot: string, message: string) =>
-    guardSsh("gitCommit", () =>
-      invoke<GitCommitResult>("git_commit", {
-        repoRoot,
-        message,
-        workspace: currentWorkspaceEnv(),
-      }),
-    ),
+    invoke<GitCommitResult>("git_commit", {
+      repoRoot,
+      message,
+      workspace: currentWorkspaceEnv(),
+    }),
   gitFetch: (repoRoot: string) =>
-    guardSsh("gitFetch", () =>
-      invoke<void>("git_fetch", {
-        repoRoot,
-        workspace: currentWorkspaceEnv(),
-      }),
-    ),
+    invoke<void>("git_fetch", {
+      repoRoot,
+      workspace: currentWorkspaceEnv(),
+    }),
   gitPullFfOnly: (repoRoot: string) =>
-    guardSsh("gitPullFfOnly", () =>
-      invoke<void>("git_pull_ff_only", {
-        repoRoot,
-        workspace: currentWorkspaceEnv(),
-      }),
-    ),
+    invoke<void>("git_pull_ff_only", {
+      repoRoot,
+      workspace: currentWorkspaceEnv(),
+    }),
   gitPush: (repoRoot: string) =>
-    guardSsh("gitPush", () =>
-      invoke<GitPushResult>("git_push", {
-        repoRoot,
-        workspace: currentWorkspaceEnv(),
-      }),
-    ),
+    invoke<GitPushResult>("git_push", {
+      repoRoot,
+      workspace: currentWorkspaceEnv(),
+    }),
   gitLog: (repoRoot: string, options?: { limit?: number; beforeSha?: string }) =>
-    guardSsh("gitLog", () =>
-      invoke<GitLogEntry[]>("git_log", {
-        repoRoot,
-        limit: options?.limit ?? null,
-        beforeSha: options?.beforeSha ?? null,
-        workspace: currentWorkspaceEnv(),
-      }),
-    ),
+    invoke<GitLogEntry[]>("git_log", {
+      repoRoot,
+      limit: options?.limit ?? null,
+      beforeSha: options?.beforeSha ?? null,
+      workspace: currentWorkspaceEnv(),
+    }),
   gitShowCommit: (repoRoot: string, sha: string) =>
-    guardSsh("gitShowCommit", () =>
-      invoke<GitDiffResult>("git_show_commit", {
-        repoRoot,
-        sha,
-        workspace: currentWorkspaceEnv(),
-      }),
-    ),
+    invoke<GitDiffResult>("git_show_commit", {
+      repoRoot,
+      sha,
+      workspace: currentWorkspaceEnv(),
+    }),
   gitCommitFiles: (repoRoot: string, sha: string) =>
-    guardSsh("gitCommitFiles", () =>
-      invoke<GitCommitFileChange[]>("git_commit_files", {
-        repoRoot,
-        sha,
-        workspace: currentWorkspaceEnv(),
-      }),
-    ),
+    invoke<GitCommitFileChange[]>("git_commit_files", {
+      repoRoot,
+      sha,
+      workspace: currentWorkspaceEnv(),
+    }),
   gitCommitFileDiff: (
     repoRoot: string,
     sha: string,
     path: string,
     originalPath?: string | null,
   ) =>
-    guardSsh("gitCommitFileDiff", () =>
-      invoke<GitDiffContentResult>("git_commit_file_diff", {
-        repoRoot,
-        sha,
-        path,
-        originalPath: originalPath ?? null,
-        workspace: currentWorkspaceEnv(),
-      }),
-    ),
+    invoke<GitDiffContentResult>("git_commit_file_diff", {
+      repoRoot,
+      sha,
+      path,
+      originalPath: originalPath ?? null,
+      workspace: currentWorkspaceEnv(),
+    }),
   gitRemoteUrl: (repoRoot: string, name?: string) =>
-    guardSsh("gitRemoteUrl", () =>
-      invoke<string | null>("git_remote_url", {
-        repoRoot,
-        name: name ?? null,
-        workspace: currentWorkspaceEnv(),
-      }),
-    ),
+    invoke<string | null>("git_remote_url", {
+      repoRoot,
+      name: name ?? null,
+      workspace: currentWorkspaceEnv(),
+    }),
   gitListBranches: (repoRoot: string) =>
-    guardSsh("gitListBranches", () =>
-      invoke<GitBranchListResult>("git_list_branches", {
-        repoRoot,
-        workspace: currentWorkspaceEnv(),
-      }),
-    ),
+    invoke<GitBranchListResult>("git_list_branches", {
+      repoRoot,
+      workspace: currentWorkspaceEnv(),
+    }),
   gitCheckoutBranch: (repoRoot: string, branch: string) =>
-    guardSsh("gitCheckoutBranch", () =>
-      invoke<void>("git_checkout_branch", {
-        repoRoot,
-        branch,
-        workspace: currentWorkspaceEnv(),
-      }),
-    ),
+    invoke<void>("git_checkout_branch", {
+      repoRoot,
+      branch,
+      workspace: currentWorkspaceEnv(),
+    }),
+  // Worktree CREATION is the one git surface not yet routed over SSH (needs a
+  // remote home + mkdir). Keep both halves of the flow guarded so the popover
+  // fails clearly instead of suggesting a name it then cannot create.
   gitSuggestWorktreeName: (repoRoot: string, userInput?: string | null) =>
     guardSsh("gitSuggestWorktreeName", () =>
       invoke<GitWorktreeNameSuggestion>("git_suggest_worktree_name", {

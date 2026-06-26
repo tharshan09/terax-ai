@@ -24,10 +24,7 @@ import {
 } from "@/modules/ai";
 import { AiComposerProvider } from "@/modules/ai/lib/composer";
 import { native } from "@/modules/ai/lib/native";
-import {
-  CommandPalette,
-  createCommandItems,
-} from "@/modules/command-palette";
+import { CommandPalette, createCommandItems } from "@/modules/command-palette";
 import {
   NewEditorDialog,
   useEditorFileSync,
@@ -74,10 +71,19 @@ import {
   hasLeaf,
   leafIds,
   navigateFocusedBlocks,
+  reattachLeafTmux,
+  setLeafTmuxBinding,
+  submitToLeaf,
   type TerminalPaneHandle,
+  type TmuxPickerTarget,
+  TmuxSessionSwitcher,
   useTerminalFileDrop,
   writeToSession,
 } from "@/modules/terminal";
+import {
+  isValidSessionName,
+  listTmuxSessions,
+} from "@/modules/terminal/lib/tmux";
 import {
   SpaceSwitcher,
   useSpaces,
@@ -105,6 +111,19 @@ import { useAppCloseGuard } from "./hooks/useAppCloseGuard";
 import { useTabCloseGuards } from "./hooks/useTabCloseGuards";
 import { useWorkspaceSwitcher } from "./hooks/useWorkspaceSwitcher";
 
+function tmuxTargetForTab(tab: {
+  id: number;
+  activeLeafId: number;
+  workspace?: WorkspaceEnv;
+}): TmuxPickerTarget {
+  return {
+    tabId: tab.id,
+    leafId: tab.activeLeafId,
+    workspace: tab.workspace,
+    host: tab.workspace?.kind === "ssh" ? tab.workspace.host : undefined,
+  };
+}
+
 export default function App() {
   const {
     tabs,
@@ -122,6 +141,9 @@ export default function App() {
     newTab,
     newBlockTab,
     newSshTab,
+    newTmuxTab,
+    rebindTmuxSession,
+    consumeTmuxPick,
     newAgentTab,
     newPrivateTab,
     openFileTab,
@@ -158,6 +180,8 @@ export default function App() {
     return t && t.kind === "terminal" ? t : null;
   }, [tabs, activeId]);
   const activeLeafId = activeTerminalTab?.activeLeafId ?? null;
+  const activeTerminalTabRef = useRef(activeTerminalTab);
+  activeTerminalTabRef.current = activeTerminalTab;
 
   const searchAddons = useRef<Map<number, SearchAddon>>(new Map());
   const [activeSearchAddon, setActiveSearchAddon] =
@@ -243,7 +267,9 @@ export default function App() {
     const prev = prevSpaceRef.current;
     prevSpaceRef.current = activeSpaceId;
     if (prev === null || prev === activeSpaceId) return;
-    const meta = useSpaces.getState().spaces.find((s) => s.id === activeSpaceId);
+    const meta = useSpaces
+      .getState()
+      .spaces.find((s) => s.id === activeSpaceId);
     if (meta) void adoptWorkspaceEnv(meta.env);
     const inSpace = tabsRef.current.filter((t) => t.spaceId === activeSpaceId);
     if (inSpace.length === 0) return;
@@ -261,6 +287,7 @@ export default function App() {
   ]);
 
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [tmuxTarget, setTmuxTarget] = useState<TmuxPickerTarget | null>(null);
 
   const spaceTabs = useMemo(
     () => tabs.filter((t) => t.spaceId === (activeSpaceId ?? DEFAULT_SPACE_ID)),
@@ -414,7 +441,10 @@ export default function App() {
   // the Ctrl+Tab quick switcher so it cycles by recency, not strip order.
   const mruRef = useRef<number[]>([activeId]);
   useEffect(() => {
-    mruRef.current = [activeId, ...mruRef.current.filter((id) => id !== activeId)];
+    mruRef.current = [
+      activeId,
+      ...mruRef.current.filter((id) => id !== activeId),
+    ];
   }, [activeId]);
   useEffect(() => {
     const live = new Set(tabs.map((t) => t.id));
@@ -498,7 +528,7 @@ export default function App() {
       return;
     }
     const selection = captureActiveSelection();
-    if (!selection || !selection.trim()) {
+    if (!selection?.trim()) {
       focusInput(null);
       return;
     }
@@ -661,7 +691,6 @@ export default function App() {
     [newPreviewTab],
   );
 
-
   const splitActivePaneInActiveTab = useCallback(
     (dir: "row" | "col") => {
       const t = tabsRef.current.find((x) => x.id === activeId);
@@ -698,6 +727,12 @@ export default function App() {
       "space.next": () => cycleSpace(1),
       "space.prev": () => cycleSpace(-1),
       "space.overview": () => setSwitcherOpen(true),
+      "terminal.tmux_sessions": () =>
+        setTmuxTarget((cur) => {
+          if (cur) return null;
+          const tab = activeTerminalTabRef.current;
+          return tab ? tmuxTargetForTab(tab) : null;
+        }),
       "pane.splitRight": () => splitActivePaneInActiveTab("row"),
       "pane.splitDown": () => splitActivePaneInActiveTab("col"),
       "pane.focusNext": () => focusNextPaneInTab(activeId, 1),
@@ -834,6 +869,36 @@ export default function App() {
     [updateTab],
   );
 
+  // First cwd report on an SSH tab marked `pickTmuxOnConnect` means its shell
+  // has connected (ControlMaster up); pop the tmux picker once, unless tmux is
+  // absent on the host (then leave the plain shell alone).
+  const triggeredTmuxPick = useRef(new Set<number>());
+  const tryAutoPickTmux = useCallback(
+    (leafId: number) => {
+      const tab = tabsRef.current.find(
+        (t) => t.kind === "terminal" && hasLeaf(t.paneTree, leafId),
+      );
+      if (!tab || tab.kind !== "terminal" || !tab.pickTmuxOnConnect) return;
+      if (triggeredTmuxPick.current.has(tab.id)) return;
+      triggeredTmuxPick.current.add(tab.id);
+      consumeTmuxPick(tab.id);
+      const tgt = tmuxTargetForTab(tab);
+      // The probe is a slow SSH round trip; only open if nothing else grabbed
+      // the picker meanwhile (a manual Cmd+Shift+M) and the tab still exists,
+      // so a late auto-pop neither clobbers a manual target nor pops on a dead tab.
+      const applyAutoPick = () =>
+        setTmuxTarget((cur) =>
+          cur ?? (tabsRef.current.some((t) => t.id === tgt.tabId) ? tgt : null),
+        );
+      listTmuxSessions(tab.workspace)
+        .then(applyAutoPick)
+        .catch((e: unknown) => {
+          if (!String(e).includes("not installed")) applyAutoPick();
+        });
+    },
+    [consumeTmuxPick],
+  );
+
   const authorizedCwds = useRef(new Set<string>());
   const handleTerminalCwd = useCallback(
     (leafId: number, cwd: string) => {
@@ -844,8 +909,9 @@ export default function App() {
           authorizedCwds.current.delete(cwd);
         });
       }
+      tryAutoPickTmux(leafId);
     },
-    [setLeafCwd],
+    [setLeafCwd, tryAutoPickTmux],
   );
 
   const handleFocusLeaf = useCallback(
@@ -971,8 +1037,9 @@ export default function App() {
 
   const handleNewTabInSpace = useCallback(
     (spaceId: string) => {
-      const root = useSpaces.getState().spaces.find((s) => s.id === spaceId)
-        ?.root;
+      const root = useSpaces
+        .getState()
+        .spaces.find((s) => s.id === spaceId)?.root;
       newTabInSpace(spaceId, root ?? undefined);
     },
     [newTabInSpace],
@@ -1019,6 +1086,10 @@ export default function App() {
             openNewPrivate: openNewPrivateTab,
             openNewEditor: () => setNewEditorOpen(true),
             openNewPreview: () => openPreviewTab(""),
+            openTmuxSwitcher: () => {
+              const tab = activeTerminalTabRef.current;
+              if (tab) setTmuxTarget(tmuxTargetForTab(tab));
+            },
             openGitGraph: openGitGraphFromContext,
             toggleSourceControl,
             closeActiveTabOrPane: handleCloseTabOrPane,
@@ -1147,7 +1218,10 @@ export default function App() {
                 }}
               >
                 <div className="flex h-full min-h-0 flex-col border-r border-border/60 bg-card">
-                  <div key={sidebarView} className="min-h-0 flex-1 terax-panel-in">
+                  <div
+                    key={sidebarView}
+                    className="min-h-0 flex-1 terax-panel-in"
+                  >
                     {sidebarView === "explorer" ? (
                       <FileExplorer
                         ref={explorerRef}
@@ -1287,6 +1361,59 @@ export default function App() {
             workspaceRoot={explorerRoot}
             onOpenContentHit={openContentHit}
             insertCommand={insertHistoryCommand}
+          />
+
+          <TmuxSessionSwitcher
+            target={tmuxTarget}
+            onOpenChange={(o) => {
+              if (!o) setTmuxTarget(null);
+            }}
+            onAttachHere={(name) => {
+              if (!tmuxTarget) return;
+              // Mirror the backend allowlist (is_valid_session_name): the name is
+              // spliced into a shell command below, so never rely solely on the
+              // picker's UI gate to keep the splice injection-safe.
+              if (!isValidSessionName(name)) return;
+              const tab = tabsRef.current.find(
+                (t) => t.id === tmuxTarget.tabId,
+              );
+              const alreadyInTmux =
+                tab?.kind === "terminal" && Boolean(tab.tmuxSession);
+              rebindTmuxSession(tmuxTarget.tabId, name);
+              if (alreadyInTmux) {
+                // Already inside a tmux session: reconnect attached to the new
+                // one (respawn handles the in-tmux case).
+                void reattachLeafTmux(tmuxTarget.leafId, name);
+              } else {
+                // Fresh shell just connected: run the attach over the live
+                // connection so there is no ControlMaster teardown race. Record
+                // the binding too so a later respawn reattaches instead of
+                // dropping back to a plain shell.
+                setLeafTmuxBinding(tmuxTarget.leafId, name);
+                submitToLeaf(
+                  tmuxTarget.leafId,
+                  `tmux new-session -A -s '${name}'`,
+                );
+              }
+              setTmuxTarget(null);
+            }}
+            onOpenInNewTab={(name) => {
+              newTmuxTab(name, tmuxTarget?.workspace);
+              setTmuxTarget(null);
+            }}
+            onRenamed={(from, to) => {
+              // Keep the tab binding/title and the live session in sync when the
+              // currently attached session is renamed, so its label tracks the
+              // change and a respawn reattaches to the new name (not a fresh one).
+              if (!tmuxTarget) return;
+              const tab = tabsRef.current.find(
+                (t) => t.id === tmuxTarget.tabId,
+              );
+              if (tab?.kind === "terminal" && tab.tmuxSession === from) {
+                rebindTmuxSession(tmuxTarget.tabId, to);
+                setLeafTmuxBinding(tmuxTarget.leafId, to);
+              }
+            }}
           />
 
           <NewEditorDialog
