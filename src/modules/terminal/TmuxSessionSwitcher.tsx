@@ -45,6 +45,9 @@ type Props = {
   onAttachHere: (session: string) => void;
   /** Open the chosen session in its own new tab on the same host. */
   onOpenInNewTab: (session: string) => void;
+  /** A session was renamed on the host (only fires on success), so the caller
+   *  can keep a tab bound to the old name in sync. */
+  onRenamed?: (from: string, to: string) => void;
 };
 
 const isMac =
@@ -56,6 +59,7 @@ export function TmuxSessionSwitcher({
   onOpenChange,
   onAttachHere,
   onOpenInNewTab,
+  onRenamed,
 }: Props) {
   const open = target !== null;
   const workspace = target?.workspace;
@@ -94,6 +98,7 @@ export function TmuxSessionSwitcher({
   };
   const renameSession = (from: string, to: string) => {
     void renameTmuxSession(workspace, from, to)
+      .then(() => onRenamed?.(from, to))
       .catch((e) => console.error("[terax] tmux rename failed:", e))
       .finally(() => void refresh(workspace));
   };
@@ -308,8 +313,8 @@ function SessionItem({
         )}
       />
       {renaming ? (
-        // biome-ignore lint/a11y/noAutofocus: focusing the rename field is the point
         <input
+          // biome-ignore lint/a11y/noAutofocus: focusing the rename field is the point
           autoFocus
           value={draft}
           onChange={(e) => setDraft(e.target.value)}

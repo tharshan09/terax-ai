@@ -40,4 +40,16 @@ describe("labelFor (terminal tabs)", () => {
   it("handles Windows-style cwd separators", () => {
     expect(labelFor(terminalTab({ cwd: "C:\\Users\\me\\proj" }))).toBe("proj");
   });
+
+  it("shows the tmux session name instead of the (always '~') cwd", () => {
+    expect(
+      labelFor(terminalTab({ cwd: "~", tmuxSession: "main" })),
+    ).toBe("main");
+  });
+
+  it("lets a custom title still win over the tmux session", () => {
+    expect(
+      labelFor(terminalTab({ cwd: "~", tmuxSession: "main", customTitle: "Server" })),
+    ).toBe("Server");
+  });
 });

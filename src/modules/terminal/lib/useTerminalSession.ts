@@ -63,6 +63,10 @@ type Callbacks = {
 type Session = {
   pty: PtySession | null;
   ptyOpening: boolean;
+  /** Bumped on every open/respawn so a superseded async open closes its now
+   *  orphaned PTY instead of overwriting the latest one (a leaked live ssh/tmux
+   *  connection). The last spawn wins. */
+  spawnEpoch: number;
   initialCwd: string | undefined;
   /** Execution env for this leaf's PTY. Locked at session creation. */
   workspace: WorkspaceEnv | undefined;
@@ -449,6 +453,7 @@ function ensureSession(
   const session: Session = {
     pty: null,
     ptyOpening: false,
+    spawnEpoch: 0,
     initialCwd,
     workspace,
     tmuxSession,
@@ -712,13 +717,16 @@ function attachSession(
 
   if (!s.pty && !s.ptyOpening && !s.shellExited) {
     s.ptyOpening = true;
+    const epoch = ++s.spawnEpoch;
     openPtyWithRetry(leafId, s, s.initialCwd)
       .then((pty) => {
-        s.ptyOpening = false;
-        if (s.disposed) {
+        // A respawn/reattach superseded this open while it was in flight: close
+        // the now orphaned PTY instead of clobbering the latest one.
+        if (s.disposed || epoch !== s.spawnEpoch) {
           pty.close();
           return;
         }
+        s.ptyOpening = false;
         s.pty = pty;
         if (s.pendingInput) {
           void pty.write(s.pendingInput);
@@ -727,6 +735,7 @@ function attachSession(
         if (s.cols > 0 && s.rows > 0) pty.resize(s.cols, s.rows);
       })
       .catch((e) => {
+        if (epoch !== s.spawnEpoch) return;
         s.ptyOpening = false;
         if (!s.disposed) surfaceSpawnFailure(leafId, s, e);
       });
@@ -747,10 +756,15 @@ export async function respawnSession(
 ): Promise<void> {
   const s = sessions.get(leafId);
   if (!s || s.disposed) return;
+  // Claim this respawn: a later respawn/reattach (e.g. attaching a second tmux
+  // session before the slow SSH close resolves) bumps the epoch, and the loser
+  // bails instead of stomping the winner's state or orphaning its PTY.
+  const epoch = ++s.spawnEpoch;
   // Await the close so the old ssh client (and any ControlMaster it owns) is
   // fully torn down before the replacement connects; reopening into a master
   // mid-teardown loses the remote pty (a tmux attach then dies in 0ms).
   await s.pty?.close();
+  if (s.disposed || epoch !== s.spawnEpoch) return;
   s.pty = null;
   s.snapshot = null;
   s.dormantRing = new DormantRing();
@@ -776,15 +790,16 @@ export async function respawnSession(
   try {
     pty = await openPtyWithRetry(leafId, s, cwd ?? s.initialCwd);
   } catch (e) {
+    if (epoch !== s.spawnEpoch) return;
     s.ptyOpening = false;
     if (!s.disposed) surfaceSpawnFailure(leafId, s, e);
     return;
   }
-  s.ptyOpening = false;
-  if (s.disposed) {
+  if (s.disposed || epoch !== s.spawnEpoch) {
     pty.close();
     return;
   }
+  s.ptyOpening = false;
   s.pty = pty;
   if (s.pendingInput) {
     void pty.write(s.pendingInput);
@@ -805,6 +820,15 @@ export async function reattachLeafTmux(
   if (!s || s.disposed) return;
   s.tmuxSession = session;
   await respawnSession(leafId);
+}
+
+/** Update a leaf's in-memory tmux binding without respawning. Used when the
+ *  live shell is already inside the session (the typed `tmux new-session -A`
+ *  attach, or a server-side rename), so a later respawn re-runs the same
+ *  attach instead of dropping back to a plain shell. */
+export function setLeafTmuxBinding(leafId: number, session: string): void {
+  const s = sessions.get(leafId);
+  if (s && !s.disposed) s.tmuxSession = session;
 }
 
 export async function leafHasForegroundProcess(

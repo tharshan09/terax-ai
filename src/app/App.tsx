@@ -72,6 +72,7 @@ import {
   leafIds,
   navigateFocusedBlocks,
   reattachLeafTmux,
+  setLeafTmuxBinding,
   submitToLeaf,
   type TerminalPaneHandle,
   type TmuxPickerTarget,
@@ -79,7 +80,10 @@ import {
   useTerminalFileDrop,
   writeToSession,
 } from "@/modules/terminal";
-import { listTmuxSessions } from "@/modules/terminal/lib/tmux";
+import {
+  isValidSessionName,
+  listTmuxSessions,
+} from "@/modules/terminal/lib/tmux";
 import {
   SpaceSwitcher,
   useSpaces,
@@ -879,10 +883,17 @@ export default function App() {
       triggeredTmuxPick.current.add(tab.id);
       consumeTmuxPick(tab.id);
       const tgt = tmuxTargetForTab(tab);
+      // The probe is a slow SSH round trip; only open if nothing else grabbed
+      // the picker meanwhile (a manual Cmd+Shift+M) and the tab still exists,
+      // so a late auto-pop neither clobbers a manual target nor pops on a dead tab.
+      const applyAutoPick = () =>
+        setTmuxTarget((cur) =>
+          cur ?? (tabsRef.current.some((t) => t.id === tgt.tabId) ? tgt : null),
+        );
       listTmuxSessions(tab.workspace)
-        .then(() => setTmuxTarget(tgt))
+        .then(applyAutoPick)
         .catch((e: unknown) => {
-          if (!String(e).includes("not installed")) setTmuxTarget(tgt);
+          if (!String(e).includes("not installed")) applyAutoPick();
         });
     },
     [consumeTmuxPick],
@@ -1357,6 +1368,10 @@ export default function App() {
             }}
             onAttachHere={(name) => {
               if (!tmuxTarget) return;
+              // Mirror the backend allowlist (is_valid_session_name): the name is
+              // spliced into a shell command below, so never rely solely on the
+              // picker's UI gate to keep the splice injection-safe.
+              if (!isValidSessionName(name)) return;
               const tab = tabsRef.current.find(
                 (t) => t.id === tmuxTarget.tabId,
               );
@@ -1369,7 +1384,10 @@ export default function App() {
                 void reattachLeafTmux(tmuxTarget.leafId, name);
               } else {
                 // Fresh shell just connected: run the attach over the live
-                // connection so there is no ControlMaster teardown race.
+                // connection so there is no ControlMaster teardown race. Record
+                // the binding too so a later respawn reattaches instead of
+                // dropping back to a plain shell.
+                setLeafTmuxBinding(tmuxTarget.leafId, name);
                 submitToLeaf(
                   tmuxTarget.leafId,
                   `tmux new-session -A -s '${name}'`,
@@ -1380,6 +1398,19 @@ export default function App() {
             onOpenInNewTab={(name) => {
               newTmuxTab(name, tmuxTarget?.workspace);
               setTmuxTarget(null);
+            }}
+            onRenamed={(from, to) => {
+              // Keep the tab binding/title and the live session in sync when the
+              // currently attached session is renamed, so its label tracks the
+              // change and a respawn reattaches to the new name (not a fresh one).
+              if (!tmuxTarget) return;
+              const tab = tabsRef.current.find(
+                (t) => t.id === tmuxTarget.tabId,
+              );
+              if (tab?.kind === "terminal" && tab.tmuxSession === from) {
+                rebindTmuxSession(tmuxTarget.tabId, to);
+                setLeafTmuxBinding(tmuxTarget.leafId, to);
+              }
             }}
           />
 

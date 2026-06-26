@@ -12,6 +12,7 @@ export {
   navigateFocusedBlocks,
   reattachLeafTmux,
   respawnSession,
+  setLeafTmuxBinding,
   submitToLeaf,
   whenSessionReady,
   writeToSession,

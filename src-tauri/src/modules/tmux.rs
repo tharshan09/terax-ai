@@ -100,6 +100,21 @@ fn parse_sessions(raw: &str) -> Vec<TmuxSession> {
     raw.lines().filter_map(parse_session_line).collect()
 }
 
+/// Truncate `s` to at most `max` bytes without splitting a UTF-8 codepoint.
+/// Remote stderr is decoded via `from_utf8_lossy` and can carry multibyte
+/// characters (localized errors, MOTD banners); a naive `&s[..max]` byte-slice
+/// panics when `max` lands inside a codepoint.
+fn truncate_on_char_boundary(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Turn a raw `tmux list-sessions` result into the session list. tmux exits
 /// non-zero with a "no server" message when there are zero sessions, which is
 /// not an error; a missing binary is. `label` names the host for messages.
@@ -121,13 +136,19 @@ fn interpret(
     {
         return Ok(Vec::new());
     }
-    if code == Some(127) || err.contains("command not found") || err.contains("not found") {
+    // Anchor the absent-tmux signal to tmux itself: a bare `not found` substring
+    // also matches unrelated rc noise (the SSH path merges login-shell stderr).
+    // Exit 127 stays the primary POSIX signal for command-not-found.
+    if code == Some(127)
+        || err.contains("tmux: command not found")
+        || err.contains("command not found: tmux")
+        || err.contains("tmux: not found")
+    {
         return Err(format!("tmux is not installed on {label}."));
     }
     // Unknown failure: surface a short, length-capped hint without dumping
     // unbounded (possibly hostile) remote stderr into the UI.
-    let snippet = stderr.trim();
-    let snippet = &snippet[..snippet.len().min(160)];
+    let snippet = truncate_on_char_boundary(stderr.trim(), 160);
     if snippet.is_empty() {
         Err(format!("could not list tmux sessions on {label}"))
     } else {
@@ -227,7 +248,7 @@ fn interpret_kill(code: Option<i32>, stderr: &str) -> Result<(), String> {
     } else {
         Err(format!(
             "could not kill the session: {}",
-            &snippet[..snippet.len().min(160)]
+            truncate_on_char_boundary(snippet, 160)
         ))
     }
 }
@@ -286,7 +307,7 @@ fn interpret_rename(code: Option<i32>, stderr: &str, to: &str) -> Result<(), Str
     } else {
         Err(format!(
             "could not rename the session: {}",
-            &snippet[..snippet.len().min(160)]
+            truncate_on_char_boundary(snippet, 160)
         ))
     }
 }
@@ -487,6 +508,44 @@ mod tests {
         let long = "x".repeat(1000);
         let err = interpret(Some(2), "", &long, "host").unwrap_err();
         assert!(err.len() < 220, "error must be length-capped: {}", err.len());
+    }
+
+    #[test]
+    fn truncate_never_splits_a_codepoint() {
+        // "€" is 3 bytes; byte 160 lands mid-codepoint. A naive byte-slice panics.
+        let multibyte = "€".repeat(100);
+        let cut = truncate_on_char_boundary(&multibyte, 160);
+        assert!(cut.len() <= 160);
+        assert!(multibyte.starts_with(cut), "must be a clean prefix");
+        // Shorter-than-cap input is returned whole.
+        assert_eq!(truncate_on_char_boundary("abc", 160), "abc");
+    }
+
+    #[test]
+    fn interpret_does_not_panic_on_multibyte_stderr() {
+        // Regression: remote stderr (from_utf8_lossy) can be multibyte UTF-8.
+        let multibyte = "ä".repeat(200);
+        for f in [
+            interpret(Some(2), "", &multibyte, "host").is_err(),
+            interpret_kill(Some(1), &multibyte).is_err(),
+            interpret_rename(Some(1), &multibyte, "x").is_err(),
+        ] {
+            assert!(f);
+        }
+    }
+
+    #[test]
+    fn interpret_does_not_mislabel_unrelated_not_found_as_missing_tmux() {
+        // rc noise like "somefunc: command not found" must NOT read as absent tmux.
+        let err = interpret(Some(1), "", "myfunc: command not found", "host").unwrap_err();
+        assert!(!err.contains("not installed"), "got: {err}");
+        // But the real signals still classify correctly.
+        assert!(interpret(Some(127), "", "anything", "host")
+            .unwrap_err()
+            .contains("not installed"));
+        assert!(interpret(Some(1), "", "bash: tmux: command not found", "host")
+            .unwrap_err()
+            .contains("not installed"));
     }
 
     // End-to-end check against a real host. No-op unless TERAX_SSH_TEST_HOST is
