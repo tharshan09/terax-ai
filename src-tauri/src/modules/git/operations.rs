@@ -15,9 +15,10 @@ use crate::modules::git::types::{
     DEFAULT_TIMEOUT_SECS, NETWORK_TIMEOUT_SECS,
 };
 use crate::modules::git::utils::{
-    authorized_repo_root, canonical_dir, resolve_within_repo, split_upstream,
-    ResolvedGitDirectory,
+    authorized_repo_root, canonical_dir, repo_relative_pathspec, resolve_within_repo,
+    split_upstream, ResolvedGitDirectory,
 };
+use crate::modules::fs::file::ReadResult;
 use crate::modules::workspace::{resolve_path, workspace_home, WorkspaceEnv, WorkspaceRegistry};
 
 pub fn resolve_repo(
@@ -26,7 +27,7 @@ pub fn resolve_repo(
     workspace: &WorkspaceEnv,
 ) -> Result<Option<GitRepoInfo>> {
     let cwd = canonical_dir(registry, cwd, workspace)?;
-    if !registry.is_authorized(&cwd.local_path) {
+    if !cwd.workspace.is_ssh() && !registry.is_authorized(&cwd.local_path) {
         return Err(GitError::PathOutsideWorkspace(cwd.local_path));
     }
     ensure_git_available(&cwd.workspace)?;
@@ -46,7 +47,9 @@ fn resolve_repo_in_authorized(
         return Ok(None);
     };
     let canonical_root = canonical_dir(registry, &root_line, &cwd.workspace)?;
-    let _ = registry.authorize(&canonical_root.local_path);
+    if !canonical_root.workspace.is_ssh() {
+        let _ = registry.authorize(&canonical_root.local_path);
+    }
 
     let head = match git_stdout_lines(
         &canonical_root.workspace,
@@ -88,7 +91,7 @@ pub fn panel_snapshot(
     workspace: &WorkspaceEnv,
 ) -> Result<GitPanelSnapshot> {
     let cwd = canonical_dir(registry, cwd, workspace)?;
-    if !registry.is_authorized(&cwd.local_path) {
+    if !cwd.workspace.is_ssh() && !registry.is_authorized(&cwd.local_path) {
         return Err(GitError::PathOutsideWorkspace(cwd.local_path));
     }
     ensure_git_available(&cwd.workspace)?;
@@ -104,7 +107,9 @@ pub fn panel_snapshot(
         });
     };
     let canonical_root = canonical_dir(registry, &root_line, &cwd.workspace)?;
-    let _ = registry.authorize(&canonical_root.local_path);
+    if !canonical_root.workspace.is_ssh() {
+        let _ = registry.authorize(&canonical_root.local_path);
+    }
 
     let status = status_inner(&canonical_root)?;
     let repo = GitRepoInfo {
@@ -181,7 +186,7 @@ fn diff_inner(
         args.push("--cached".into());
     }
     let pathspec = match path.filter(|p| !p.is_empty()) {
-        Some(p) => Some(pathspec_from_input(&repo_root.local_path, p)?),
+        Some(p) => Some(repo_relative_pathspec(repo_root, p)?),
         None => None,
     };
     if let Some(spec) = pathspec.as_ref() {
@@ -216,14 +221,10 @@ pub fn diff_content(
 ) -> Result<GitDiffContentResult> {
     let repo_root = authorized_repo_root(registry, repo_root, workspace)?;
     ensure_git_available(&repo_root.workspace)?;
-    let worktree_path = resolve_within_repo(&repo_root.local_path, path)?;
-    let rel_path = pathspec(&repo_root.local_path, &worktree_path);
+    let rel_path = repo_relative_pathspec(&repo_root, path)?;
 
     let original_rel = match original_path {
-        Some(orig) if !orig.is_empty() => {
-            let resolved = resolve_within_repo(&repo_root.local_path, orig)?;
-            Some(pathspec(&repo_root.local_path, &resolved))
-        }
+        Some(orig) if !orig.is_empty() => Some(repo_relative_pathspec(&repo_root, orig)?),
         _ => None,
     };
 
@@ -248,7 +249,7 @@ pub fn diff_content(
             &format!(":{rel_path}"),
         )?
     } else {
-        read_text_file(&worktree_path)?
+        read_worktree_text(&repo_root, &rel_path)?
     };
     let patch = diff_inner(&repo_root, Some(&rel_path), staged)?;
     let is_binary =
@@ -274,7 +275,7 @@ pub fn stage(
     if paths.is_empty() {
         return Ok(());
     }
-    let resolved = resolve_pathspecs(&repo_root.local_path, paths)?;
+    let resolved = resolve_pathspecs(&repo_root, paths)?;
     let mut args: Vec<OsString> = vec!["add".into(), "--".into()];
     for p in &resolved {
         args.push(p.clone().into());
@@ -299,7 +300,7 @@ pub fn unstage(
     if paths.is_empty() {
         return Ok(());
     }
-    let resolved = resolve_pathspecs(&repo_root.local_path, paths)?;
+    let resolved = resolve_pathspecs(&repo_root, paths)?;
     let mut reset_args: Vec<OsString> = vec!["reset".into(), "HEAD".into(), "--".into()];
     for p in &resolved {
         reset_args.push(p.clone().into());
@@ -357,7 +358,7 @@ pub fn discard(
     let mut tracked: Vec<String> = Vec::with_capacity(entries.len());
     let mut untracked: Vec<String> = Vec::new();
     for entry in entries {
-        let resolved = pathspec_from_input(&repo_root.local_path, &entry.path)?;
+        let resolved = repo_relative_pathspec(&repo_root, &entry.path)?;
         if entry.untracked {
             untracked.push(resolved);
         } else {
@@ -718,20 +719,9 @@ pub fn commit_file_diff(
     if !sha_is_safe(sha) {
         return Err(GitError::command("git show", "invalid commit sha"));
     }
-    let resolved = resolve_within_repo(&repo_root.local_path, path)?;
-    let rel = resolved
-        .strip_prefix(&repo_root.local_path)
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|_| path.replace('\\', "/"));
-
+    let rel = repo_relative_pathspec(&repo_root, path)?;
     let original_rel = match original_path {
-        Some(orig) if !orig.is_empty() => {
-            let resolved_orig = resolve_within_repo(&repo_root.local_path, orig)?;
-            resolved_orig
-                .strip_prefix(&repo_root.local_path)
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_else(|_| orig.replace('\\', "/"))
-        }
+        Some(orig) if !orig.is_empty() => repo_relative_pathspec(&repo_root, orig)?,
         _ => rel.clone(),
     };
 
@@ -1097,24 +1087,39 @@ fn nothing_to_commit(output: &GitOutput) -> bool {
     stderr.contains("nothing to commit") || stdout.contains("nothing to commit")
 }
 
-fn resolve_pathspecs(repo_root: &Path, paths: &[String]) -> Result<Vec<String>> {
+fn resolve_pathspecs(repo_root: &ResolvedGitDirectory, paths: &[String]) -> Result<Vec<String>> {
     let mut out = Vec::with_capacity(paths.len());
     for p in paths {
-        out.push(pathspec_from_input(repo_root, p)?);
+        out.push(repo_relative_pathspec(repo_root, p)?);
     }
     Ok(out)
 }
 
-fn pathspec_from_input(repo_root: &Path, rel: &str) -> Result<String> {
-    let resolved = resolve_within_repo(repo_root, rel)?;
-    Ok(pathspec(repo_root, &resolved))
+/// The working-tree ("modified") side of an unstaged diff. Local reads the file
+/// off disk; SSH reads it from the host over the shared connection. The index
+/// side already comes from `git show`, which is remote-blind via run_git.
+fn read_worktree_text(repo_root: &ResolvedGitDirectory, rel: &str) -> Result<TextSource> {
+    match &repo_root.workspace {
+        WorkspaceEnv::Ssh { host } => remote_worktree_text(host, &repo_root.git_path, rel),
+        _ => {
+            let worktree_path = resolve_within_repo(&repo_root.local_path, rel)?;
+            read_text_file(&worktree_path)
+        }
+    }
 }
 
-fn pathspec(repo_root: &Path, absolute: &Path) -> String {
-    absolute
-        .strip_prefix(repo_root)
-        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|_| absolute.to_string_lossy().replace('\\', "/"))
+/// Read a repo-relative working-tree file on the SSH host, mapping the remote
+/// read onto the same `TextSource` the local path produces. Too-large is treated
+/// as binary so the viewer falls back to the unified patch (pure git, always
+/// available over ssh).
+fn remote_worktree_text(host: &str, repo_git_path: &str, rel: &str) -> Result<TextSource> {
+    let abs = format!("{}/{}", repo_git_path.trim_end_matches('/'), rel);
+    match crate::modules::ssh::read_file(host, &abs)
+        .map_err(|e| GitError::command("remote worktree read failed", e))?
+    {
+        ReadResult::Text { content, .. } => Ok(TextSource::Text(content)),
+        ReadResult::Binary { .. } | ReadResult::TooLarge { .. } => Ok(TextSource::Binary),
+    }
 }
 
 pub fn list_branches(
@@ -1408,5 +1413,81 @@ mod tests {
         );
         assert!(validate_worktree_branch_name(&WorkspaceEnv::Local, &root, "bad.lock").is_err());
         assert!(validate_worktree_branch_name(&WorkspaceEnv::Local, &root, "bad?ref").is_err());
+    }
+
+    // End-to-end git-over-ssh check against a real host. No-op unless
+    // TERAX_SSH_TEST_HOST is set, so it's safe in CI; run locally with e.g.
+    // `TERAX_SSH_TEST_HOST=litha-claude cargo test --lib remote_git_smoke -- --nocapture`.
+    // Requires git + python3 on the host and an already-open ControlMaster (open a
+    // terminal to the host first, or the BatchMode git/FS path can't authenticate).
+    #[test]
+    fn remote_git_smoke() {
+        use crate::modules::ssh;
+        let Ok(host) = std::env::var("TERAX_SSH_TEST_HOST") else {
+            return;
+        };
+        let ws = WorkspaceEnv::Ssh { host: host.clone() };
+        let reg = WorkspaceRegistry::default();
+        let repo = format!("/tmp/.terax_git_{}", std::process::id());
+        let _ = ssh::delete(&host, &repo); // clean any leftover
+
+        // Run a git command remotely and assert it succeeded.
+        let git = |args: &[&str]| {
+            let out = run_git(&ws, Some(&repo), args.iter().copied(), DEFAULT_TIMEOUT_SECS)
+                .unwrap_or_else(|e| panic!("git {args:?} spawn failed: {e}"));
+            assert_eq!(
+                out.exit_code,
+                Some(0),
+                "git {args:?} stderr: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+
+        // Throwaway repo on the host: init + identity + one commit.
+        ssh::create_dir(&host, &repo).expect("create remote repo dir");
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "terax-test@example.com"]);
+        git(&["config", "user.name", "Terax Test"]);
+        ssh::write_file(&host, &format!("{repo}/a.txt"), "hello\n").expect("seed a.txt");
+        git(&["add", "a.txt"]);
+        git(&["commit", "-m", "first"]);
+
+        // resolve_repo detects the repo + branch over ssh (the path that the
+        // panel uses to light up when you cd into a remote repo).
+        let info = resolve_repo(&reg, &repo, &ws)
+            .expect("resolve_repo")
+            .expect("repo present");
+        assert_eq!(info.branch, "main");
+
+        // Dirty the worktree, then status + unified diff + side-by-side content.
+        ssh::write_file(&host, &format!("{repo}/a.txt"), "hello\nworld\n").expect("modify a.txt");
+        let st = status(&reg, &repo, &ws).expect("status");
+        assert!(st.changed_files.iter().any(|f| f.path == "a.txt"));
+
+        let unified = diff(&reg, &repo, None, false, &ws).expect("diff");
+        assert!(unified.diff_text.contains("+world"));
+
+        // diff_content's modified side is read off the REMOTE worktree.
+        let content = diff_content(&reg, &repo, "a.txt", false, None, &ws).expect("diff_content");
+        assert_eq!(content.original_content, "hello\n");
+        assert_eq!(content.modified_content, "hello\nworld\n");
+        assert!(!content.is_binary);
+
+        // log + branch list.
+        let entries = log(&reg, &repo, 10, None, &ws).expect("log");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].subject, "first");
+        let branches = list_branches(&reg, &repo, &ws).expect("list_branches");
+        assert!(branches.branches.iter().any(|b| b.name == "main"));
+
+        // Branch switch over ssh.
+        git(&["branch", "feature"]);
+        checkout_branch(&reg, &repo, "feature", &ws).expect("checkout feature");
+        let after = resolve_repo(&reg, &repo, &ws)
+            .expect("resolve after checkout")
+            .expect("repo");
+        assert_eq!(after.branch, "feature");
+
+        let _ = ssh::delete(&host, &repo); // teardown
     }
 }

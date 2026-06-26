@@ -31,6 +31,20 @@ pub fn canonical_dir(
     path: &str,
     workspace: &WorkspaceEnv,
 ) -> Result<ResolvedGitDirectory> {
+    // Remote workspace: never touch the local filesystem. `is_dir`/canonicalize
+    // would resolve the remote path against the local machine (a meaningless or,
+    // worse, same-named local directory); the remote `git rev-parse` is the real
+    // existence check. `local_path` is synthetic and never used for FS on the ssh
+    // branch — authorization and pathspec resolution both branch on `is_ssh`.
+    if workspace.is_ssh() {
+        let git_path = normalize_git_path(path);
+        return Ok(ResolvedGitDirectory {
+            workspace: workspace.clone(),
+            local_path: PathBuf::from(&git_path),
+            git_path,
+        });
+    }
+
     let candidate = resolve_path(path, workspace);
     if !candidate.is_dir() {
         return Err(GitError::NotADirectory(path.to_string()));
@@ -56,10 +70,35 @@ pub fn authorized_repo_root(
     workspace: &WorkspaceEnv,
 ) -> Result<ResolvedGitDirectory> {
     let canonical = canonical_dir(registry, path, workspace)?;
+    // The SSH workspace has no local authorization root to check against — git
+    // runs entirely on the host and the connection itself is the capability
+    // (the documented trust-the-host-account model). Skip the local registry.
+    if canonical.workspace.is_ssh() {
+        return Ok(canonical);
+    }
     if !registry.is_authorized(&canonical.local_path) {
         return Err(GitError::PathOutsideWorkspace(canonical.local_path.clone()));
     }
     Ok(canonical)
+}
+
+/// Repo-relative, forward-slash pathspec for a frontend-supplied path. Local and
+/// WSL canonicalize within the repo so a symlink/`..` can't escape (filesystem
+/// check). SSH validates the string only — git runs on the remote, the path is
+/// already repo-relative, and [`is_safe_pathspec`] rejects `..`/`.`/`:`/NUL and
+/// control chars, so there is no local FS to consult.
+pub fn repo_relative_pathspec(repo_root: &ResolvedGitDirectory, input: &str) -> Result<String> {
+    if repo_root.workspace.is_ssh() {
+        if !is_safe_pathspec(input) {
+            return Err(GitError::InvalidPath(input.to_string()));
+        }
+        return Ok(input.replace('\\', "/"));
+    }
+    let resolved = resolve_within_repo(&repo_root.local_path, input)?;
+    Ok(resolved
+        .strip_prefix(&repo_root.local_path)
+        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| resolved.to_string_lossy().replace('\\', "/")))
 }
 
 pub fn resolve_within_repo(repo_root: &Path, rel: &str) -> Result<PathBuf> {
@@ -196,5 +235,56 @@ mod tests {
         let tmp = std::env::temp_dir();
         let err = resolve_within_repo(&tmp, "../outside.txt");
         assert!(matches!(err, Err(GitError::InvalidPath(_))));
+    }
+
+    #[test]
+    fn canonical_dir_ssh_skips_local_fs() {
+        let registry = WorkspaceRegistry::default();
+        let ws = WorkspaceEnv::Ssh {
+            host: "litha-claude".into(),
+        };
+        // A remote path that does not exist locally must still resolve — no
+        // is_dir()/canonicalize against the local machine.
+        let resolved =
+            canonical_dir(&registry, "/home/claude/repo", &ws).expect("ssh canonical_dir");
+        assert_eq!(resolved.git_path, "/home/claude/repo");
+        assert!(resolved.workspace.is_ssh());
+        // Tilde is preserved verbatim (the remote shell expands it later).
+        assert_eq!(canonical_dir(&registry, "~", &ws).unwrap().git_path, "~");
+    }
+
+    #[test]
+    fn authorized_repo_root_ssh_skips_authorization() {
+        let registry = WorkspaceRegistry::default(); // empty: nothing authorized
+        let ws = WorkspaceEnv::Ssh {
+            host: "litha-claude".into(),
+        };
+        // A local path here would be rejected (PathOutsideWorkspace); ssh trusts
+        // the host account.
+        let resolved =
+            authorized_repo_root(&registry, "/srv/app", &ws).expect("ssh authorized_repo_root");
+        assert_eq!(resolved.git_path, "/srv/app");
+    }
+
+    #[test]
+    fn repo_relative_pathspec_ssh_validates_string_only() {
+        let repo = ResolvedGitDirectory {
+            workspace: WorkspaceEnv::Ssh { host: "h".into() },
+            git_path: "/repo".into(),
+            local_path: PathBuf::from("/repo"),
+        };
+        assert_eq!(
+            repo_relative_pathspec(&repo, "src/main.rs").unwrap(),
+            "src/main.rs"
+        );
+        assert_eq!(repo_relative_pathspec(&repo, "a\\b.txt").unwrap(), "a/b.txt");
+        assert!(matches!(
+            repo_relative_pathspec(&repo, "../escape"),
+            Err(GitError::InvalidPath(_))
+        ));
+        assert!(matches!(
+            repo_relative_pathspec(&repo, "a:b"),
+            Err(GitError::InvalidPath(_))
+        ));
     }
 }
