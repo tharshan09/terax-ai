@@ -1236,11 +1236,6 @@ export default function App() {
                         onRevealInTerminal={cdInNewTab}
                         onAttachToAgent={handleAttachFileToAgent}
                       />
-                    ) : workspaceEnv.kind === "ssh" ? (
-                      <div className="flex h-full items-center justify-center px-6 text-center text-[11px] text-muted-foreground">
-                        Source control isn’t available on remote SSH workspaces
-                        yet.
-                      </div>
                     ) : (
                       <SourceControlPanel
                         open
