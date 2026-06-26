@@ -1,12 +1,18 @@
 export { TerminalPane, type TerminalPaneHandle } from "./TerminalPane";
 export { TerminalStack } from "./TerminalStack";
 export {
+  TmuxSessionSwitcher,
+  type TmuxPickerTarget,
+} from "./TmuxSessionSwitcher";
+export {
   clearFocusedTerminal,
   disposeSession,
   leafHasForegroundProcess,
   leafIdForPty,
   navigateFocusedBlocks,
+  reattachLeafTmux,
   respawnSession,
+  submitToLeaf,
   whenSessionReady,
   writeToSession,
 } from "./lib/useTerminalSession";

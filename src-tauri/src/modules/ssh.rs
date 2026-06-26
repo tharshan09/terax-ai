@@ -632,6 +632,95 @@ fn run_remote_json(host: &str, request: &serde_json::Value) -> Result<serde_json
     }
 }
 
+// ---------------------------------------------------------------------------
+// Generic remote command execution (text, no stdin)
+//
+// A lighter sibling of run_remote_json for cheap remote queries (e.g.
+// `tmux list-sessions`): no request body, captures stdout/stderr, and reports
+// the remote exit code so callers can interpret tool-specific "non-error"
+// failures themselves. Rides the same ControlMaster socket.
+// ---------------------------------------------------------------------------
+
+/// Captured result of a remote command. `code` is the remote command's exit
+/// status (ssh forwards it), or `None` when it was killed by a signal.
+pub struct RemoteCapture {
+    pub code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// True if a multiplexed ControlMaster to `host` is live. Talks only to the
+/// local control socket (`ssh -O check`), so it returns instantly and never
+/// opens a fresh connection or prompts. Always false where ControlMaster is
+/// unavailable (non-unix).
+pub fn master_alive(host: &str) -> bool {
+    if validate_ssh_host(host).is_err() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        let mut cmd = std::process::Command::new("ssh");
+        for arg in control_args() {
+            cmd.arg(arg);
+        }
+        cmd.arg("-O").arg("check").arg(host);
+        crate::modules::proc::hide_console(&mut cmd);
+        matches!(cmd.output(), Ok(out) if out.status.success())
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+/// Run `command` on `host` over the shared ControlMaster (BatchMode, no stdin),
+/// capturing stdout/stderr. Returns `Err` only when ssh fails to spawn; a
+/// non-zero remote exit is reported via [`RemoteCapture::code`] so the caller
+/// decides whether it counts as an error (tmux's "no server", for one, does
+/// not).
+pub fn run_remote_capture(host: &str, command: &str) -> Result<RemoteCapture, String> {
+    use std::process::{Command, Stdio};
+
+    validate_ssh_host(host)?;
+    note_connected_host(host);
+
+    let mut cmd = Command::new("ssh");
+    cmd.arg("-T")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("ConnectTimeout=10")
+        // Reuse-only: a background query must never spin up a fresh persistent
+        // master. ssh takes the FIRST value of an option, so this has to precede
+        // the ControlMaster=auto that control_args() supplies.
+        .arg("-o")
+        .arg("ControlMaster=no");
+    for arg in control_args() {
+        cmd.arg(arg);
+    }
+    cmd.arg(host)
+        .arg(command)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| format!("ssh spawn failed: {e}"))?;
+    let mut stdout = child.stdout.take().ok_or("no ssh stdout")?;
+    let mut stderr = child.stderr.take().ok_or("no ssh stderr")?;
+    let out_reader = std::thread::spawn(move || read_capped(&mut stdout, MAX_REMOTE_STDOUT));
+    let err_reader = std::thread::spawn(move || read_capped(&mut stderr, 64 * 1024));
+
+    let status = child.wait().map_err(|e| format!("ssh wait failed: {e}"))?;
+    let (stdout_bytes, _) = out_reader.join().unwrap_or((Vec::new(), false));
+    let (stderr_bytes, _) = err_reader.join().unwrap_or((Vec::new(), false));
+
+    Ok(RemoteCapture {
+        code: status.code(),
+        stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
+    })
+}
+
 /// Remote `fs_read_dir`. Returns the same [`DirEntry`](crate::modules::fs::tree::DirEntry)
 /// shape as the local path, so the explorer doesn't know it's remote.
 pub fn read_dir(
@@ -868,6 +957,29 @@ Host !secret prod
             .unwrap()
             .contains("python3"));
         assert!(classify_ssh_error("some unrelated noise").is_none());
+    }
+
+    #[test]
+    fn master_alive_rejects_unsafe_hosts() {
+        // Rejected at the validation gate before any process spawn.
+        assert!(!master_alive("-oProxyCommand=evil"));
+        assert!(!master_alive(""));
+        assert!(!master_alive("bad host"));
+    }
+
+    #[test]
+    fn master_alive_false_without_a_live_socket() {
+        // `ssh -O check` talks only to the (absent) local control socket and
+        // fails fast, so a syntactically-valid host with no master needs no
+        // network and must report not-alive.
+        assert!(!master_alive("terax-no-such-host-zzz"));
+    }
+
+    #[test]
+    fn run_remote_capture_rejects_unsafe_hosts() {
+        assert!(run_remote_capture("-oProxyCommand=evil", "echo hi").is_err());
+        assert!(run_remote_capture("", "echo hi").is_err());
+        assert!(run_remote_capture("bad host", "echo hi").is_err());
     }
 
     // End-to-end check of the real ssh + python helper path. No-op unless

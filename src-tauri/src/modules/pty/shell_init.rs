@@ -55,19 +55,34 @@ pub fn build_command(
     workspace: WorkspaceEnv,
     blocks: bool,
     shell: Option<String>,
+    tmux_session: Option<String>,
 ) -> Result<CommandBuilder, String> {
+    let tmux_session = validate_tmux_session(tmux_session)?;
     let shell = sanitize_shell_override(shell);
     if let WorkspaceEnv::Ssh { host } = &workspace {
-        return build_ssh(host, cwd);
+        return build_ssh(host, cwd, tmux_session.as_deref());
     }
     #[cfg(unix)]
     {
         let _ = workspace;
-        unix::build(cwd, blocks, shell)
+        unix::build(cwd, blocks, shell, tmux_session.as_deref())
     }
     #[cfg(windows)]
     {
-        windows::build(cwd, workspace, blocks, shell)
+        windows::build(cwd, workspace, blocks, shell, tmux_session.as_deref())
+    }
+}
+
+/// Validate a tmux session-name override from the frontend. `None` stays `None`;
+/// a present but unsafe name is a hard error (never silently dropped, unlike a
+/// shell override) since it dictates what the terminal launches. The allowlist
+/// lives in [`crate::modules::tmux`] so the listing and the launch agree on what
+/// is attachable.
+fn validate_tmux_session(name: Option<String>) -> Result<Option<String>, String> {
+    match name.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        None => Ok(None),
+        Some(name) if crate::modules::tmux::is_valid_session_name(&name) => Ok(Some(name)),
+        Some(name) => Err(format!("invalid tmux session name: {name:?}")),
     }
 }
 
@@ -112,7 +127,11 @@ esac
 /// [`crate::modules::ssh::control_args`]) lets later filesystem calls reuse
 /// this connection, and [`REMOTE_SHELL_INIT`] installs OSC 7 cwd reporting on
 /// the remote shell.
-fn build_ssh(host: &str, _cwd: Option<String>) -> Result<CommandBuilder, String> {
+fn build_ssh(
+    host: &str,
+    _cwd: Option<String>,
+    tmux_session: Option<&str>,
+) -> Result<CommandBuilder, String> {
     crate::modules::ssh::validate_ssh_host(host)?;
     // The terminal establishes the shared ControlMaster; record it so the socket
     // is torn down on quit.
@@ -124,10 +143,26 @@ fn build_ssh(host: &str, _cwd: Option<String>) -> Result<CommandBuilder, String>
     }
     cmd.arg(host);
     // Single arg → ssh forwards it verbatim as the remote command (run by the
-    // remote login shell), so the multi-line script needs no extra quoting.
-    cmd.arg(REMOTE_SHELL_INIT);
+    // remote login shell), so neither script needs extra quoting.
+    match tmux_session {
+        Some(session) => {
+            cmd.arg(remote_tmux_command(session));
+        }
+        None => {
+            cmd.arg(REMOTE_SHELL_INIT);
+        }
+    }
     cmd.env("TERM", "xterm-256color");
     Ok(cmd)
+}
+
+/// Remote command that attaches to, or creates, `session` in tmux. `session` is
+/// allowlist-validated upstream (`[A-Za-z0-9_-]`), so single-quoting is
+/// injection-safe with no escaping. The OSC 7 rc bootstrap is intentionally
+/// skipped: tmux runs its own shells and does not reliably propagate it, so cwd
+/// tracking inside tmux is best-effort and simply absent rather than wrong.
+fn remote_tmux_command(session: &str) -> String {
+    format!("exec tmux new-session -A -s '{session}'")
 }
 
 // Honor the override only if it matches an enumerated shell, so a tampered
@@ -342,7 +377,20 @@ mod unix {
         cwd: Option<String>,
         blocks: bool,
         shell_override: Option<String>,
+        tmux_session: Option<&str>,
     ) -> Result<CommandBuilder, String> {
+        if let Some(session) = tmux_session {
+            // Attach-or-create the session directly. tmux runs the user's login
+            // shell inside, without our OSC 7/133 hooks, so cwd tracking in a
+            // tmux tab is best-effort (absent) rather than wrong.
+            let mut cmd = CommandBuilder::new("tmux");
+            cmd.arg("new-session");
+            cmd.arg("-A");
+            cmd.arg("-s");
+            cmd.arg(session);
+            super::apply_common(&mut cmd, cwd, blocks);
+            return Ok(cmd);
+        }
         let (shell, shell_path) = Shell::resolve(shell_override);
         let mut cmd = CommandBuilder::new(&shell_path);
         super::apply_common(&mut cmd, cwd, blocks);
@@ -545,7 +593,11 @@ mod windows {
         workspace: WorkspaceEnv,
         blocks: bool,
         shell: Option<String>,
+        tmux_session: Option<&str>,
     ) -> Result<CommandBuilder, String> {
+        // Native Windows has no tmux; remote (SSH) tmux is handled before the
+        // platform split, so a Windows host can still drive remote sessions.
+        let _ = tmux_session;
         if let WorkspaceEnv::Wsl { distro } = workspace {
             let _ = (blocks, shell);
             return build_wsl(cwd, distro);
@@ -1098,7 +1150,7 @@ fn which_in_path(name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_shell_override;
+    use super::{remote_tmux_command, sanitize_shell_override, validate_tmux_session};
 
     #[test]
     fn rejects_non_enumerated_override() {
@@ -1113,5 +1165,50 @@ mod tests {
     fn empty_or_missing_override_is_none() {
         assert_eq!(sanitize_shell_override(Some("   ".into())), None);
         assert_eq!(sanitize_shell_override(None), None);
+    }
+
+    #[test]
+    fn validate_tmux_session_accepts_safe_names() {
+        assert_eq!(validate_tmux_session(None).unwrap(), None);
+        assert_eq!(
+            validate_tmux_session(Some("  main ".into())).unwrap(),
+            Some("main".to_string())
+        );
+        assert_eq!(
+            validate_tmux_session(Some("review-pr_2".into())).unwrap(),
+            Some("review-pr_2".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_tmux_session_rejects_injection() {
+        for bad in [
+            "a;rm -rf ~",
+            "a b",
+            "$(id)",
+            "a'b",
+            "a`id`",
+            "a|b",
+            "a.b",
+            "-x",
+            "a$(touch /tmp/x)",
+        ] {
+            assert!(
+                validate_tmux_session(Some(bad.into())).is_err(),
+                "must reject {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_tmux_command_single_quotes_the_name() {
+        assert_eq!(
+            remote_tmux_command("main"),
+            "exec tmux new-session -A -s 'main'"
+        );
+        assert_eq!(
+            remote_tmux_command("review-pr_2"),
+            "exec tmux new-session -A -s 'review-pr_2'"
+        );
     }
 }

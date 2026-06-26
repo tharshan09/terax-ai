@@ -26,6 +26,7 @@ export type ShortcutId =
   | "pane.source"
   | "terminal.clear"
   | "terminal.toggleInput"
+  | "terminal.tmux_sessions"
   | "blocks.prev"
   | "blocks.next"
   | "search.focus"
@@ -169,6 +170,12 @@ export const SHORTCUTS: Shortcut[] = [
     label: "Toggle Shell / AI input",
     group: "Terminal",
     defaultBindings: [{ [MOD_PROP]: true, key: "u" }],
+  },
+  {
+    id: "terminal.tmux_sessions",
+    label: "Switch tmux session",
+    group: "Terminal",
+    defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "m" }],
   },
   {
     id: "blocks.prev",
