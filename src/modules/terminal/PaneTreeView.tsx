@@ -53,6 +53,7 @@ export function PaneTreeView(props: Props) {
           visible={tabVisible}
           focused={focused}
           initialCwd={node.cwd}
+          tmuxSession={node.tmuxSession}
           blocks={blocks}
           workspace={workspace}
           ref={b.setRef}

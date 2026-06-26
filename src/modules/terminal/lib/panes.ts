@@ -3,7 +3,7 @@ export type PaneId = number;
 export type SplitDir = "row" | "col";
 
 export type PaneNode =
-  | { kind: "leaf"; id: PaneId; cwd?: string }
+  | { kind: "leaf"; id: PaneId; cwd?: string; tmuxSession?: string }
   | {
       kind: "split";
       id: PaneId;
@@ -43,6 +43,24 @@ export function setLeafCwd(
   let changed = false;
   const next = n.children.map((c) => {
     const u = setLeafCwd(c, id, cwd);
+    if (u !== c) changed = true;
+    return u;
+  });
+  return changed ? { ...n, children: next } : n;
+}
+
+export function setLeafTmuxSession(
+  n: PaneNode,
+  id: PaneId,
+  tmuxSession: string,
+): PaneNode {
+  if (isLeaf(n)) {
+    if (n.id !== id || n.tmuxSession === tmuxSession) return n;
+    return { ...n, tmuxSession };
+  }
+  let changed = false;
+  const next = n.children.map((c) => {
+    const u = setLeafTmuxSession(c, id, tmuxSession);
     if (u !== c) changed = true;
     return u;
   });

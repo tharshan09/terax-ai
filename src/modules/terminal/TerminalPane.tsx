@@ -31,6 +31,9 @@ type Props = {
   /** This leaf is the active pane within its tab — receives auto-focus. */
   focused?: boolean;
   initialCwd?: string;
+  /** tmux session this leaf attaches on spawn. Set only on a tmux tab's first
+   *  pane; splits create plain shells. */
+  tmuxSession?: string;
   /** Enable command-block decorations (OSC 133) for this terminal. */
   blocks?: boolean;
   /** Per-tab execution env (Local / WSL / SSH). Locked at first mount. */
@@ -47,6 +50,7 @@ export const TerminalPane = memo(
       visible,
       focused = true,
       initialCwd,
+      tmuxSession,
       blocks = false,
       workspace,
       onSearchReady,
@@ -65,6 +69,7 @@ export const TerminalPane = memo(
       visible,
       focused,
       initialCwd,
+      tmuxSession,
       blocks,
       workspace,
       onSearchReady: (a) => onSearchReady?.(leafId, a),
