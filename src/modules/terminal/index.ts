@@ -5,6 +5,7 @@ export {
   type TmuxPickerTarget,
 } from "./TmuxSessionSwitcher";
 export {
+  applyExternalCwd,
   clearFocusedTerminal,
   disposeSession,
   leafHasForegroundProcess,

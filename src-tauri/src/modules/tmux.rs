@@ -64,6 +64,15 @@ fn rename_command(from: &str, to: &str) -> String {
     format!("tmux rename-session -t '{from}' '{to}'")
 }
 
+/// The `tmux display-message` invocation that prints a session's active-pane
+/// cwd. `pane_current_path` is tmux's own cwd tracking, so it works even though
+/// tmux swallows the inner shell's OSC 7. The name is allowlist-validated, so
+/// the single-quote splice is injection-safe; the `#{...}` is single-quoted so
+/// the remote login shell hands it to tmux verbatim.
+fn pane_cwd_command(name: &str) -> String {
+    format!("tmux display-message -p -t '{name}' '#{{pane_current_path}}'")
+}
+
 /// Parse one `tmux -F` line. Returns `None` (skip) for any line that doesn't
 /// have exactly the four expected fields with a numeric window/attached count,
 /// so banners and malformed rows are dropped rather than panicking.
@@ -312,6 +321,70 @@ fn interpret_rename(code: Option<i32>, stderr: &str, to: &str) -> Result<(), Str
     }
 }
 
+/// Read the active-pane cwd of a tmux session on the workspace's host. Drives
+/// cwd-follow under tmux, which swallows the inner shell's OSC 7. Returns an
+/// empty string (a silent no-op for the caller's poll) when no ControlMaster is
+/// open yet or the session/server is gone; the name is allowlist-validated, so
+/// the single-quote splice in [`pane_cwd_command`] is injection-safe.
+#[tauri::command]
+pub fn tmux_pane_cwd(workspace: Option<WorkspaceEnv>, session: String) -> Result<String, String> {
+    if !is_valid_session_name(&session) {
+        return Err(format!("invalid tmux session name: {session:?}"));
+    }
+    let cmd = pane_cwd_command(&session);
+    let (code, stdout, stderr) = match WorkspaceEnv::from_option(workspace) {
+        WorkspaceEnv::Ssh { host } => {
+            crate::modules::ssh::validate_ssh_host(&host)?;
+            if !crate::modules::ssh::master_alive(&host) {
+                // No multiplexed connection yet: nothing to poll. Empty, not an
+                // error, so the caller silently skips rather than surfacing noise.
+                return Ok(String::new());
+            }
+            let cap = crate::modules::ssh::run_remote_capture(&host, &cmd)?;
+            (cap.code, cap.stdout, cap.stderr)
+        }
+        other => {
+            #[cfg(unix)]
+            if matches!(other, WorkspaceEnv::Local) {
+                let out = run_local_login(&cmd)?;
+                return interpret_pane_cwd(out.code, &out.stdout, &out.stderr);
+            }
+            let out = crate::modules::shell::run_blocking_inner(
+                cmd,
+                None,
+                other,
+                std::time::Duration::from_secs(10),
+            )?;
+            (out.exit_code, out.stdout, out.stderr)
+        }
+    };
+    interpret_pane_cwd(code, &stdout, &stderr)
+}
+
+/// Map a `tmux display-message` result to the pane cwd. Exit 0 yields the
+/// trimmed path (display-message appends a newline). A gone session or stopped
+/// server is benign and yields an empty string; anything else is a short,
+/// length-capped error.
+fn interpret_pane_cwd(code: Option<i32>, stdout: &str, stderr: &str) -> Result<String, String> {
+    if code == Some(0) {
+        return Ok(stdout.trim().to_string());
+    }
+    let lower = stderr.to_ascii_lowercase();
+    if lower.contains("can't find session")
+        || lower.contains("session not found")
+        || lower.contains("no server running")
+        || lower.contains("no current session")
+    {
+        return Ok(String::new());
+    }
+    let snippet = truncate_on_char_boundary(stderr.trim(), 160);
+    if snippet.is_empty() {
+        Err("could not read the tmux pane path".to_string())
+    } else {
+        Err(format!("could not read the tmux pane path: {snippet}"))
+    }
+}
+
 #[cfg(unix)]
 struct LocalOutput {
     code: Option<i32>,
@@ -376,6 +449,45 @@ mod tests {
         let err = interpret_rename(Some(1), "duplicate session: taken", "taken").unwrap_err();
         assert!(err.contains("already exists"), "got: {err}");
         assert!(interpret_rename(Some(1), "weird failure", "x").is_err());
+    }
+
+    #[test]
+    fn pane_cwd_command_single_quotes_the_name() {
+        assert_eq!(
+            pane_cwd_command("main"),
+            "tmux display-message -p -t 'main' '#{pane_current_path}'"
+        );
+        assert_eq!(
+            pane_cwd_command("work_1"),
+            "tmux display-message -p -t 'work_1' '#{pane_current_path}'"
+        );
+    }
+
+    #[test]
+    fn interpret_pane_cwd_trims_path_on_success() {
+        assert_eq!(
+            interpret_pane_cwd(Some(0), "/home/me/project\n", "").unwrap(),
+            "/home/me/project"
+        );
+        // No path (empty pane buffer) still succeeds as empty.
+        assert_eq!(interpret_pane_cwd(Some(0), "\n", "").unwrap(), "");
+    }
+
+    #[test]
+    fn interpret_pane_cwd_treats_gone_session_as_empty() {
+        assert_eq!(interpret_pane_cwd(Some(1), "", "can't find session: main").unwrap(), "");
+        assert_eq!(
+            interpret_pane_cwd(Some(1), "", "no server running on /tmp/tmux-1000/default").unwrap(),
+            ""
+        );
+        assert!(interpret_pane_cwd(Some(1), "", "some other failure").is_err());
+    }
+
+    #[test]
+    fn interpret_pane_cwd_caps_and_survives_multibyte_stderr() {
+        let long = "ä".repeat(500);
+        let err = interpret_pane_cwd(Some(2), "", &long).unwrap_err();
+        assert!(err.len() < 220, "error must be length-capped: {}", err.len());
     }
 
     #[test]

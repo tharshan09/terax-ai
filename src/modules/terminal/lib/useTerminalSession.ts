@@ -195,6 +195,20 @@ export function leafCwd(leafId: number): string | null {
   return sessions.get(leafId)?.lastCwd ?? null;
 }
 
+/** Apply a cwd discovered out-of-band (the tmux pane-cwd poll) through the same
+ *  sink OSC 7 uses. Under tmux the inner shell's OSC 7 never reaches us, so the
+ *  poller feeds the path here. Updating `s.lastCwd` (rather than calling the App
+ *  handler directly) makes the slot-rebind re-emit re-assert the correct path,
+ *  and dedups identical values. No-op when the session is gone or disposed. */
+export function applyExternalCwd(leafId: number, cwd: string): void {
+  const s = sessions.get(leafId);
+  if (!s || s.disposed) return;
+  markSessionReady(leafId);
+  if (s.lastCwd === cwd) return;
+  s.lastCwd = cwd;
+  s.callbacks.onCwd?.(cwd);
+}
+
 export function navigateFocusedBlocks(dir: -1 | 1): boolean {
   for (const [, s] of sessions) {
     if (!s.visibleNow || !s.focusedNow || !s.blockDecorations) continue;

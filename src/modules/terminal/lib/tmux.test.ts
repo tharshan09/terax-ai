@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   autoSessionName,
+  isCurrentTmuxTarget,
   isValidSessionName,
   relativeTime,
   sanitizeSessionName,
@@ -65,6 +66,40 @@ describe("sanitizeSessionName", () => {
   it("returns empty when nothing usable remains", () => {
     expect(sanitizeSessionName("   ")).toBe("");
     expect(sanitizeSessionName("...")).toBe("");
+  });
+});
+
+describe("isCurrentTmuxTarget", () => {
+  const expected = { tabId: 1, leafId: 5, session: "main" };
+
+  it("accepts the same tab, leaf, and session", () => {
+    expect(
+      isCurrentTmuxTarget({ id: 1, activeLeafId: 5, tmuxSession: "main" }, expected),
+    ).toBe(true);
+  });
+
+  it("rejects a stale response after focus / leaf / session moved on", () => {
+    // Switched to another tab.
+    expect(
+      isCurrentTmuxTarget({ id: 2, activeLeafId: 5, tmuxSession: "main" }, expected),
+    ).toBe(false);
+    // Split / focused a different leaf in the same tab.
+    expect(
+      isCurrentTmuxTarget({ id: 1, activeLeafId: 9, tmuxSession: "main" }, expected),
+    ).toBe(false);
+    // Reattached a different tmux session on the same leaf.
+    expect(
+      isCurrentTmuxTarget({ id: 1, activeLeafId: 5, tmuxSession: "other" }, expected),
+    ).toBe(false);
+    // No active terminal tab anymore.
+    expect(isCurrentTmuxTarget(null, expected)).toBe(false);
+    expect(isCurrentTmuxTarget(undefined, expected)).toBe(false);
+  });
+
+  it("rejects when the session binding is gone", () => {
+    expect(
+      isCurrentTmuxTarget({ id: 1, activeLeafId: 5, tmuxSession: undefined }, expected),
+    ).toBe(false);
   });
 });
 

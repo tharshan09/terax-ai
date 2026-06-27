@@ -98,3 +98,37 @@ export function renameTmuxSession(
     to,
   });
 }
+
+/** Active-pane cwd of `session` on the workspace's host, used to follow `cd`
+ *  under tmux (which swallows the inner shell's OSC 7). Resolves to "" (a
+ *  silent skip for the poller) when no ControlMaster is open yet or the session
+ *  is gone; rejects only on a real backend failure. */
+export function tmuxPaneCwd(
+  workspace: WorkspaceEnv | undefined,
+  session: string,
+): Promise<string> {
+  return invoke<string>("tmux_pane_cwd", {
+    workspace: workspace ?? currentWorkspaceEnv(),
+    session,
+  });
+}
+
+/** Whether a (possibly slow) tmux pane-cwd poll response still applies to the
+ *  leaf/session the user is looking at. The async round-trip can resolve after
+ *  the user switched tab, split, or reattached a different session; applying a
+ *  stale path then would bleed one repo's cwd onto another. Compared against the
+ *  live active terminal tab at resolution time. */
+export function isCurrentTmuxTarget(
+  current:
+    | { id: number; activeLeafId?: number; tmuxSession?: string }
+    | null
+    | undefined,
+  expected: { tabId: number; leafId: number; session: string },
+): boolean {
+  return (
+    !!current &&
+    current.id === expected.tabId &&
+    current.activeLeafId === expected.leafId &&
+    current.tmuxSession === expected.session
+  );
+}

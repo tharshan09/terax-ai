@@ -24,6 +24,10 @@ type Props = {
   privateActive: boolean;
   sourceControl: SourceControlSummary;
   activeLeafId: number | null;
+  /** Active terminal tab's env + tmux session, so Claude stats can be read from
+   *  the host (and session) Claude actually runs on over SSH. */
+  activeWorkspace?: WorkspaceEnv;
+  activeTmuxSession?: string;
 };
 
 export function StatusBar({
@@ -37,16 +41,24 @@ export function StatusBar({
   privateActive,
   sourceControl,
   activeLeafId,
+  activeWorkspace,
+  activeTmuxSession,
 }: Props) {
   const panelOpen = useChatStore((s) => s.panelOpen);
   const openPanel = useChatStore((s) => s.openPanel);
   const layout = usePreferencesStore((s) => s.statusbarLayout);
+  const showAi = usePreferencesStore((s) => s.statusbarShowAi);
 
   // Only poll Claude Code stats when a Claude widget is actually shown.
   const claudeShown = layout.some(
     (w) => w.visible && w.id.startsWith("claude-"),
   );
-  const claudeStatus = useClaudeStatus(activeLeafId, claudeShown);
+  const claudeStatus = useClaudeStatus(
+    activeLeafId,
+    claudeShown,
+    activeWorkspace,
+    activeTmuxSession,
+  );
 
   const ctx: StatusbarWidgetCtx = {
     cwd,
@@ -72,11 +84,12 @@ export function StatusBar({
       <div className="flex shrink-0 items-center gap-1.5">
         <StatusbarConfig />
         <AgentStatusPill onClick={onOpenMini} />
-        {panelOpen && hasComposer ? (
-          <AiStatusBarControls />
-        ) : (
-          <AiOpenButton onOpen={openPanel} />
-        )}
+        {showAi &&
+          (panelOpen && hasComposer ? (
+            <AiStatusBarControls />
+          ) : (
+            <AiOpenButton onOpen={openPanel} />
+          ))}
       </div>
     </footer>
   );

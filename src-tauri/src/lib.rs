@@ -234,6 +234,7 @@ pub fn run() {
             tmux::tmux_list_sessions,
             tmux::tmux_kill_session,
             tmux::tmux_rename_session,
+            tmux::tmux_pane_cwd,
             workspace::wsl_list_distros,
             workspace::wsl_default_distro,
             workspace::wsl_home,

@@ -13,6 +13,8 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 use super::agent::{existing_config, settings_path};
+use crate::modules::workspace::WorkspaceEnv;
+use crate::modules::{ssh, tmux};
 
 /// Distinctive substring of our wrapper command, separator-normalized, used to
 /// detect (and avoid re-wrapping) a statusLine we already own.
@@ -28,18 +30,106 @@ const WRAPPER_SCRIPT: &str = r#"#!/usr/bin/env bash
 input="$(cat)"
 dir="$HOME/.claude/.terax"
 
-if [ -n "$TERAX_PTY_ID" ] && command -v jq >/dev/null 2>&1; then
-  mkdir -p "$dir" 2>/dev/null
-  out="$dir/status-$TERAX_PTY_ID.json"
-  if printf '%s' "$input" | jq -c '{
-        model: (.model.display_name // .model.id // null),
-        contextPct: (.context_window.used_percentage // null),
-        costUsd: (.cost.total_cost_usd // null),
-        ts: now
-      }' > "$out.tmp" 2>/dev/null; then
-    mv -f "$out.tmp" "$out" 2>/dev/null || rm -f "$out.tmp" 2>/dev/null
-  else
-    rm -f "$out.tmp" 2>/dev/null
+# Write the stats under every key the owning tab might read: the per-PTY id
+# (local / non-tmux) and, inside tmux, the session name. Over SSH+tmux the
+# local TERAX_PTY_ID never reaches the pane, so the session name is the only
+# stable key the local reader and this wrapper both know.
+keys=""
+[ -n "$TERAX_PTY_ID" ] && keys="$keys $TERAX_PTY_ID"
+if [ -n "$TMUX" ]; then
+  sn="$(tmux display-message -p '#{session_name}' 2>/dev/null)"
+  [ -n "$sn" ] && keys="$keys tmux-$sn"
+fi
+
+if [ -n "$keys" ]; then
+  payload=""
+  # python3 (present on the SSH hosts) additionally derives context TOKEN counts
+  # from the transcript, which the statusLine input does not carry. jq is the
+  # basic fallback (model / context% / cost, no token counts).
+  if command -v python3 >/dev/null 2>&1; then
+    payload="$(printf '%s' "$input" | python3 -c '
+import sys, json, os, time
+def used_tokens(p):
+    if not p or not os.path.exists(p):
+        return None
+    try:
+        sz = os.path.getsize(p)
+        with open(p, "rb") as f:
+            if sz > 524288:
+                f.seek(sz - 524288)
+                f.readline()
+            data = f.read().decode("utf-8", "replace")
+    except Exception:
+        return None
+    last = None
+    for ln in data.splitlines():
+        if "usage" not in ln:
+            continue
+        try:
+            o = json.loads(ln)
+        except Exception:
+            continue
+        if o.get("isSidechain"):
+            continue
+        m = o.get("message") or {}
+        if m.get("role") != "assistant":
+            continue
+        u = m.get("usage")
+        if isinstance(u, dict):
+            last = u
+    if not last:
+        return None
+    return (last.get("input_tokens", 0)
+            + last.get("cache_creation_input_tokens", 0)
+            + last.get("cache_read_input_tokens", 0))
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    d = {}
+md = d.get("model") or {}
+co = d.get("cost") or {}
+cw = d.get("context_window") or {}
+mid = md.get("id") or ""
+used = used_tokens(d.get("transcript_path"))
+exceeds = bool(d.get("exceeds_200k_tokens"))
+win = 1000000 if ("1m" in mid.lower() or exceeds or (used and used > 200000)) else 200000
+pct = cw.get("used_percentage")
+if pct is None and used is not None:
+    pct = used * 100.0 / win
+print(json.dumps({
+    "model": md.get("display_name") or md.get("id"),
+    "modelId": (mid or None),
+    "contextPct": pct,
+    "usedTokens": used,
+    "maxTokens": (win if used is not None else None),
+    "costUsd": co.get("total_cost_usd"),
+    "linesAdded": co.get("total_lines_added"),
+    "linesRemoved": co.get("total_lines_removed"),
+    "ts": time.time(),
+}, separators=(",", ":")))
+' 2>/dev/null)"
+  fi
+  if [ -z "$payload" ] && command -v jq >/dev/null 2>&1; then
+    payload="$(printf '%s' "$input" | jq -c '{
+          model: (.model.display_name // .model.id // null),
+          modelId: (.model.id // null),
+          contextPct: (.context_window.used_percentage // null),
+          usedTokens: null,
+          maxTokens: null,
+          costUsd: (.cost.total_cost_usd // null),
+          linesAdded: (.cost.total_lines_added // null),
+          linesRemoved: (.cost.total_lines_removed // null),
+          ts: now
+        }' 2>/dev/null)"
+  fi
+  if [ -n "$payload" ]; then
+    mkdir -p "$dir" 2>/dev/null
+    for k in $keys; do
+      if printf '%s' "$payload" > "$dir/status-$k.json.tmp" 2>/dev/null; then
+        mv -f "$dir/status-$k.json.tmp" "$dir/status-$k.json" 2>/dev/null \
+          || rm -f "$dir/status-$k.json.tmp" 2>/dev/null
+      fi
+    done
   fi
 fi
 
@@ -155,8 +245,19 @@ fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
     })
 }
 
+/// Install the statusLine wrapper so the model/context/cost widgets populate.
+/// Local edits this machine's `~/.claude`; SSH installs on the remote host (the
+/// machine Claude actually runs on), reversibly, preserving the user's own
+/// statusLine command.
 #[tauri::command]
-pub fn claude_enable_statusline() -> Result<(), String> {
+pub fn claude_enable_statusline(workspace: Option<WorkspaceEnv>) -> Result<(), String> {
+    match WorkspaceEnv::from_option(workspace) {
+        WorkspaceEnv::Ssh { host } => enable_ssh(&host),
+        _ => enable_local(),
+    }
+}
+
+fn enable_local() -> Result<(), String> {
     let settings = settings_path()?;
     let dir = terax_subdir()?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
@@ -178,7 +279,14 @@ pub fn claude_enable_statusline() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn claude_disable_statusline() -> Result<(), String> {
+pub fn claude_disable_statusline(workspace: Option<WorkspaceEnv>) -> Result<(), String> {
+    match WorkspaceEnv::from_option(workspace) {
+        WorkspaceEnv::Ssh { host } => disable_ssh(&host),
+        _ => disable_local(),
+    }
+}
+
+fn disable_local() -> Result<(), String> {
     let settings = settings_path()?;
     let existing = read_settings(&settings)?;
 
@@ -207,7 +315,14 @@ pub fn claude_disable_statusline() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn claude_statusline_enabled() -> bool {
+pub fn claude_statusline_enabled(workspace: Option<WorkspaceEnv>) -> bool {
+    match WorkspaceEnv::from_option(workspace) {
+        WorkspaceEnv::Ssh { host } => enabled_ssh(&host),
+        _ => enabled_local(),
+    }
+}
+
+fn enabled_local() -> bool {
     let Ok(settings) = settings_path() else {
         return false;
     };
@@ -224,30 +339,153 @@ pub fn claude_statusline_enabled() -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeStatus {
     pub model: Option<String>,
+    /// Full model id (e.g. `claude-opus-4-8`), surfaced in the model tooltip.
+    pub model_id: Option<String>,
     pub context_pct: Option<f64>,
+    /// Context tokens used / the window size, derived from the transcript by the
+    /// wrapper (the statusLine input carries no token counts). Drive the richer
+    /// "535k / 1M tokens" context tooltip; absent on the jq-only fallback path.
+    pub used_tokens: Option<u64>,
+    pub max_tokens: Option<u64>,
     pub cost_usd: Option<f64>,
+    /// Lines added/removed this session, when the cost object carries them.
+    pub lines_added: Option<u64>,
+    pub lines_removed: Option<u64>,
     /// Epoch seconds the wrapper last wrote. The frontend hides stale stats
     /// (e.g. after the Claude session exited) using this.
     pub ts: Option<f64>,
 }
 
-/// Read the stats the wrapper wrote for the given PTY/tab. Returns `None` when
-/// nothing has been written (no Claude session, or stats not enabled).
+/// Read the stats the wrapper wrote for the given tab. Local reads the per-PTY
+/// file; SSH+tmux reads the remote per-session file over the ControlMaster (the
+/// PTY id can't reach the remote tmux pane, so the session name is the key).
+/// Returns `None` when nothing has been written (no Claude session, stats not
+/// enabled, or - over SSH - no tmux session bound / master down).
 #[tauri::command]
-pub fn claude_status(pty_id: u32) -> Option<ClaudeStatus> {
+pub fn claude_status(
+    pty_id: u32,
+    workspace: Option<WorkspaceEnv>,
+    tmux_session: Option<String>,
+) -> Option<ClaudeStatus> {
+    match WorkspaceEnv::from_option(workspace) {
+        WorkspaceEnv::Ssh { host } => status_ssh(&host, tmux_session.as_deref()),
+        _ => status_local(pty_id),
+    }
+}
+
+fn status_local(pty_id: u32) -> Option<ClaudeStatus> {
     let path = terax_subdir().ok()?.join(format!("status-{pty_id}.json"));
     let content = std::fs::read_to_string(path).ok()?;
     let v: Value = serde_json::from_str(&content).ok()?;
+    status_from_value(&v)
+}
+
+/// Build a [`ClaudeStatus`] from the wrapper's JSON, treating an all-empty
+/// record as absent.
+fn status_from_value(v: &Value) -> Option<ClaudeStatus> {
     let status = ClaudeStatus {
         model: v.get("model").and_then(Value::as_str).map(str::to_string),
+        model_id: v.get("modelId").and_then(Value::as_str).map(str::to_string),
         context_pct: v.get("contextPct").and_then(Value::as_f64),
+        used_tokens: v.get("usedTokens").and_then(Value::as_u64),
+        max_tokens: v.get("maxTokens").and_then(Value::as_u64),
         cost_usd: v.get("costUsd").and_then(Value::as_f64),
+        lines_added: v.get("linesAdded").and_then(Value::as_u64),
+        lines_removed: v.get("linesRemoved").and_then(Value::as_u64),
         ts: v.get("ts").and_then(Value::as_f64),
     };
     if status.model.is_none() && status.context_pct.is_none() && status.cost_usd.is_none() {
         return None;
     }
     Some(status)
+}
+
+// --- SSH: install on / read from the host Claude actually runs on -----------
+
+/// Read `~/.claude/<rel>` on the host over the ControlMaster. Empty/missing maps
+/// to `None`; never opens a fresh prompt (BatchMode). Reading via `cat` keeps a
+/// non-existent file from being treated as an error (so we never clobber).
+fn ssh_read(host: &str, rel: &str) -> Result<Option<String>, String> {
+    let cap = ssh::run_remote_capture(host, &format!("cat ~/.claude/{rel} 2>/dev/null"))?;
+    Ok(if cap.stdout.is_empty() {
+        None
+    } else {
+        Some(cap.stdout)
+    })
+}
+
+fn enable_ssh(host: &str) -> Result<(), String> {
+    ssh::validate_ssh_host(host)?;
+    ssh::run_remote_capture(host, "mkdir -p ~/.claude/.terax")?;
+    ssh::write_file(host, "~/.claude/.terax/statusline.sh", WRAPPER_SCRIPT)?;
+
+    let raw = ssh_read(host, "settings.json")?;
+    // Refuses to overwrite invalid JSON, same guard as the local path.
+    let existing = existing_config(raw.as_deref(), Path::new("the remote ~/.claude/settings.json"))?;
+    // Capture the user's original command exactly once (None when already ours).
+    if let Some(original) = original_command(&existing) {
+        ssh::write_file(host, "~/.claude/.terax/statusline-original", &original)?;
+    }
+    // Absolute remote path so the statusLine command does not depend on Claude's
+    // exec shell expanding `$HOME`.
+    let home = ssh::run_remote_capture(host, "printf %s \"$HOME\"")?.stdout;
+    let cmd = wrapper_command(Path::new(&format!("{}/.claude/.terax/statusline.sh", home.trim())));
+    let merged = set_statusline_command(existing, &cmd);
+    let out = serde_json::to_string_pretty(&merged).map_err(|e| e.to_string())?;
+    ssh::write_file(host, "~/.claude/settings.json", &out)
+}
+
+fn disable_ssh(host: &str) -> Result<(), String> {
+    ssh::validate_ssh_host(host)?;
+    let raw = ssh_read(host, "settings.json")?;
+    let existing = existing_config(raw.as_deref(), Path::new("the remote ~/.claude/settings.json"))?;
+    let is_ours = existing
+        .get("statusLine")
+        .and_then(|s| s.get("command"))
+        .and_then(Value::as_str)
+        .is_some_and(is_our_command);
+    if !is_ours {
+        return Ok(());
+    }
+    let original = ssh_read(host, ".terax/statusline-original")?
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let restored = restore_statusline(existing, original.as_deref());
+    let out = serde_json::to_string_pretty(&restored).map_err(|e| e.to_string())?;
+    ssh::write_file(host, "~/.claude/settings.json", &out)?;
+    let _ = ssh::run_remote_capture(
+        host,
+        "rm -f ~/.claude/.terax/statusline.sh ~/.claude/.terax/statusline-original",
+    );
+    Ok(())
+}
+
+fn enabled_ssh(host: &str) -> bool {
+    let Ok(Some(raw)) = ssh_read(host, "settings.json") else {
+        return false;
+    };
+    let Ok(root) = existing_config(Some(&raw), Path::new("settings.json")) else {
+        return false;
+    };
+    root.get("statusLine")
+        .and_then(|s| s.get("command"))
+        .and_then(Value::as_str)
+        .is_some_and(is_our_command)
+}
+
+fn status_ssh(host: &str, tmux_session: Option<&str>) -> Option<ClaudeStatus> {
+    let session = tmux_session?;
+    // Defense in depth: the session name is spliced into a remote path/command.
+    if !tmux::is_valid_session_name(session) {
+        return None;
+    }
+    // Avoid opening a fresh connection on every poll when disconnected.
+    if !ssh::master_alive(host) {
+        return None;
+    }
+    let raw = ssh_read(host, &format!(".terax/status-tmux-{session}.json")).ok()??;
+    let v: Value = serde_json::from_str(&raw).ok()?;
+    status_from_value(&v)
 }
 
 #[cfg(test)]
@@ -316,5 +554,47 @@ mod tests {
     fn set_statusline_replaces_non_object_root() {
         let out = set_statusline_command(json!("garbage"), "bash \"/h/.terax/statusline.sh\"");
         assert!(is_our_command(out["statusLine"]["command"].as_str().unwrap()));
+    }
+
+    #[test]
+    fn status_from_value_parses_and_drops_empty() {
+        let v = json!({
+            "model": "Opus", "modelId": "claude-opus-4-8",
+            "contextPct": 12.5, "usedTokens": 535623, "maxTokens": 1000000,
+            "costUsd": 0.4, "linesAdded": 12, "linesRemoved": 3, "ts": 1.0,
+        });
+        let s = status_from_value(&v).expect("should parse");
+        assert_eq!(s.model.as_deref(), Some("Opus"));
+        assert_eq!(s.model_id.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(s.context_pct, Some(12.5));
+        assert_eq!(s.used_tokens, Some(535623));
+        assert_eq!(s.max_tokens, Some(1000000));
+        assert_eq!(s.cost_usd, Some(0.4));
+        assert_eq!(s.lines_added, Some(12));
+        // All-empty record reads as absent.
+        assert!(status_from_value(&json!({ "ts": 5.0 })).is_none());
+        assert!(status_from_value(&json!({})).is_none());
+    }
+
+    #[test]
+    fn wrapper_keys_by_pty_id_and_tmux_session() {
+        // Local / non-tmux still keys by the PTY id; under tmux it also writes a
+        // per-session file (the only key that survives SSH+tmux).
+        assert!(WRAPPER_SCRIPT.contains("status-$k.json"));
+        assert!(WRAPPER_SCRIPT.contains("keys=\"$keys $TERAX_PTY_ID\""));
+        assert!(WRAPPER_SCRIPT.contains("keys=\"$keys tmux-$sn\""));
+        assert!(WRAPPER_SCRIPT.contains("display-message -p '#{session_name}'"));
+        // Derives context token counts from the transcript (python path) with a
+        // jq fallback, and never embeds a single quote that would break python -c.
+        assert!(WRAPPER_SCRIPT.contains("transcript_path"));
+        assert!(WRAPPER_SCRIPT.contains("cache_read_input_tokens"));
+        assert!(WRAPPER_SCRIPT.contains("python3 -c"));
+        let py_start = WRAPPER_SCRIPT.find("python3 -c '").unwrap() + "python3 -c '".len();
+        let py = &WRAPPER_SCRIPT[py_start..];
+        let py = &py[..py.find("' 2>/dev/null").unwrap()];
+        assert!(!py.contains('\''), "python -c body must contain no single quotes");
+        // Always forwards to the user's original statusLine and never fails.
+        assert!(WRAPPER_SCRIPT.contains("statusline-original"));
+        assert!(WRAPPER_SCRIPT.trim_end().ends_with("exit 0"));
     }
 }

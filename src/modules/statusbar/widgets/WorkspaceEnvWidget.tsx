@@ -1,3 +1,8 @@
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { IS_WINDOWS } from "@/lib/platform";
 import { useWorkspaceEnvStore } from "@/modules/workspace";
 import { CloudIcon } from "@hugeicons/core-free-icons";
@@ -17,13 +22,15 @@ export function WorkspaceEnvWidget({ ctx }: { ctx: StatusbarWidgetCtx }) {
   if (env.kind === "ssh") {
     const label = env.label ?? env.host;
     return (
-      <span
-        className="flex h-6 shrink-0 items-center gap-1 rounded-sm px-1.5 text-[11px] text-muted-foreground"
-        title={`Connected to ${env.host}`}
-      >
-        <HugeiconsIcon icon={CloudIcon} size={13} strokeWidth={1.75} />
-        <span className="max-w-28 truncate">SSH: {label}</span>
-      </span>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="flex h-6 shrink-0 items-center gap-1 rounded-sm px-1.5 text-[11px] text-muted-foreground">
+            <HugeiconsIcon icon={CloudIcon} size={13} strokeWidth={1.75} />
+            <span className="max-w-28 truncate">SSH: {label}</span>
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="top">Connected to {env.host}</TooltipContent>
+      </Tooltip>
     );
   }
 

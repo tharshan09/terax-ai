@@ -57,6 +57,12 @@ import {
   useSourceControlContext,
 } from "@/modules/source-control";
 import { StatusBar } from "@/modules/statusbar";
+import { useClaudeStatsStore } from "@/modules/statusbar/lib/claudeStatsStore";
+import {
+  claudeStatuslineEnabled,
+  disableClaudeStatusline,
+  enableClaudeStatusline,
+} from "@/modules/statusbar/lib/claudeStatusline";
 import {
   TabSwitcherHud,
   useTabs,
@@ -67,6 +73,7 @@ import {
 import {
   clearFocusedTerminal,
   disposeSession,
+  applyExternalCwd,
   findLeafCwd,
   hasLeaf,
   leafIds,
@@ -81,8 +88,10 @@ import {
   writeToSession,
 } from "@/modules/terminal";
 import {
+  isCurrentTmuxTarget,
   isValidSessionName,
   listTmuxSessions,
+  tmuxPaneCwd,
 } from "@/modules/terminal/lib/tmux";
 import {
   SpaceSwitcher,
@@ -110,6 +119,11 @@ import { WorkspaceSurface } from "./components/WorkspaceSurface";
 import { useAppCloseGuard } from "./hooks/useAppCloseGuard";
 import { useTabCloseGuards } from "./hooks/useTabCloseGuards";
 import { useWorkspaceSwitcher } from "./hooks/useWorkspaceSwitcher";
+
+/** Interval for the tmux pane-cwd poll. tmux swallows the inner shell's OSC 7,
+ *  so on tmux hosts `cd` reaches us only via this poll. Slow enough to barely
+ *  touch the ControlMaster, fast enough to feel live. */
+const TMUX_CWD_POLL_MS = 2000;
 
 function tmuxTargetForTab(tab: {
   id: number;
@@ -373,6 +387,142 @@ export default function App() {
       setWorkspaceEnv(spaceEnv);
     }
   }, [activeTab, activeSpaceId, workspaceEnv, setWorkspaceEnv]);
+
+  // cwd-follow under tmux. tmux swallows the inner shell's OSC 7, so on an SSH
+  // host running tmux a terminal `cd` never reaches us and the explorer /
+  // source-control stay stuck at the seeded "~". Poll tmux's own
+  // `pane_current_path` for the ACTIVE ssh+tmux leaf (the only cwd the explorer
+  // and source-control read) and feed it through the same sink OSC 7 uses, so
+  // both panels follow with zero extra wiring. Additive: local and non-tmux SSH
+  // tabs keep their OSC 7 path untouched. Deps are primitive scalars only — the
+  // `activeTerminalTab` object identity changes on every keystroke-rate
+  // setLeafCwd, and depending on it would restart the interval (and spam the
+  // ControlMaster) on every cd.
+  // The SSH+tmux terminal whose live pane cwd should drive explorer +
+  // source-control. Prefer the active terminal tab; otherwise (you're on a
+  // Source-Control / History / editor tab, which carry no remote cwd) fall back
+  // to a terminal tab on the ambient SSH host, so the cwd stays resolved off the
+  // terminal instead of snapping back to "No repository".
+  const tmuxPollTarget = useMemo(() => {
+    const fromTab = (t: (typeof tabs)[number] | null | undefined) =>
+      t?.kind === "terminal" &&
+      t.workspace?.kind === "ssh" &&
+      t.tmuxSession &&
+      t.activeLeafId != null
+        ? {
+            host: t.workspace.host,
+            session: t.tmuxSession,
+            leafId: t.activeLeafId,
+            tabId: t.id,
+          }
+        : null;
+    const active = fromTab(activeTerminalTab);
+    if (active) return active;
+    if (workspaceEnv.kind === "ssh") {
+      const host = workspaceEnv.host;
+      return fromTab(
+        tabs.find(
+          (t) =>
+            t.kind === "terminal" &&
+            t.workspace?.kind === "ssh" &&
+            t.workspace.host === host &&
+            !!t.tmuxSession &&
+            t.activeLeafId != null,
+        ),
+      );
+    }
+    return null;
+  }, [activeTerminalTab, tabs, workspaceEnv]);
+  const tmuxPollHost = tmuxPollTarget?.host;
+  const tmuxPollSession = tmuxPollTarget?.session;
+  const tmuxPollLeafId = tmuxPollTarget?.leafId;
+  const tmuxPollTabId = tmuxPollTarget?.tabId;
+  useEffect(() => {
+    if (
+      !tmuxPollHost ||
+      !tmuxPollSession ||
+      tmuxPollLeafId == null ||
+      tmuxPollTabId == null
+    )
+      return;
+    const expected = {
+      tabId: tmuxPollTabId,
+      leafId: tmuxPollLeafId,
+      session: tmuxPollSession,
+    };
+    const workspace = { kind: "ssh" as const, host: tmuxPollHost };
+    let cancelled = false;
+    let inFlight = false;
+    const tick = () => {
+      if (cancelled || inFlight || document.hidden) return;
+      inFlight = true;
+      tmuxPaneCwd(workspace, tmuxPollSession)
+        .then((path) => {
+          if (cancelled || !path) return;
+          // Drop a late response once the target tab / leaf / session moved on.
+          const tab = tabsRef.current.find((t) => t.id === expected.tabId);
+          if (!isCurrentTmuxTarget(tab, expected)) return;
+          applyExternalCwd(expected.leafId, path);
+        })
+        .catch(() => {})
+        .finally(() => {
+          inFlight = false;
+        });
+    };
+    tick();
+    const timer = setInterval(tick, TMUX_CWD_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [tmuxPollHost, tmuxPollSession, tmuxPollLeafId, tmuxPollTabId]);
+
+  // Claude Code stats over SSH. The model/context/cost widgets read stats the
+  // statusLine wrapper writes; over SSH Claude runs on the host, so the wrapper
+  // must be installed there. When the local stats toggle is on, install it on
+  // each connected SSH host (once per session); when it goes off, remove it
+  // again. Mirrors the local install the config toggle already does.
+  const claudeStatsEnabled = useClaudeStatsStore((s) => s.enabled);
+  const installedClaudeHosts = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    void claudeStatuslineEnabled()
+      .then((on) => useClaudeStatsStore.getState().setEnabled(on))
+      .catch(() => {});
+  }, []);
+  // Only hosts with a bound tmux session: that implies the ControlMaster is up
+  // (so the install reuses it instead of opening a second connection) and is the
+  // only case where remote stats can be keyed (SSH+tmux).
+  const sshHostsKey = useMemo(() => {
+    const hosts = new Set<string>();
+    for (const t of tabs) {
+      if (t.kind === "terminal" && t.workspace?.kind === "ssh" && t.tmuxSession) {
+        hosts.add(t.workspace.host);
+      }
+    }
+    return [...hosts].sort().join("\n");
+  }, [tabs]);
+  useEffect(() => {
+    if (claudeStatsEnabled !== true || !sshHostsKey) return;
+    for (const host of sshHostsKey.split("\n")) {
+      if (installedClaudeHosts.current.has(host)) continue;
+      installedClaudeHosts.current.add(host);
+      void enableClaudeStatusline({ kind: "ssh", host }).catch(() => {
+        // Leave it un-installed so a later connect/change retries.
+        installedClaudeHosts.current.delete(host);
+      });
+    }
+  }, [claudeStatsEnabled, sshHostsKey]);
+  const prevClaudeStatsEnabled = useRef(claudeStatsEnabled);
+  useEffect(() => {
+    const prev = prevClaudeStatsEnabled.current;
+    prevClaudeStatsEnabled.current = claudeStatsEnabled;
+    if (prev === true && claudeStatsEnabled === false) {
+      for (const host of installedClaudeHosts.current) {
+        void disableClaudeStatusline({ kind: "ssh", host }).catch(() => {});
+      }
+      installedClaudeHosts.current.clear();
+    }
+  }, [claudeStatsEnabled]);
 
   useEffect(() => {
     setActiveSearchAddon(
@@ -1311,6 +1461,8 @@ export default function App() {
               }
               sourceControl={sourceControl}
               activeLeafId={activeLeafId}
+              activeWorkspace={activeTerminalTab?.workspace}
+              activeTmuxSession={activeTerminalTab?.tmuxSession}
             />
           )}
 

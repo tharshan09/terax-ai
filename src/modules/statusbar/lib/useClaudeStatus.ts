@@ -1,18 +1,28 @@
 import { ptyIdForLeaf } from "@/modules/terminal/lib/useTerminalSession";
+import type { WorkspaceEnv } from "@/modules/workspace";
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
 
 export type ClaudeStatus = {
   model: string | null;
+  modelId: string | null;
   contextPct: number | null;
+  usedTokens: number | null;
+  maxTokens: number | null;
   costUsd: number | null;
+  linesAdded: number | null;
+  linesRemoved: number | null;
   ts: number | null;
 };
 
 const POLL_MS = 2000;
-// statusLine refreshes while Claude renders; after this long with no write we
-// treat the stats as gone (session exited or moved on).
-const STALE_SECONDS = 60;
+// The statusLine only writes while Claude RENDERS (i.e. when it's active); an
+// idle-but-alive session (you're reading its output, or fiddling with the UI)
+// stops writing, so a short window would wrongly hide a live session's stats.
+// Keep them until a write is this old - long enough to ride out idle gaps,
+// short enough that an exited session eventually clears. Switching tab/session
+// re-keys the poll and clears stale stats immediately regardless.
+const STALE_SECONDS = 30 * 60;
 
 /**
  * Polls the per-tab Claude Code stats the statusLine wrapper writes, for the
@@ -22,8 +32,13 @@ const STALE_SECONDS = 60;
 export function useClaudeStatus(
   activeLeafId: number | null,
   enabled: boolean,
+  workspace?: WorkspaceEnv,
+  tmuxSession?: string,
 ): ClaudeStatus | null {
   const [status, setStatus] = useState<ClaudeStatus | null>(null);
+  // Over SSH the stats live on the host keyed by tmux session; locally they live
+  // in a per-PTY file. Primitive deps so the poll restarts only on a real change.
+  const sshHost = workspace?.kind === "ssh" ? workspace.host : undefined;
 
   useEffect(() => {
     if (!enabled || activeLeafId === null) {
@@ -39,7 +54,11 @@ export function useClaudeStatus(
         return;
       }
       try {
-        const s = await invoke<ClaudeStatus | null>("claude_status", { ptyId });
+        const s = await invoke<ClaudeStatus | null>("claude_status", {
+          ptyId,
+          workspace: sshHost ? { kind: "ssh", host: sshHost } : undefined,
+          tmuxSession,
+        });
         if (cancelled) return;
         const fresh =
           s && (s.ts === null || Date.now() / 1000 - s.ts < STALE_SECONDS);
@@ -55,7 +74,7 @@ export function useClaudeStatus(
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [activeLeafId, enabled]);
+  }, [activeLeafId, enabled, sshHost, tmuxSession]);
 
   return status;
 }

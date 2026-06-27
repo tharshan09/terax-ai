@@ -172,6 +172,9 @@ export type Preferences = {
   editorAutoSave: boolean;
   editorAutoSaveDelay: number;
   statusbarLayout: StatusbarLayout;
+  /** Show the AI-panel entry points (Open AI agent button / AI controls) in the
+   *  status bar. Off for users who drive AI from the terminal, not Terax's AI. */
+  statusbarShowAi: boolean;
 };
 
 const STORE_PATH = "terax-settings.json";
@@ -228,6 +231,7 @@ const KEY_SHORTCUTS = "shortcuts";
 const KEY_EDITOR_AUTO_SAVE = "editorAutoSave";
 const KEY_EDITOR_AUTO_SAVE_DELAY = "editorAutoSaveDelay";
 const KEY_STATUSBAR_LAYOUT = "statusbarLayout";
+const KEY_STATUSBAR_SHOW_AI = "statusbarShowAi";
 
 export const TERMINAL_FONT_SIZE_DEFAULT = 14;
 export const TERMINAL_FONT_SIZE_MIN = 8;
@@ -297,6 +301,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   editorAutoSave: false,
   editorAutoSaveDelay: 1000,
   statusbarLayout: DEFAULT_STATUSBAR_LAYOUT,
+  statusbarShowAi: true,
 };
 
 const store = new LazyStore(STORE_PATH, { defaults: {}, autoSave: 200 });
@@ -469,6 +474,8 @@ export async function loadPreferences(): Promise<Preferences> {
         DEFAULT_PREFERENCES.editorAutoSaveDelay,
     ),
     statusbarLayout: coerceStatusbarLayout(get(KEY_STATUSBAR_LAYOUT)),
+    statusbarShowAi:
+      get<boolean>(KEY_STATUSBAR_SHOW_AI) ?? DEFAULT_PREFERENCES.statusbarShowAi,
   };
 }
 
@@ -757,6 +764,10 @@ export async function resetStatusbarLayout(): Promise<void> {
   await writePref(KEY_STATUSBAR_LAYOUT, DEFAULT_STATUSBAR_LAYOUT);
 }
 
+export async function setStatusbarShowAi(value: boolean): Promise<void> {
+  await writePref(KEY_STATUSBAR_SHOW_AI, value);
+}
+
 export type PrefKey = keyof Preferences;
 
 /** Subscribe to changes from any window (settings → main). */
@@ -816,6 +827,7 @@ export async function onPreferencesChange(
     [KEY_EDITOR_AUTO_SAVE]: "editorAutoSave",
     [KEY_EDITOR_AUTO_SAVE_DELAY]: "editorAutoSaveDelay",
     [KEY_STATUSBAR_LAYOUT]: "statusbarLayout",
+    [KEY_STATUSBAR_SHOW_AI]: "statusbarShowAi",
   };
   // Same-process writes still fire onChange immediately; cross-window writes
   // arrive via the Tauri event emitted by writePref().

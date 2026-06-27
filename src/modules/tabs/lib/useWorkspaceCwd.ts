@@ -45,8 +45,19 @@ export function useWorkspaceCwd(
       envsMatch(activeTab.workspace, workspaceEnv)
     ) {
       lastTerminalCwd.current = { cwd: activeTab.cwd, env: activeTab.workspace };
+    } else if (workspaceEnv.kind === "ssh") {
+      // Off a terminal tab (source-control / history / editor) the tmux cwd poll
+      // keeps a background SSH terminal's cwd fresh; mirror it into the cache so
+      // explorerRoot follows the live remote cwd instead of a stale value. SSH
+      // only, so the local/WSL last-active-terminal behavior is unchanged.
+      const term = tabs.find(
+        (t) => t.kind === "terminal" && t.cwd && envsMatch(t.workspace, workspaceEnv),
+      );
+      if (term?.kind === "terminal" && term.cwd) {
+        lastTerminalCwd.current = { cwd: term.cwd, env: term.workspace };
+      }
     }
-  }, [activeTab, workspaceEnv]);
+  }, [activeTab, tabs, workspaceEnv]);
 
   const explorerRoot = useMemo<string | null>(() => {
     if (

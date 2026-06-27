@@ -16,6 +16,7 @@ import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
   resetStatusbarLayout,
   setStatusbarLayout,
+  setStatusbarShowAi,
 } from "@/modules/settings/store";
 import {
   ArrowDown01Icon,
@@ -26,6 +27,7 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
 import { useRef, useState } from "react";
+import { useClaudeStatsStore } from "./lib/claudeStatsStore";
 import {
   moveWidget,
   moveWidgetByDelta,
@@ -37,6 +39,7 @@ import {
 
 export function StatusbarConfig() {
   const layout = usePreferencesStore((s) => s.statusbarLayout);
+  const showAi = usePreferencesStore((s) => s.statusbarShowAi);
   const [open, setOpen] = useState(false);
   // Live drag preview without writing to the store on every dragenter.
   const [draft, setDraft] = useState<StatusbarLayout | null>(null);
@@ -44,6 +47,13 @@ export function StatusbarConfig() {
   // null = not yet loaded; reflects whether our statusLine wrapper is installed.
   const [statsEnabled, setStatsEnabled] = useState<boolean | null>(null);
   const [statsBusy, setStatsBusy] = useState(false);
+  // Mirror the local enabled state so the App-level reconciler installs/removes
+  // the wrapper on connected SSH hosts (where Claude actually runs).
+  const setStoreEnabled = useClaudeStatsStore((s) => s.setEnabled);
+  const applyEnabled = (v: boolean | null) => {
+    setStatsEnabled(v);
+    setStoreEnabled(v);
+  };
 
   const view = draft ?? layout;
 
@@ -57,9 +67,9 @@ export function StatusbarConfig() {
       // Re-read the real state below rather than trusting the optimistic value.
     }
     try {
-      setStatsEnabled(await invoke<boolean>("claude_statusline_enabled"));
+      applyEnabled(await invoke<boolean>("claude_statusline_enabled"));
     } catch {
-      setStatsEnabled(next);
+      applyEnabled(next);
     }
     setStatsBusy(false);
   };
@@ -83,8 +93,8 @@ export function StatusbarConfig() {
         setOpen(o);
         if (o) {
           void invoke<boolean>("claude_statusline_enabled")
-            .then(setStatsEnabled)
-            .catch(() => setStatsEnabled(false));
+            .then(applyEnabled)
+            .catch(() => applyEnabled(false));
         } else {
           setDraft(null);
           dragId.current = null;
@@ -143,6 +153,23 @@ export function StatusbarConfig() {
             />
           ))}
         </ul>
+        <Separator />
+        <div className="flex items-start gap-2 px-1.5 py-1">
+          <div className="min-w-0 flex-1">
+            <div className="text-[12px]">AI controls</div>
+            <p className="text-[10.5px] leading-snug text-muted-foreground">
+              Show the "Open AI agent" button and AI panel controls. Off if you
+              drive AI from the terminal.
+            </p>
+          </div>
+          <Switch
+            size="sm"
+            checked={showAi}
+            onCheckedChange={(next) => void setStatusbarShowAi(next)}
+            aria-label="Toggle AI controls in status bar"
+            className="mt-0.5"
+          />
+        </div>
         <Separator />
         <div className="flex items-start gap-2 px-1.5 py-1">
           <div className="min-w-0 flex-1">
