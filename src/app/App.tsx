@@ -66,6 +66,7 @@ import {
 import {
   TabSwitcherHud,
   useTabs,
+  useTabSwipe,
   useTabSwitcher,
   useWindowTitle,
   useWorkspaceCwd,
@@ -981,6 +982,25 @@ export default function App() {
 
   useGlobalShortcuts(shortcutHandlers, { isDisabled: shortcutsDisabled });
 
+  // macOS trackpad: a two-finger horizontal swipe switches tabs in the active
+  // space's strip order, clamped at the edges (it does not wrap). The gesture is
+  // detected natively (src-tauri install_tab_swipe_monitor) and delivered via
+  // useTabSwipe; appRootRef bounds the under-cursor horizontal-scroller check.
+  const appRootRef = useRef<HTMLDivElement>(null);
+  const swipeTab = useCallback(
+    (dir: -1 | 1) => {
+      const ids = spaceTabs.map((t) => t.id);
+      if (ids.length < 2) return;
+      const i = ids.indexOf(activeId);
+      if (i < 0) return;
+      const next = Math.min(ids.length - 1, Math.max(0, i + dir)); // clamp, no wrap
+      if (next === i) return; // already at the edge tab in this direction
+      setActiveId(ids[next]); // no swipe animation - the tab strip is the feedback
+    },
+    [spaceTabs, activeId, setActiveId],
+  );
+  useTabSwipe(appRootRef, swipeTab);
+
   const registerTerminalHandle = useCallback(
     (leafId: number, h: TerminalPaneHandle | null) => {
       if (h) terminalRefs.current.set(leafId, h);
@@ -1320,7 +1340,10 @@ export default function App() {
   const shell = (
     <ThemeProvider>
       <TooltipProvider>
-        <div className="relative flex h-screen flex-col overflow-hidden bg-background text-foreground">
+        <div
+          ref={appRootRef}
+          className="relative flex h-screen flex-col overflow-hidden bg-background text-foreground"
+        >
           {!zenMode && (
             <Header
               tabs={spaceTabs}

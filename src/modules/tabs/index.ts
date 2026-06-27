@@ -4,6 +4,7 @@ export {
   useTabSwitcher,
   type TabSwitcherState,
 } from "./lib/useTabSwitcher";
+export { useTabSwipe } from "./lib/useTabSwipe";
 export { labelFor } from "./lib/tabLabel";
 export {
   MAX_PANES_PER_TAB,

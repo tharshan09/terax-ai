@@ -93,6 +93,7 @@ export function AiMiniWindow({ state }: { state: PresenceState }) {
       ref={ref}
       data-state={state}
       data-ai-mini-window
+      data-no-tab-swipe
       className={cn(
         "no-scrollbar-deep fixed z-40 flex flex-col overflow-hidden",
         "rounded-2xl border border-border/60 bg-card text-[12px]",

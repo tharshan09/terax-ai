@@ -34,6 +34,80 @@ fn parse_launch_dir() -> Option<String> {
     None
 }
 
+/// Native two-finger horizontal trackpad swipe -> switch tabs. We do this in
+/// AppKit, not JS, because WebKit never exposes NSEvent.phase / momentumPhase to
+/// the web layer - so a JS wheel handler cannot tell a finger-driven swipe from
+/// the inertial momentum tail and ends up firing twice (skipping tabs). Reading
+/// the phase here makes "one physical flick = exactly one switch" deterministic.
+///
+/// A local scrollWheel monitor sees events before the WKWebView and passes them
+/// through (we only observe). On a committed swipe we emit `terax:tab-swipe` with
+/// a direction; the frontend decides whether the cursor is over a horizontal
+/// scroller before actually switching.
+#[cfg(target_os = "macos")]
+fn install_tab_swipe_monitor(app: &tauri::AppHandle) {
+    use objc2_app_kit::{NSEvent, NSEventMask, NSEventPhase};
+    use std::cell::Cell;
+    use std::ptr::NonNull;
+
+    // Points of horizontal finger travel needed to commit one switch.
+    const THRESHOLD: f64 = 50.0;
+
+    let handle = app.clone();
+    let accum_x = Cell::new(0.0f64);
+    let accum_y = Cell::new(0.0f64);
+    let fired = Cell::new(false);
+
+    let block = block2::RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+        let pass = event.as_ptr();
+        // SAFETY: AppKit dispatches scrollWheel events to this monitor with a
+        // valid NSEvent; we only read it for the duration of the call.
+        let e = unsafe { event.as_ref() };
+
+        // Inertial momentum after the fingers lift: never act on it.
+        if !e.momentumPhase().is_empty() {
+            return pass;
+        }
+        // Classic mouse wheels (non-precise deltas) are not swipes.
+        if !e.hasPreciseScrollingDeltas() {
+            return pass;
+        }
+        let phase = e.phase();
+        if phase.contains(NSEventPhase::Began) {
+            accum_x.set(0.0);
+            accum_y.set(0.0);
+            fired.set(false);
+        }
+        if phase.contains(NSEventPhase::Ended) || phase.contains(NSEventPhase::Cancelled) {
+            accum_x.set(0.0);
+            accum_y.set(0.0);
+            fired.set(false);
+            return pass;
+        }
+        accum_x.set(accum_x.get() + e.scrollingDeltaX());
+        accum_y.set(accum_y.get() + e.scrollingDeltaY());
+        if !fired.get() {
+            let ax = accum_x.get();
+            let ay = accum_y.get();
+            if ax.abs() >= THRESHOLD && ax.abs() > ay.abs() {
+                fired.set(true);
+                // Direction mapping (tune with one flip if it feels inverted):
+                // scrollingDeltaX > 0 = fingers moved right -> next tab.
+                let dir: i32 = if ax > 0.0 { 1 } else { -1 };
+                let _ = handle.emit("terax:tab-swipe", dir);
+            }
+        }
+        pass
+    });
+
+    // The returned monitor lives for the whole app; we never remove it.
+    unsafe {
+        let monitor =
+            NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::ScrollWheel, &block);
+        std::mem::forget(monitor);
+    }
+}
+
 #[tauri::command]
 async fn open_settings_window(app: tauri::AppHandle, tab: Option<String>) -> Result<(), String> {
     let url_path = match tab.as_deref() {
@@ -155,6 +229,9 @@ pub fn run() {
                     }
                 });
             }
+            // Native two-finger trackpad swipe -> tab switch (macOS only).
+            #[cfg(target_os = "macos")]
+            install_tab_swipe_monitor(_app.handle());
             Ok(())
         })
         .manage(pty::PtyState::default())
