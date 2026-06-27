@@ -11,7 +11,7 @@ import { quoteShellArg } from "@/lib/shellQuote";
 import { useUiFonts } from "@/lib/useUiFonts";
 import { useZoom } from "@/lib/useZoom";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { AgentNotificationsBridge } from "@/modules/agents";
+import { AgentNotificationsBridge, nextAttentionTarget } from "@/modules/agents";
 import {
   AgentRunBridge,
   AiMiniWindow,
@@ -905,6 +905,13 @@ export default function App() {
       "search.focus": () => searchInlineRef.current?.focus(),
       "ai.toggle": togglePanelAndFocus,
       "ai.askSelection": askFromSelection,
+      "agent.focusAttention": () => {
+        const t = nextAttentionTarget();
+        if (t) {
+          setActiveId(t.tabId);
+          focusPane(t.tabId, t.leafId);
+        }
+      },
       "settings.open": () => void openSettingsWindow(),
       "sidebar.toggle": toggleSidebar,
       "explorer.focus": toggleExplorerFocus,
@@ -937,6 +944,8 @@ export default function App() {
       zoomIn,
       zoomOut,
       zoomReset,
+      setActiveId,
+      focusPane,
     ],
   );
 
