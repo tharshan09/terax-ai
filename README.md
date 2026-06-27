@@ -57,6 +57,7 @@ Terax is a lightweight open-source terminal (ADE) built on Tauri 2 + Rust and Re
 ### Terminal
 
 - xterm.js with WebGL renderer, multi-tab with background streaming
+- Two-finger trackpad swipe to switch tabs (macOS)
 - GPU-accelerated block-based terminal with editor-like command input
 - Native PTY backend via `portable-pty` (zsh, bash, pwsh, fish, cmd)
 - Split panels (horizontal and vertical)
