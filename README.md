@@ -1,139 +1,62 @@
 <div align="center">
-  <img src="public/logo.png" width="144" height="144" alt="Terax" />
+  <img src="public/logo.png" width="128" height="128" alt="Terax" />
   <h1>Terax</h1>
 
-  <p><strong>Lightweight Terminal-first AI-native dev workspace.</strong></p>
+  <p><strong>A personal fork by <a href="https://github.com/tharshan09">@tharshan09</a> — an SSH-native remote workspace.</strong></p>
 
   <p>
-    <img src="https://img.shields.io/github/v/release/crynta/terax-ai?label=version&color=blue" alt="version" />
-    <img src="https://img.shields.io/github/downloads/crynta/terax-ai/total?label=downloads&color=blue" alt="downloads" />
+    <a href="https://github.com/crynta/terax-ai"><img src="https://img.shields.io/badge/fork%20of-crynta%2Fterax--ai-blue" alt="fork of crynta/terax-ai" /></a>
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey" alt="platform" />
-    <a href="https://discord.gg/tyveTUyEp7"><img src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
-  </p>
-
-  <p>
-    <a href="https://terax.app">Website</a>
-    ·
-    <a href="https://terax.app/docs">Docs</a>
-    ·
-    <a href="https://github.com/crynta/Terax-website">Website's source code</a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-green" alt="license" /></a>
+    <img src="https://img.shields.io/badge/built%20with-Tauri%202%20%C2%B7%20Rust%20%C2%B7%20React%2019-orange" alt="built with" />
   </p>
 </div>
 
 ---
 
-> ### 🔱 This is a fork
->
-> A fork of **[crynta/terax-ai](https://github.com/crynta/terax-ai)** maintained by [@tharshan09](https://github.com/tharshan09), focused on an **SSH-native, security-hardened** workspace. The badges, install links and releases below point to upstream; the additions listed here ship from this fork's source, so [build from source](#build-from-source) to get them.
->
-> **What this fork adds on top of upstream**
->
-> - **SSH remote workspaces** — open a folder on a remote host over SSH (VSCode-Remote-style); the terminal, editor, file explorer and source control all operate against the remote.
-> - **Security hardening** — tightened iframe asset scope, SSH host-key prompting (no silent first-connect trust), workspace-jailed filesystem mutations, an OSC 52 clipboard-write policy, an "Open with Default App" executable guard, and API-key handling cleanups — each covered by tests.
-> - **Markdown & preview** — KaTeX math in both the markdown preview and the AI chat, a raw/rendered HTML preview toggle, and a unified document stack.
-> - **Terminal** — selection-aware native copy/paste (Ctrl+C / Cmd+C copies a selection, else SIGINT) and IME fixes.
-> - **Editor & UX** — a custom UI font independent of the terminal font, opening unrenderable files with the system default app, and branch checkout + worktrees in source control.
+> **A fork of [crynta/terax-ai](https://github.com/crynta/terax-ai)** — the same lightweight Tauri + Rust + React terminal-first dev workspace, extended to make a remote SSH host a *first-class* workspace. The additions below ship from this fork's source, so [build from source](#build-from-source) to run them.
 
-Terax is a lightweight open-source terminal (ADE) built on Tauri 2 + Rust and React 19. A native PTY backend with a WebGL renderer, an agentic AI side-panel that runs against your own keys or fully local models, plus a code editor, file explorer, source control with a git graph, and a web preview pane built in. About 7-8 MB on disk. No telemetry. No account.
+## Why I built this
 
-## Screenshots
+I run my dev environment on remote servers over SSH, inside tmux, and I drive almost everything through Claude Code in the terminal.
 
-<table>
-  <tr>
-    <td align="center"><img src="docs/terminal.png" alt="Terminal" /><br/><sub>Multi-tab terminal with WebGL rendering</sub></td>
-    <td align="center"><img src="docs/themes.png" alt="Themes and background image" /><br/><sub>Custom themes, presets, and background images</sub></td>
-  </tr>
-  <tr>
-    <td align="center"><img src="docs/web-preview.png" alt="Web preview" /><br/><sub>Web preview of local dev servers</sub></td>
-    <td align="center"><img src="docs/source-control.png" alt="Source control and git graph" /><br/><sub>Source control panel with git graph in history</sub></td>
-  </tr>
-  <tr>
-    <td colspan="2" align="center"><img src="docs/ai-workflow.png" alt="AI window" /><br/><sub>Agentic AI workflow with edit diffs in the code editor</sub></td>
-  </tr>
-</table>
+Stock Terax already speaks SSH — you can open a remote terminal and browse and edit remote files. But everything *around* the terminal stayed local: source control, the status bar's Claude Code stats, tmux session handling. A remote host was, in effect, just another terminal tab.
 
-## Features
+This fork closes that gap. Source control, Claude Code's live stats, tmux session switching and cwd-follow all work **over SSH**, exactly like they do locally — so the remote box I actually work on behaves like a real workspace, not a tab. If you also live on a remote server in tmux and run Claude Code in the terminal, this fork is built for your setup.
 
-### Terminal
+## What's different from upstream
 
-- xterm.js with WebGL renderer, multi-tab with background streaming
-- Two-finger trackpad swipe to switch tabs (macOS)
-- GPU-accelerated block-based terminal with editor-like command input
-- Native PTY backend via `portable-pty` (zsh, bash, pwsh, fish, cmd)
-- Split panels (horizontal and vertical)
-- Inline search, link detection, true-color
-- Per-tab workspace environments on Windows (Local, or any installed WSL distro)
+| Addition | What it does |
+| --- | --- |
+| **Source control over SSH** | The full git panel — status, side-by-side diffs, commit graph, branches, checkout, stage/commit/push — runs on the remote host over a shared SSH connection. Review and commit remote repos without leaving the app. |
+| **Claude Code stats over SSH** | Model, context %, cost and +/− line counts appear in the status bar even when Claude runs in a remote tmux session, not just locally. |
+| **tmux session switcher** | A command-palette picker pops up on SSH connect — attach, open-in-new-tab, create, rename or kill tmux sessions on the host. |
+| **cwd-follow under tmux** | The file explorer and source-control panels follow `cd` even on hosts where tmux swallows the shell's `OSC 7` cwd signal. |
+| **Customizable status bar** | Reorderable, toggleable widgets — git branch & ahead/behind, working-tree line changes, workspace env (incl. the SSH host), and opt-in Claude Code stats. |
+| **Two-finger trackpad tab-swipe** | A native macOS (AppKit) two-finger horizontal swipe to switch between tabs. |
 
-### Code editor
+### How the SSH features work
 
-- CodeMirror 6 (supports all popular languages - TS/JS, Rust, Python, Go, C/C++, Java, HTML/CSS, JSON, Markdown, etc.)
-- Inline AI autocomplete with local model support
-- AI edit diffs, accept or reject hunk by hunk
-- Vim mode
-- Ten built-in editor themes: Atom One, Aura, Copilot, GitHub Dark / Light, Gruvbox Dark, Nord, Tokyo Night, Xcode Dark / Light
+Transport is the **system `ssh` binary with ControlMaster multiplexing** — no bundled SSH crate, no extra daemon on the host. Hosts come from your `~/.ssh/config`; auth is **keys/agent only**. Git, tmux and the remote stat reads all reuse the one multiplexed connection, so they're fast and add no new credentials. The model is *trust-the-host-account*: if your key can reach the host, the app can act as that account there — the same boundary as your own shell.
 
-### Source control
+## Other additions
 
-- Stage / unstage hunks, commit (Cmd+Enter / Ctrl+Enter), push with upstream awareness
-- Branch display including detached HEAD state
-- Git history pane with a real commit graph (lane rendering for merges and branches)
-- Commit search and filter, click through to the remote commit page
+- **Security hardening** — host-key prompting (no silent first-connect trust), workspace-jailed filesystem mutations, tightened iframe/asset scope, an OSC 52 clipboard-write policy, and an "open with default app" executable guard — each covered by tests.
+- **Markdown & preview** — KaTeX math in both the markdown preview and the AI chat, a raw/rendered HTML preview toggle, and a unified document stack.
+- **Terminal & editor UX** — selection-aware native copy/paste (Cmd/Ctrl+C copies a selection, else sends SIGINT), IME fixes, a UI font independent of the terminal font, and opening unrenderable files with the system default app.
 
-### File explorer
+## Everything else
 
-- Catppuccin icon theme
-- Fuzzy search, keyboard navigation, inline rename, context actions
-- Attach files and selections directly to the AI side-panel
-
-### Web preview
-
-- Auto-detects local dev servers and opens them in a preview tab
-- External URL preview via a native child webview
-
-### Themes and customization
-
-- Custom themes built in-app, switch between bundled presets and your own
-- Create your own themes, share them or import from the community
-- Background images with adjustable opacity and blur
-- Editor theme is independent from the app theme
-
-### AI
-
-- **BYOK providers:** OpenAI, Anthropic, Google (Gemini), Groq, xAI (Grok), Cerebras, OpenRouter, DeepSeek, Mistral, plus any OpenAI-compatible endpoint
-- **Local / offline:** LM Studio, MLX, Ollama
-- **Agentic workflow:** plans, sub-agents, project memory via `TERAX.md`, file read / write / edit / multi-edit / grep / glob, bash with approval gating, background processes
-- **Composer:** snippets via `#handle`, files via `@path`, slash commands, voice input, attach-to-agent from explorer or selection
-- **Custom agents** with their own system prompt and tool subset
-- **Plan mode** for multi-step work, generates and confirms before doing
-
-## Install
-
-Latest installers are on the [Releases](https://github.com/crynta/terax-ai/releases/latest) page. Terax auto-updates from there.
-
-### Windows notes
-
-- On first launch Windows shows "Windows protected your PC" because Terax isn't code-signed yet. Click **More info** then **Run anyway**.
-- Default shell detection: `pwsh.exe` (PowerShell 7+) -> `powershell.exe` (Windows PowerShell 5.1) -> `cmd.exe`.
-- WSL is a first-class workspace environment, not a wrapped subprocess.
-
-### Linux notes
-
-- **Arch / AUR:** `yay -S terax-bin` (or `paru`, etc.). Tracks the latest release.
-- **NixOS / Nix**: use the official flake — `nix profile install github:crynta/terax-ai` (non-NixOS), or import the flake and add `inputs.terax.packages.${pkgs.system}.terax` to `environment.systemPackages` (NixOS). The `nixosModules.terax` output is also available for a simpler setup.
-- **AppImage:** needs FUSE. Without it: `./Terax_*.AppImage --appimage-extract-and-run`. On Wayland with rendering glitches, try `WEBKIT_DISABLE_DMABUF_RENDERER=1`. Otherwise the `.deb` / `.rpm` packages link against the system GTK stack and tend to be smoother.
-
-## Configure AI
-
-1. Open **Settings -> AI**.
-2. Pick a provider and paste your API key. For local inference, point Terax at your LM Studio / MLX / Ollama endpoint.
-3. Keys are written to the OS keychain via `keyring`. They never touch disk or localStorage.
+Terax itself — the WebGL terminal, the code editor, the file explorer, source control with a git graph, the web preview pane, and the BYOK / local AI side-panel — is unchanged here and documented upstream. See **[crynta/terax-ai](https://github.com/crynta/terax-ai)** for the full feature tour, screenshots, and prebuilt installers.
 
 ## Build from source
 
+This fork ships from source — there are no prebuilt fork releases.
+
 **Prerequisites**
-- Rust (stable), https://rustup.rs
+- Rust (stable) — https://rustup.rs
 - Node 20+ and [pnpm](https://pnpm.io)
-- Tauri prerequisites for your platform, https://tauri.app/start/prerequisites/
+- Tauri prerequisites for your platform — https://tauri.app/start/prerequisites/
 
 **Run**
 ```bash
@@ -145,30 +68,12 @@ pnpm tauri build        # production bundle
 **Checks**
 ```bash
 pnpm exec tsc --noEmit                                            # frontend type-check
-cd src-tauri && cargo clippy --all-targets --locked -D warnings   # Rust lint (matches CI)
+cd src-tauri && cargo clippy --all-targets --locked -D warnings   # Rust lint
 cd src-tauri && cargo test --locked                               # Rust tests
 ```
 
-## Tech stack
+## Credit & license
 
-Tauri 2, Rust, `portable-pty`, React 19, TypeScript, Vite, xterm.js, CodeMirror 6, Vercel AI SDK v6, Tailwind v4, shadcn/ui, Zustand.
+Built on **[crynta/terax-ai](https://github.com/crynta/terax-ai)** by [@crynta](https://github.com/crynta) and contributors — all the credit for Terax itself goes to them. This fork only adds the SSH-native remote-workspace layer described above.
 
-## Contributing
-
-Issues and PRs are welcome! Feel free to open issues, suggest features, or submit pull requests. See [CONTRIBUTING.md](CONTRIBUTING.md) for more details.
-
-## License
-
-Terax is licensed under the Apache-2.0 License. For more information on our dependencies, see [Apache License 2.0](LICENSE).
-
-## Star history
-
-<div align="center">
-  <a href="https://www.star-history.com/#crynta/terax-ai&Date">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=crynta/terax-ai&type=Date&theme=dark" />
-      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=crynta/terax-ai&type=Date" />
-      <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=crynta/terax-ai&type=Date" />
-    </picture>
-  </a>
-</div>
+Licensed under **Apache-2.0**, same as upstream. See [LICENSE](LICENSE).
