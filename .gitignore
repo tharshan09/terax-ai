@@ -26,3 +26,14 @@ stats.html
 *.sw?
 
 *.tsbuildinfo
+
+# Claude Code local workspace (agent state + git worktrees) — not part of Terax
+.claude/
+
+# Local working artifacts: generated planning / audit / progress docs (kept local, not shipped)
+/feature-discovery-report.html
+/health-audit-dashboard.html
+/health-audit-report.md
+/terax-progress.md
+/terax-roadmap.html
+/tmux-session-switcher-plan.md
