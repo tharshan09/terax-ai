@@ -21,6 +21,7 @@ import { openPty, type PtySession } from "./pty-bridge";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import "../block/block.css";
 import { ensureAgentActivityListener, isAgentActivePty } from "./agentActivity";
+import { isSshDisconnect } from "./sshReconnect";
 import {
   acquireSlot,
   applyBackgroundActive,
@@ -577,8 +578,31 @@ async function openPtyForSession(
         s.pendingInput = "";
         s.commandRunning = false;
         const slot = getSlotForLeaf(leafId);
-        if (slot) slot.term.options.disableStdin = true;
         scheduleHiddenRelease(leafId, s);
+        // An SSH terminal that exits non-zero didn't get a clean `exit` from
+        // the user — the connection dropped (idle timeout, laptop sleep,
+        // network change; ssh exits 255). Don't auto-close the tab: the
+        // remote tmux session is still alive on the host. Surface a reconnect
+        // prompt and reuse the spawn-retry path (spawnFailed) so Enter respawns
+        // — which re-runs `ssh … tmux new-session -A` and re-attaches it.
+        if (isSshDisconnect(s.workspace, code)) {
+          s.spawnFailed = true;
+          // Re-enable stdin so Enter reaches the retry handler (a normal exit
+          // disables it below; on a later re-bind acquireSlot keeps it alive).
+          if (slot) slot.term.options.disableStdin = false;
+          const tmuxNote = s.tmuxSession
+            ? " — your remote tmux session is still running"
+            : "";
+          deliverPtyBytes(
+            leafId,
+            new TextEncoder().encode(
+              `\r\n\x1b[33m[terax] SSH connection lost (exit ${code}).\x1b[0m\r\n` +
+                `\x1b[2mPress Enter to reconnect${tmuxNote}.\x1b[0m\r\n`,
+            ),
+          );
+          return;
+        }
+        if (slot) slot.term.options.disableStdin = true;
         if (s.callbacks.onExit) s.callbacks.onExit(code);
         else s.pendingExit = code;
       },

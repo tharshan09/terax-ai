@@ -108,6 +108,17 @@ pub fn control_args() -> Vec<String> {
             // remote command").
             "-o".into(),
             "RemoteCommand=none".into(),
+            // Keep idle connections alive. A background terminal tab whose
+            // connection sits idle would otherwise be dropped by the server,
+            // NAT or a firewall; ssh then exits and the tab is auto-closed
+            // (handleLeafExit), looking as if the session "closed itself".
+            // The remote tmux session survives regardless — this just stops
+            // the local tab from disappearing. ~90s (3 × 30s) to detect a
+            // genuinely dead link, without ever prompting.
+            "-o".into(),
+            "ServerAliveInterval=30".into(),
+            "-o".into(),
+            "ServerAliveCountMax=3".into(),
             "-o".into(),
             "ControlMaster=auto".into(),
             "-o".into(),
@@ -125,6 +136,12 @@ pub fn control_args() -> Vec<String> {
             "StrictHostKeyChecking=ask".into(),
             "-o".into(),
             "RemoteCommand=none".into(),
+            // See the unix arm: keep idle connections alive so a background
+            // tab's connection isn't dropped (which would auto-close the tab).
+            "-o".into(),
+            "ServerAliveInterval=30".into(),
+            "-o".into(),
+            "ServerAliveCountMax=3".into(),
         ]
     }
 }
