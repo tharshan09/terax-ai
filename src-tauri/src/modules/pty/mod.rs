@@ -35,7 +35,7 @@ impl Default for PtyState {
 
 impl PtyState {
     pub(super) fn take(&self, id: u32) -> Option<Arc<Session>> {
-        self.sessions.write().unwrap().remove(&id)
+        self.sessions.write().unwrap_or_else(|e| e.into_inner()).remove(&id)
     }
 }
 
@@ -74,14 +74,14 @@ pub async fn pty_open(
         log::error!("pty_open failed: {e}");
         e
     })?;
-    state.sessions.write().unwrap().insert(id, session);
+    state.sessions.write().unwrap_or_else(|e| e.into_inner()).insert(id, session);
     // The shell can exit before this insert (instant failure, `exit` in an rc
     // file); the waiter's reap then ran with the id absent. Re-check and reap
     // so the pseudoconsole isn't stranded.
     let exited = state
         .sessions
         .read()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .get(&id)
         .map(|s| s.exited.load(Ordering::Acquire))
         .unwrap_or(false);
@@ -116,7 +116,7 @@ pub fn pty_write(
     let session = state
         .sessions
         .read()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .get(&id)
         .cloned()
         .ok_or_else(|| {
@@ -128,7 +128,7 @@ pub fn pty_write(
     let result = session
         .writer
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .write_all(bytes)
         .map_err(|e| {
             // EPIPE is expected if the child already exited.
@@ -148,7 +148,7 @@ pub fn pty_resize(
     let session = state
         .sessions
         .read()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .get(&id)
         .cloned()
         .ok_or_else(|| {
@@ -158,7 +158,7 @@ pub fn pty_resize(
     let result = session
         .master
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .resize(PtySize {
             rows,
             cols,
@@ -174,9 +174,9 @@ pub fn pty_resize(
 
 #[tauri::command]
 pub fn pty_close(state: tauri::State<PtyState>, id: u32) -> Result<(), String> {
-    let session = state.sessions.write().unwrap().remove(&id);
+    let session = state.sessions.write().unwrap_or_else(|e| e.into_inner()).remove(&id);
     if let Some(s) = session {
-        if let Err(e) = s.killer.lock().unwrap().kill() {
+        if let Err(e) = s.killer.lock().unwrap_or_else(|e| e.into_inner()).kill() {
             // Non-fatal: the child may already have exited on its own (e.g. the
             // user ran `exit`). Log so this isn't invisible during debugging.
             log::debug!("pty_close: kill id={id} returned {e}");
@@ -203,7 +203,7 @@ pub fn pty_close(state: tauri::State<PtyState>, id: u32) -> Result<(), String> {
 
 #[tauri::command]
 pub fn pty_has_foreground_process(state: tauri::State<PtyState>, id: u32) -> Result<bool, String> {
-    let sessions = state.sessions.read().unwrap();
+    let sessions = state.sessions.read().unwrap_or_else(|e| e.into_inner());
     let session = sessions.get(&id).ok_or_else(|| {
         log::warn!("pty_has_foreground_process: unknown session id={id}");
         "no session".to_string()
@@ -220,7 +220,7 @@ pub fn pty_has_foreground_process(state: tauri::State<PtyState>, id: u32) -> Res
 // pty_has_foreground_process, which counts background children too.
 #[tauri::command]
 pub fn pty_has_foreground_job(state: tauri::State<PtyState>, id: u32) -> Result<bool, String> {
-    let sessions = state.sessions.read().unwrap();
+    let sessions = state.sessions.read().unwrap_or_else(|e| e.into_inner());
     let session = sessions.get(&id).ok_or_else(|| {
         log::warn!("pty_has_foreground_job: unknown session id={id}");
         "no session".to_string()
@@ -231,7 +231,7 @@ pub fn pty_has_foreground_job(state: tauri::State<PtyState>, id: u32) -> Result<
     }
     #[cfg(unix)]
     {
-        let leader = session.master.lock().unwrap().process_group_leader();
+        let leader = session.master.lock().unwrap_or_else(|e| e.into_inner()).process_group_leader();
         Ok(matches!(leader, Some(pid) if pid > 0 && pid as u32 != shell_pid))
     }
     #[cfg(windows)]
@@ -287,12 +287,12 @@ fn shell_has_children(shell_pid: u32) -> bool {
 #[tauri::command]
 pub fn pty_close_all(state: tauri::State<PtyState>) -> Result<usize, String> {
     let drained: Vec<(u32, Arc<Session>)> = {
-        let mut sessions = state.sessions.write().unwrap();
+        let mut sessions = state.sessions.write().unwrap_or_else(|e| e.into_inner());
         sessions.drain().collect()
     };
     let count = drained.len();
     for (id, s) in drained {
-        if let Err(e) = s.killer.lock().unwrap().kill() {
+        if let Err(e) = s.killer.lock().unwrap_or_else(|e| e.into_inner()).kill() {
             log::debug!("pty_close_all: kill id={id} returned {e}");
         }
         thread::Builder::new()

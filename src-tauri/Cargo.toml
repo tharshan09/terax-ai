@@ -88,5 +88,9 @@ incremental = true
 codegen-units = 1
 lto = "fat"
 opt-level = "s"
-panic = "abort"
+# "unwind" (the Rust default) lets Tokio's per-task catch_unwind isolate a
+# panicking async task instead of aborting the whole process. With "abort" a
+# single transient panic in any polled future (e.g. a network/connection future
+# re-polled after wake-from-sleep) takes down the entire app via SIGABRT.
+panic = "unwind"
 strip = true
