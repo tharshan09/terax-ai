@@ -18,11 +18,10 @@ type AgentStoreState = {
   setStatus: (leafId: number, status: AgentStatus) => void;
   finish: (leafId: number) => void;
   setLocalAgent: (state: LocalAgentState) => void;
-  pushNotification: (
-    n: Omit<AgentNotification, "id" | "at" | "read">,
-  ) => void;
+  pushNotification: (n: Omit<AgentNotification, "id" | "at" | "read">) => void;
   markAllRead: () => void;
   clearNotifications: () => void;
+  removeNotification: (id: string) => void;
 };
 
 export const useAgentStore = create<AgentStoreState>((set) => ({
@@ -96,8 +95,18 @@ export const useAgentStore = create<AgentStoreState>((set) => ({
   markAllRead: () =>
     set((s) => {
       if (!s.notifications.some((n) => !n.read)) return s;
-      return { notifications: s.notifications.map((n) => ({ ...n, read: true })) };
+      return {
+        notifications: s.notifications.map((n) => ({ ...n, read: true })),
+      };
     }),
 
   clearNotifications: () => set({ notifications: [] }),
+
+  removeNotification: (id) =>
+    set((s) => {
+      const next = s.notifications.filter((n) => n.id !== id);
+      return next.length === s.notifications.length
+        ? s
+        : { notifications: next };
+    }),
 }));

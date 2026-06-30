@@ -6,6 +6,7 @@ import {
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 import {
+  Cancel01Icon,
   CheckmarkCircle02Icon,
   Loading03Icon,
   Notification01Icon,
@@ -77,41 +78,53 @@ const NOTIF_LABEL: Record<AgentNotification["kind"], string> = {
 function NotificationRow({
   n,
   onClick,
+  onRemove,
 }: {
   n: AgentNotification;
   onClick: () => void;
+  onRemove: () => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-colors hover:bg-accent"
-    >
-      <span className="flex w-4 shrink-0 items-center justify-center">
-        {n.kind === "finished" ? (
-          <HugeiconsIcon
-            icon={CheckmarkCircle02Icon}
-            size={15}
-            strokeWidth={1.75}
-            className="text-muted-foreground"
-          />
-        ) : (
-          <span
-            className={cn(
-              "size-1.5 rounded-full",
-              n.kind === "error" ? "bg-destructive" : "bg-primary",
-            )}
-          />
-        )}
-      </span>
-      <span className="min-w-0 flex-1 truncate text-sm text-foreground">
-        {n.agent}{" "}
-        <span className="text-muted-foreground">{NOTIF_LABEL[n.kind]}</span>
-      </span>
-      <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
-        {relativeTime(n.at)}
-      </span>
-    </button>
+    <div className="group relative flex items-center rounded-lg transition-colors hover:bg-accent">
+      <button
+        type="button"
+        onClick={onClick}
+        className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-2 py-2 text-left"
+      >
+        <span className="flex w-4 shrink-0 items-center justify-center">
+          {n.kind === "finished" ? (
+            <HugeiconsIcon
+              icon={CheckmarkCircle02Icon}
+              size={15}
+              strokeWidth={1.75}
+              className="text-muted-foreground"
+            />
+          ) : (
+            <span
+              className={cn(
+                "size-1.5 rounded-full",
+                n.kind === "error" ? "bg-destructive" : "bg-primary",
+              )}
+            />
+          )}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-sm text-foreground">
+          {n.agent}{" "}
+          <span className="text-muted-foreground">{NOTIF_LABEL[n.kind]}</span>
+        </span>
+        <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+          {relativeTime(n.at)}
+        </span>
+      </button>
+      <button
+        type="button"
+        aria-label="Dismiss notification"
+        onClick={onRemove}
+        className="mr-1 flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-opacity hover:bg-background hover:text-foreground group-hover:opacity-100"
+      >
+        <HugeiconsIcon icon={Cancel01Icon} size={13} strokeWidth={1.75} />
+      </button>
+    </div>
   );
 }
 
@@ -123,6 +136,8 @@ export function NotificationBell({ onActivate, onActivateLocal }: Props) {
   const localAgent = useAgentStore((s) => s.localAgent);
   const notifications = useAgentStore((s) => s.notifications);
   const markAllRead = useAgentStore((s) => s.markAllRead);
+  const clearNotifications = useAgentStore((s) => s.clearNotifications);
+  const removeNotification = useAgentStore((s) => s.removeNotification);
 
   const active = useMemo(() => Object.values(sessions), [sessions]);
   const activeCount = active.length + (localAgent ? 1 : 0);
@@ -209,11 +224,22 @@ export function NotificationBell({ onActivate, onActivateLocal }: Props) {
           <span className="flex gap-1 text-[13px] text-foreground">
             Notifications
           </span>
-          {activeCount > 0 ? (
-            <span className="ml-auto rounded-full bg-accent px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">
-              {activeCount} active
-            </span>
-          ) : null}
+          <div className="ml-auto flex items-center gap-2">
+            {activeCount > 0 ? (
+              <span className="rounded-full bg-accent px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">
+                {activeCount} active
+              </span>
+            ) : null}
+            {notifications.length > 0 ? (
+              <button
+                type="button"
+                onClick={clearNotifications}
+                className="rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
+                Clear all
+              </button>
+            ) : null}
+          </div>
         </div>
 
         {empty ? (
@@ -247,6 +273,7 @@ export function NotificationBell({ onActivate, onActivateLocal }: Props) {
                 key={n.id}
                 n={n}
                 onClick={() => activateNotification(n)}
+                onRemove={() => removeNotification(n.id)}
               />
             ))}
           </div>
