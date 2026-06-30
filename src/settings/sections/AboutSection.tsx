@@ -3,6 +3,7 @@ import { useUpdater } from "@/modules/updater";
 import { GithubIcon, Globe02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { getName, getVersion } from "@tauri-apps/api/app";
+import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { arch, platform } from "@tauri-apps/plugin-os";
 import { useEffect, useState } from "react";
@@ -24,6 +25,7 @@ export function AboutSection() {
   const [version, setVersion] = useState("");
   const [name, setName] = useState("Terax");
   const [build, setBuild] = useState("");
+  const [commit, setCommit] = useState("");
   const { status, check, install } = useUpdater({ autoCheck: false });
   const checking = status.kind === "checking";
   const downloading = status.kind === "downloading";
@@ -54,6 +56,9 @@ export function AboutSection() {
   useEffect(() => {
     void getVersion().then(setVersion);
     void getName().then(setName);
+    void invoke<{ gitHash: string; gitDate: string }>("build_info")
+      .then((info) => setCommit(`${info.gitHash} · ${info.gitDate}`))
+      .catch(() => setCommit(""));
     try {
       const p = platform();
       const a = arch();
@@ -88,6 +93,9 @@ export function AboutSection() {
         <dd className="font-mono text-[11.5px]">
           {build ? `${build} · v${version}` : `v${version}`}
         </dd>
+
+        <dt className="text-muted-foreground">Commit</dt>
+        <dd className="font-mono text-[11.5px]">{commit || "—"}</dd>
 
         <dt className="text-muted-foreground">Bundle ID</dt>
         <dd className="font-mono text-[11.5px]">app.crynta.terax</dd>

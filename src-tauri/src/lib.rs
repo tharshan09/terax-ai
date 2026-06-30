@@ -18,6 +18,24 @@ fn get_launch_dir(state: State<'_, LaunchDir>) -> Option<String> {
     state.0.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
+/// Git commit + date this binary was built from, embedded at compile time by
+/// `build.rs`. Lets Settings → About prove the running app matches a fork
+/// commit — the static SemVer can't distinguish builds.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BuildInfo {
+    git_hash: &'static str,
+    git_date: &'static str,
+}
+
+#[tauri::command]
+fn build_info() -> BuildInfo {
+    BuildInfo {
+        git_hash: env!("TERAX_GIT_HASH"),
+        git_date: env!("TERAX_GIT_DATE"),
+    }
+}
+
 fn parse_launch_dir() -> Option<String> {
     for arg in std::env::args().skip(1) {
         if arg.starts_with('-') {
@@ -344,6 +362,7 @@ pub fn run() {
             workspace::workspace_authorize,
             workspace::workspace_current_dir,
             get_launch_dir,
+            build_info,
             open_settings_window,
             agent::agent_enable_claude_hooks,
             agent::agent_claude_hooks_status,
