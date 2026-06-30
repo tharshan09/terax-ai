@@ -181,6 +181,12 @@ function termOptions() {
     cursorInactiveStyle: "outline" as const,
     scrollback: prefs.terminalScrollback,
     allowProposedApi: true,
+    // Option+drag forces a LOCAL xterm selection even when an app holds mouse
+    // reporting (e.g. tmux with `mouse on`). Without it, on macOS the drag is
+    // sent to the app and the local selection stays empty, so Cmd+C copies
+    // nothing — or a reflexive double-click grabs just one word. iTerm2 /
+    // Terminal.app idiom; Terax's word-nav stays on Alt+Arrow, so no conflict.
+    macOptionClickForcesSelection: true,
     minimumContrastRatio: bgActive(prefs) ? MCR_BG_ACTIVE : MCR_BG_INACTIVE,
   };
 }
