@@ -38,7 +38,11 @@ function formatBytes(n: number): string {
 }
 
 export function UpdaterDialog() {
-  const { status, install, dismiss } = useUpdater();
+  // Fork build: no automatic update check. The updater endpoint points at the
+  // upstream repo (crynta/terax-ai), so an auto-check could offer an upstream
+  // release that overwrites fork-only features. A manual "Check for updates"
+  // stays available in Settings → About.
+  const { status, install, dismiss } = useUpdater({ autoCheck: false });
   const [copied, setCopied] = useState(false);
   const [distro, setDistro] = useState<DistroKey>("arch");
   const manualVersion =
