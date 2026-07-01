@@ -7,7 +7,7 @@ use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::sinks::UTF8;
 use grep_searcher::{BinaryDetection, SearcherBuilder};
 use ignore::{WalkBuilder, WalkState};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::to_canon;
 use crate::modules::workspace::{resolve_path, WorkspaceEnv};
@@ -25,7 +25,7 @@ pub struct ContentSearchState {
     generation: AtomicU64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct GrepHit {
     pub path: String,
     pub rel: String,
@@ -33,7 +33,7 @@ pub struct GrepHit {
     pub text: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct GrepResponse {
     pub hits: Vec<GrepHit>,
     pub truncated: bool,
@@ -222,9 +222,14 @@ pub fn fs_grep_interactive(
     if pattern.trim().is_empty() {
         return Err("empty pattern".into());
     }
-    let my_gen = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
-
     let workspace = WorkspaceEnv::from_option(workspace);
+    if let WorkspaceEnv::Ssh { host } = &workspace {
+        let cap = max_results
+            .unwrap_or(DEFAULT_MAX_RESULTS)
+            .clamp(1, HARD_MAX_RESULTS);
+        return crate::modules::ssh::grep(host, &root, &pattern, cap);
+    }
+    let my_gen = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
     let root_path = resolve_path(&root, &workspace);
     if !root_path.is_dir() {
         return Err(format!("not a directory: {root}"));
