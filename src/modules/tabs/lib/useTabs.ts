@@ -1,8 +1,10 @@
 import { basename, titleFromUrl } from "@/lib/utils";
 import {
+  type DropEdge,
   findLeafCwd,
   hasLeaf,
   leafIds,
+  moveLeaf,
   nextLeafId,
   type PaneNode,
   removeLeaf,
@@ -255,7 +257,10 @@ export function planSpaceRemoval(
   let activeId = currentActiveId;
   if (!next.some((t) => t.spaceId === fallbackSpaceId)) {
     const tabId = allocId();
-    next = [...next, coldTerminalTab(tabId, allocId(), fallbackSpaceId, fallbackCwd)];
+    next = [
+      ...next,
+      coldTerminalTab(tabId, allocId(), fallbackSpaceId, fallbackCwd),
+    ];
     activeId = tabId;
   } else if (!next.some((t) => t.id === currentActiveId)) {
     const inFallback = next.filter((t) => t.spaceId === fallbackSpaceId);
@@ -778,12 +783,9 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   // Swaps a tab between its rendered doc kind (markdown / html) and a raw
   // editor in place, keeping the same tab id. The toggle UI is shared, so the
   // target kind is derived from the file extension rather than passed in.
-  const setDocView = useCallback(
-    (id: number, mode: "rendered" | "raw") => {
-      setTabs((curr) => curr.map((t) => applyDocView(t, id, mode)));
-    },
-    [],
-  );
+  const setDocView = useCallback((id: number, mode: "rendered" | "raw") => {
+    setTabs((curr) => curr.map((t) => applyDocView(t, id, mode)));
+  }, []);
 
   const openGitDiffTab = useCallback(
     (input: {
@@ -1001,9 +1003,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
 
   const selectByIndex = useCallback(
     (idx: number, spaceId?: string) => {
-      const t = spaceId
-        ? pickTabBySpaceIndex(tabs, idx, spaceId)
-        : tabs[idx];
+      const t = spaceId ? pickTabBySpaceIndex(tabs, idx, spaceId) : tabs[idx];
       if (t) setActiveId(t.id);
     },
     [tabs],
@@ -1081,6 +1081,36 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         }),
       );
       return newLeafId;
+    },
+    [],
+  );
+
+  // Move an existing pane next to the pane under the drop, on `edge`. Finds the
+  // tab holding both leaves; the moved leaf keeps its id so its live session
+  // survives the reorder. Pane count is unchanged → no MAX_PANES check.
+  const movePane = useCallback(
+    (sourceLeafId: number, targetLeafId: number, edge: DropEdge): void => {
+      if (sourceLeafId === targetLeafId) return;
+      setTabs((curr) =>
+        curr.map((t) => {
+          if (
+            t.kind !== "terminal" ||
+            !hasLeaf(t.paneTree, sourceLeafId) ||
+            !hasLeaf(t.paneTree, targetLeafId)
+          )
+            return t;
+          const newSplitId = nextIdRef.current++;
+          const paneTree = moveLeaf(
+            t.paneTree,
+            sourceLeafId,
+            targetLeafId,
+            edge,
+            newSplitId,
+          );
+          if (paneTree === t.paneTree) return t;
+          return { ...t, paneTree, activeLeafId: sourceLeafId };
+        }),
+      );
     },
     [],
   );
@@ -1216,6 +1246,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     focusPane,
     focusNextPaneInTab,
     splitActivePane,
+    movePane,
     closeActivePane,
     closePaneByLeaf,
     resetWorkspace,

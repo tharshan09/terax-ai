@@ -11,9 +11,7 @@ export type PaneNode =
       children: PaneNode[];
     };
 
-export function isLeaf(
-  n: PaneNode,
-): n is Extract<PaneNode, { kind: "leaf" }> {
+export function isLeaf(n: PaneNode): n is Extract<PaneNode, { kind: "leaf" }> {
   return n.kind === "leaf";
 }
 
@@ -31,11 +29,7 @@ export function findLeafCwd(n: PaneNode, id: PaneId): string | undefined {
   return undefined;
 }
 
-export function setLeafCwd(
-  n: PaneNode,
-  id: PaneId,
-  cwd: string,
-): PaneNode {
+export function setLeafCwd(n: PaneNode, id: PaneId, cwd: string): PaneNode {
   if (isLeaf(n)) {
     if (n.id !== id || n.cwd === cwd) return n;
     return { ...n, cwd };
@@ -120,10 +114,7 @@ export function splitLeaf(
  * Remove a leaf and collapse single-child splits left in its wake. Returns
  * `null` when the entire subtree is gone.
  */
-export function removeLeaf(
-  tree: PaneNode,
-  targetId: PaneId,
-): PaneNode | null {
+export function removeLeaf(tree: PaneNode, targetId: PaneId): PaneNode | null {
   if (isLeaf(tree)) return tree.id === targetId ? null : tree;
   const newChildren: PaneNode[] = [];
   for (const c of tree.children) {
@@ -151,10 +142,7 @@ export function nextLeafId(
 // next sibling, fall back to the previous. Used to pick the new focus
 // when a pane closes (so focus stays in the same neighborhood instead of
 // snapping to the first pane in the tree).
-export function siblingLeafOf(
-  tree: PaneNode,
-  leafId: PaneId,
-): PaneId | null {
+export function siblingLeafOf(tree: PaneNode, leafId: PaneId): PaneId | null {
   if (isLeaf(tree)) return null;
   for (let i = 0; i < tree.children.length; i++) {
     const c = tree.children[i];
@@ -175,4 +163,103 @@ export function siblingLeafOf(
 
 export function hasLeaf(tree: PaneNode, id: PaneId): boolean {
   return leafIds(tree).includes(id);
+}
+
+export type DropEdge = "left" | "right" | "top" | "bottom";
+
+const EDGE_DIR: Record<DropEdge, SplitDir> = {
+  left: "row",
+  right: "row",
+  top: "col",
+  bottom: "col",
+};
+
+function findLeafNode(
+  tree: PaneNode,
+  id: PaneId,
+): Extract<PaneNode, { kind: "leaf" }> | null {
+  if (isLeaf(tree)) return tree.id === id ? tree : null;
+  for (const c of tree.children) {
+    const f = findLeafNode(c, id);
+    if (f) return f;
+  }
+  return null;
+}
+
+/**
+ * Insert an existing leaf node next to `targetId` in direction `dir`, before or
+ * after it. Mirrors {@link splitLeaf}'s same-direction merge but reuses the
+ * given leaf (preserving its id — and thus its live session) instead of minting
+ * a fresh one.
+ */
+function insertLeafBeside(
+  tree: PaneNode,
+  targetId: PaneId,
+  leaf: PaneNode,
+  newSplitId: PaneId,
+  dir: SplitDir,
+  before: boolean,
+): PaneNode {
+  if (tree.kind === "split" && tree.dir === dir) {
+    const idx = tree.children.findIndex(
+      (c) => c.kind === "leaf" && c.id === targetId,
+    );
+    if (idx >= 0) {
+      const at = before ? idx : idx + 1;
+      return {
+        ...tree,
+        children: [
+          ...tree.children.slice(0, at),
+          leaf,
+          ...tree.children.slice(at),
+        ],
+      };
+    }
+  }
+  if (isLeaf(tree)) {
+    if (tree.id !== targetId) return tree;
+    return {
+      kind: "split",
+      id: newSplitId,
+      dir,
+      children: before ? [leaf, tree] : [tree, leaf],
+    };
+  }
+  return {
+    ...tree,
+    children: tree.children.map((c) =>
+      insertLeafBeside(c, targetId, leaf, newSplitId, dir, before),
+    ),
+  };
+}
+
+/**
+ * Move an existing leaf next to `targetId` along `edge`, keeping the leaf's id
+ * (so its live terminal session survives). Removes the source first — which
+ * collapses any single-child split it leaves behind — then re-inserts it at the
+ * target. `newSplitId` is consumed only if a fresh split node is needed there.
+ * Returns the original tree unchanged on a no-op (source === target, or either
+ * id missing, or source is the only leaf).
+ */
+export function moveLeaf(
+  tree: PaneNode,
+  sourceId: PaneId,
+  targetId: PaneId,
+  edge: DropEdge,
+  newSplitId: PaneId,
+): PaneNode {
+  if (sourceId === targetId) return tree;
+  const moved = findLeafNode(tree, sourceId);
+  if (!moved) return tree;
+  const pruned = removeLeaf(tree, sourceId);
+  if (pruned === null || !hasLeaf(pruned, targetId)) return tree;
+  const before = edge === "left" || edge === "top";
+  return insertLeafBeside(
+    pruned,
+    targetId,
+    moved,
+    newSplitId,
+    EDGE_DIR[edge],
+    before,
+  );
 }

@@ -2,7 +2,8 @@ import type { Tab } from "@/modules/tabs";
 import type { SearchAddon } from "@xterm/addon-search";
 import { useEffect, useMemo, useRef } from "react";
 import { selectLiveTerminals } from "./lib/liveTerminals";
-import { leafIds } from "./lib/panes";
+import { type DropEdge, leafIds } from "./lib/panes";
+import { useTerminalPaneDnd } from "./lib/useTerminalPaneDnd";
 import { PaneTreeView } from "./PaneTreeView";
 import type { TerminalPaneHandle } from "./TerminalPane";
 
@@ -15,6 +16,11 @@ type Props = {
   onCwd: (leafId: number, cwd: string) => void;
   onExit: (leafId: number, code: number) => void;
   onFocusLeaf: (tabId: number, leafId: number) => void;
+  movePane: (
+    sourceLeafId: number,
+    targetLeafId: number,
+    edge: DropEdge,
+  ) => void;
 };
 
 type Bundle = {
@@ -32,8 +38,10 @@ export function TerminalStack({
   onCwd,
   onExit,
   onFocusLeaf,
+  movePane,
 }: Props) {
   const terminals = useMemo(() => selectLiveTerminals(tabs), [tabs]);
+  const paneDnd = useTerminalPaneDnd(movePane);
 
   const registerRef = useRef(registerHandle);
   const searchReadyRef = useRef(onSearchReady);
@@ -98,10 +106,19 @@ export function TerminalStack({
               workspace={t.workspace}
               onFocusLeaf={(leafId) => onFocusLeaf(t.id, leafId)}
               getBundle={getBundle}
+              onPaneDragStart={paneDnd.startDrag}
             />
           </div>
         );
       })}
+      {paneDnd.dragging && (
+        <div
+          ref={paneDnd.ghostRef}
+          className="pointer-events-none fixed top-0 left-0 z-50 rounded-md border border-primary/50 bg-background/90 px-2 py-1 font-medium text-foreground text-xs shadow-lg backdrop-blur-sm"
+        >
+          Move pane
+        </div>
+      )}
     </div>
   );
 }
