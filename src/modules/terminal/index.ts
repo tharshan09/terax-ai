@@ -8,6 +8,7 @@ export {
   applyExternalCwd,
   clearFocusedTerminal,
   disposeSession,
+  leafCwd,
   leafHasForegroundProcess,
   leafIdForPty,
   navigateFocusedBlocks,

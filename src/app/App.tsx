@@ -11,7 +11,10 @@ import { quoteShellArg } from "@/lib/shellQuote";
 import { useUiFonts } from "@/lib/useUiFonts";
 import { useZoom } from "@/lib/useZoom";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { AgentNotificationsBridge, nextAttentionTarget } from "@/modules/agents";
+import {
+  AgentNotificationsBridge,
+  nextAttentionTarget,
+} from "@/modules/agents";
 import {
   AgentRunBridge,
   AiMiniWindow,
@@ -76,6 +79,7 @@ import {
   disposeSession,
   applyExternalCwd,
   findLeafCwd,
+  leafCwd,
   hasLeaf,
   leafIds,
   navigateFocusedBlocks,
@@ -104,11 +108,15 @@ import { DEFAULT_SPACE_ID } from "@/modules/tabs/lib/useTabs";
 import { ThemeProvider, useThemeFileEditing } from "@/modules/theme";
 import { UpdaterDialog } from "@/modules/updater";
 import {
+  currentWorkspaceEnv,
   LOCAL_WORKSPACE,
   useWorkspaceEnvStore,
   type WorkspaceEnv,
 } from "@/modules/workspace";
 import { listSshHosts, type SshHost } from "@/modules/workspace/sshHosts";
+import { setTerminalPathOpener } from "@/modules/terminal/lib/rendererPool";
+import { resolveTerminalPath } from "@/modules/terminal/lib/terminalPathLinks";
+import { invoke } from "@tauri-apps/api/core";
 import type { SearchAddon } from "@xterm/addon-search";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CloseDialogs } from "./components/CloseDialogs";
@@ -498,7 +506,11 @@ export default function App() {
   const sshHostsKey = useMemo(() => {
     const hosts = new Set<string>();
     for (const t of tabs) {
-      if (t.kind === "terminal" && t.workspace?.kind === "ssh" && t.tmuxSession) {
+      if (
+        t.kind === "terminal" &&
+        t.workspace?.kind === "ssh" &&
+        t.tmuxSession
+      ) {
         hosts.add(t.workspace.host);
       }
     }
@@ -764,6 +776,24 @@ export default function App() {
     },
     [openFileTab, newMarkdownTab, newHtmlTab],
   );
+
+  // Cmd/Ctrl+Click on a file path in terminal output: resolve it against the
+  // clicked pane's cwd, confirm it exists (SSH-aware), then open it — HTML/MD
+  // rendered, everything else in the editor.
+  useEffect(() => {
+    setTerminalPathOpener((leafId, token) => {
+      const resolved = resolveTerminalPath(token, leafCwd(leafId));
+      if (!resolved) return;
+      const workspace = currentWorkspaceEnv();
+      void invoke<{ kind: string }>("fs_stat", { path: resolved, workspace })
+        .then((stat) => {
+          if (stat.kind !== "dir") handleOpenFile(resolved);
+        })
+        .catch(() => {
+          // Not a real file (or unreachable over SSH) — ignore the click.
+        });
+    });
+  }, [handleOpenFile]);
 
   const handlePathRenamed = useCallback(
     (from: string, to: string) => {
@@ -1083,8 +1113,10 @@ export default function App() {
       // the picker meanwhile (a manual Cmd+Shift+M) and the tab still exists,
       // so a late auto-pop neither clobbers a manual target nor pops on a dead tab.
       const applyAutoPick = () =>
-        setTmuxTarget((cur) =>
-          cur ?? (tabsRef.current.some((t) => t.id === tgt.tabId) ? tgt : null),
+        setTmuxTarget(
+          (cur) =>
+            cur ??
+            (tabsRef.current.some((t) => t.id === tgt.tabId) ? tgt : null),
         );
       listTmuxSessions(tab.workspace)
         .then(applyAutoPick)
@@ -1402,7 +1434,9 @@ export default function App() {
                 id="sidebar"
                 panelRef={sidebarRef}
                 defaultSize={
-                  initialSidebarCollapsed ? "0px" : `${sidebarWidthRef.current}px`
+                  initialSidebarCollapsed
+                    ? "0px"
+                    : `${sidebarWidthRef.current}px`
                 }
                 minSize={`${SIDEBAR_MIN_WIDTH}px`}
                 maxSize={`${SIDEBAR_MAX_WIDTH}px`}
