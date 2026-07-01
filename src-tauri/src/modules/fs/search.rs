@@ -4,12 +4,12 @@ use std::sync::{Arc, Mutex};
 use ignore::{WalkBuilder, WalkState};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::to_canon;
 use crate::modules::workspace::{resolve_path, WorkspaceEnv};
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct SearchHit {
     /// Absolute path of the matched file.
     pub path: String,
@@ -67,6 +67,9 @@ pub fn fs_search(
     let cap = limit.unwrap_or(200).min(1000);
     let show_hidden = show_hidden.unwrap_or(false);
     let workspace = WorkspaceEnv::from_option(workspace);
+    if let WorkspaceEnv::Ssh { host } = &workspace {
+        return crate::modules::ssh::search(host, &root, q, cap, show_hidden);
+    }
     let root_path = resolve_path(&root, &workspace);
     if !root_path.is_dir() {
         return Err(format!("not a directory: {root}"));
@@ -179,6 +182,36 @@ fn score_rel(
 fn sort_and_cap(mut scored: Vec<(u32, SearchHit)>, cap: usize) -> Vec<SearchHit> {
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.rel.len().cmp(&b.1.rel.len())));
     scored.into_iter().take(cap).map(|(_, h)| h).collect()
+}
+
+#[derive(Deserialize)]
+struct RemoteSearch {
+    hits: Vec<SearchHit>,
+    truncated: bool,
+}
+
+/// Rank remote search candidates (already subsequence-prefiltered by the SSH
+/// host helper) with the same fuzzy matcher as the local walk, so result
+/// ordering is identical whether the workspace is local or remote.
+pub(crate) fn rank_remote_hits(
+    value: serde_json::Value,
+    query: &str,
+    cap: usize,
+) -> Result<SearchResult, String> {
+    let remote: RemoteSearch =
+        serde_json::from_value(value).map_err(|e| format!("bad search response: {e}"))?;
+    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+    let mut buf = Vec::new();
+    let scored = remote
+        .hits
+        .into_iter()
+        .filter_map(|h| score_rel(&pattern, &mut matcher, &mut buf, &h.rel).map(|s| (s, h)))
+        .collect();
+    Ok(SearchResult {
+        hits: sort_and_cap(scored, cap),
+        truncated: remote.truncated,
+    })
 }
 
 /// Fuzzy-rank candidates against the query (path-aware, smart-case), keeping

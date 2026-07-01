@@ -220,6 +220,10 @@ from stat import S_ISDIR
 
 MAX_READ = 10 * 1024 * 1024
 MAX_ENTRIES = 100000
+SEARCH_PRUNE = {"node_modules", ".git", "target", "dist", "build", ".next",
+                ".turbo", ".cache", ".venv", "__pycache__"}
+SEARCH_MAX_SCANNED = 500000
+SEARCH_MAX_HITS = 2000
 
 
 def _utf8_ok(name):
@@ -414,11 +418,50 @@ def write_bytes(req):
     return True
 
 
+def _subseq(needle, hay):
+    # Case-insensitive subsequence test: the coarse prefilter that mirrors
+    # nucleo's fuzzy matchability. The Rust side re-ranks with the real matcher,
+    # so this only decides which candidates cross the wire.
+    it = iter(hay)
+    return all(c in it for c in needle)
+
+
+def search(req):
+    root = os.path.expanduser(req["path"]); query = req.get("query", "").strip()
+    show_hidden = req.get("showHidden", False); limit = req.get("limit", 200)
+    if not query:
+        return {"hits": [], "truncated": False}
+    needle = query.lower()
+    base = root.rstrip("/") + "/"
+    hits = []; scanned = 0; truncated = False
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Prune heavy dirs + hidden dirs in place so os.walk doesn't descend.
+        dirnames[:] = [d for d in dirnames if d not in SEARCH_PRUNE
+                       and (show_hidden or not d.startswith("."))]
+        entries = [(d, True) for d in dirnames] + [(f, False) for f in filenames]
+        for name, is_dir in entries:
+            if not show_hidden and name.startswith("."):
+                continue
+            scanned += 1
+            if scanned > SEARCH_MAX_SCANNED:
+                truncated = True; break
+            full = os.path.join(dirpath, name)
+            rel = full[len(base):] if full.startswith(base) else name
+            if _subseq(needle, rel.lower()):
+                hits.append({"path": full, "rel": rel, "name": name,
+                             "is_dir": is_dir})
+                if len(hits) >= SEARCH_MAX_HITS:
+                    truncated = True; break
+        if truncated:
+            break
+    return {"hits": hits, "truncated": truncated}
+
+
 OPS = {"read_dir": read_dir, "list_subdirs": list_subdirs, "stat": stat,
        "read_file": read_file, "write_file": write_file,
        "create_file": create_file, "create_dir": create_dir,
        "rename": rename, "delete": delete, "exists": exists,
-       "write_bytes": write_bytes}
+       "write_bytes": write_bytes, "search": search}
 
 
 def main():
@@ -780,6 +823,26 @@ pub fn write_file(host: &str, path: &str, content: &str) -> Result<(), String> {
 pub fn stat(host: &str, path: &str) -> Result<crate::modules::fs::file::FileStat, String> {
     let data = run_remote_json(host, &serde_json::json!({ "op": "stat", "path": path }))?;
     serde_json::from_value(data).map_err(|e| format!("bad stat response: {e}"))
+}
+
+/// Remote `fs_search`. The host helper walks + subsequence-prefilters; we
+/// fuzzy-rank the returned candidates locally so ordering matches the local
+/// path exactly.
+pub fn search(
+    host: &str,
+    root: &str,
+    query: &str,
+    limit: usize,
+    show_hidden: bool,
+) -> Result<crate::modules::fs::search::SearchResult, String> {
+    let data = run_remote_json(
+        host,
+        &serde_json::json!({
+            "op": "search", "path": root, "query": query,
+            "limit": limit, "showHidden": show_hidden,
+        }),
+    )?;
+    crate::modules::fs::search::rank_remote_hits(data, query, limit)
 }
 
 /// Remote `fs_create_file` (atomic O_EXCL create; refuses to clobber).
