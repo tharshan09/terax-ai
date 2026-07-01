@@ -78,7 +78,8 @@ let adapter: SlotAdapter | null = null;
 // Cmd+Click on a file path in terminal output opens it in a tab (wired from
 // App). Path links are only offered while the modifier is held so ordinary
 // agent output isn't peppered with underlines.
-let pathOpener: ((leafId: number, path: string) => void) | null = null;
+let pathOpener: ((leafId: number, path: string, line?: number) => void) | null =
+  null;
 let modifierHeld = false;
 let modifierTrackingBound = false;
 
@@ -128,7 +129,7 @@ export function configureRendererPool(a: SlotAdapter): void {
 
 /** Register the handler that opens a file path Cmd+Clicked in the terminal. */
 export function setTerminalPathOpener(
-  fn: (leafId: number, path: string) => void,
+  fn: (leafId: number, path: string, line?: number) => void,
 ): void {
   pathOpener = fn;
   bindModifierTracking();
@@ -292,7 +293,7 @@ function createSlot(): Slot {
           activate: (event: MouseEvent) => {
             if (!(event.metaKey || event.ctrlKey)) return;
             const leafId = slot.currentLeafId;
-            if (leafId != null) pathOpener?.(leafId, l.path);
+            if (leafId != null) pathOpener?.(leafId, l.path, l.line);
           },
         })),
       );

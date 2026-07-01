@@ -9,6 +9,8 @@ export type PathLink = {
   end: number;
   /** The path token itself (`:line:col` stripped, trailing punctuation removed). */
   path: string;
+  /** 1-based line from a `:line` / `:line:col` suffix, if present. */
+  line?: number;
 };
 
 // A run of non-separator chars. Quotes/brackets/parens bound a path so
@@ -25,7 +27,12 @@ const LINE_COL_RE = /:\d+(?::\d+)?$/;
  *  (`config.js`) are excluded on purpose — too ambiguous in prose. */
 function isPathLike(p: string): boolean {
   if (!p || URL_RE.test(p)) return false;
-  if (p.startsWith("/") || p.startsWith("./") || p.startsWith("../")) {
+  if (
+    p.startsWith("/") ||
+    p.startsWith("./") ||
+    p.startsWith("../") ||
+    p.startsWith("~/")
+  ) {
     return p.length > 1;
   }
   // Multi-segment relative path with an extension on the final segment.
@@ -50,22 +57,27 @@ export function findPathLinks(line: string): PathLink[] {
     const lc = LINE_COL_RE.exec(tok);
     const path = lc ? tok.slice(0, tok.length - lc[0].length) : tok;
     if (isPathLike(path)) {
-      links.push({ start: runStart, end: runStart + tok.length, path });
+      const line = lc ? Number(lc[0].slice(1).split(":")[0]) : undefined;
+      links.push({ start: runStart, end: runStart + tok.length, path, line });
     }
     m = RUN_RE.exec(line);
   }
   return links;
 }
 
-/** Resolve a detected token to an absolute path against `cwd`. `null` when it
- *  can't be resolved (relative token with no cwd, or `~` — home expansion is a
- *  follow-up). The OS resolves any embedded `..`. */
+/** Resolve a detected token to an absolute path against `cwd`. `~/…` expands
+ *  against `home` when given (local); with no `home` the literal `~/…` is kept
+ *  so the SSH host helper can expand it. `null` for a relative token with no
+ *  cwd. The OS resolves any embedded `..`. */
 export function resolveTerminalPath(
   path: string,
   cwd: string | null,
+  home?: string | null,
 ): string | null {
   if (path.startsWith("/")) return path;
-  if (path.startsWith("~")) return null;
+  if (path.startsWith("~/")) {
+    return home ? `${home.replace(/\/$/, "")}/${path.slice(2)}` : path;
+  }
   if (!cwd) return null;
   const base = cwd.endsWith("/") ? cwd.slice(0, -1) : cwd;
   const rel = path.startsWith("./") ? path.slice(2) : path;
