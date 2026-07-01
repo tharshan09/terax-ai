@@ -18,7 +18,6 @@ import {
   type ShortcutId,
 } from "@/modules/shortcuts";
 import { listBuiltinThemes, useTheme } from "@/modules/theme";
-import { useWorkspaceEnvStore } from "@/modules/workspace";
 import {
   AlertCircleIcon,
   ArrowTurnBackwardIcon,
@@ -70,14 +69,10 @@ export function CommandPalette({
   const parsed = parseQuery(query);
   const inThemes = page === "themes";
   const themeFilter = inThemes ? query.trim() : "";
-  // Content search (`fs_grep_interactive`) walks the LOCAL filesystem and isn't
-  // routed over SSH yet, so it's disabled on remote workspaces.
-  const isSsh = useWorkspaceEnvStore((s) => s.env.kind === "ssh");
-
   const content = useContentSearch(
     workspaceRoot,
     parsed.term,
-    open && !inThemes && parsed.mode === "content" && !isSsh,
+    open && !inThemes && parsed.mode === "content",
   );
   const history = useCommandHistory(
     parsed.term,
@@ -299,9 +294,7 @@ export function CommandPalette({
               )
             ) : parsed.mode === "content" ? (
               <CommandGroup heading="Contents">
-                {isSsh ? (
-                  <StatusItem label="Content search isn’t available on remote workspaces yet" />
-                ) : !workspaceRoot ? (
+                {!workspaceRoot ? (
                   <StatusItem label="No workspace root" />
                 ) : parsed.term.length < CONTENT_SEARCH_MIN_QUERY ? (
                   <StatusItem label="Type at least 2 characters" />

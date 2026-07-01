@@ -224,6 +224,7 @@ SEARCH_PRUNE = {"node_modules", ".git", "target", "dist", "build", ".next",
                 ".turbo", ".cache", ".venv", "__pycache__"}
 SEARCH_MAX_SCANNED = 500000
 SEARCH_MAX_HITS = 2000
+GREP_FILE_CAP = 5 * 1024 * 1024
 
 
 def _utf8_ok(name):
@@ -457,11 +458,61 @@ def search(req):
     return {"hits": hits, "truncated": truncated}
 
 
+def grep(req):
+    root = os.path.expanduser(req["path"]); pattern = req.get("pattern", "")
+    show_hidden = req.get("showHidden", False); limit = req.get("limit", 200)
+    if not pattern:
+        return {"hits": [], "truncated": False, "files_scanned": 0}
+    # Smart-case literal match, mirroring the local interactive grep (escaped
+    # literal + case_smart): case-insensitive unless the pattern has uppercase.
+    has_upper = any(c.isupper() for c in pattern)
+    needle = pattern if has_upper else pattern.lower()
+    base = root.rstrip("/") + "/"
+    hits = []; scanned = 0; files = 0; truncated = False
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in SEARCH_PRUNE
+                       and (show_hidden or not d.startswith("."))]
+        for name in filenames:
+            if not show_hidden and name.startswith("."):
+                continue
+            scanned += 1
+            if scanned > SEARCH_MAX_SCANNED:
+                truncated = True; break
+            full = os.path.join(dirpath, name)
+            try:
+                if os.path.getsize(full) > GREP_FILE_CAP:
+                    continue
+                with open(full, "rb") as f:
+                    raw = f.read()
+            except OSError:
+                continue
+            if b"\x00" in raw[:8192]:
+                continue
+            try:
+                content = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            files += 1
+            rel = full[len(base):] if full.startswith(base) else name
+            for i, line in enumerate(content.split("\n"), 1):
+                hay = line if has_upper else line.lower()
+                if needle in hay:
+                    hits.append({"path": full, "rel": rel, "line": i,
+                                 "text": line[:500]})
+                    if len(hits) >= limit:
+                        truncated = True; break
+            if truncated:
+                break
+        if truncated:
+            break
+    return {"hits": hits, "truncated": truncated, "files_scanned": files}
+
+
 OPS = {"read_dir": read_dir, "list_subdirs": list_subdirs, "stat": stat,
        "read_file": read_file, "write_file": write_file,
        "create_file": create_file, "create_dir": create_dir,
        "rename": rename, "delete": delete, "exists": exists,
-       "write_bytes": write_bytes, "search": search}
+       "write_bytes": write_bytes, "search": search, "grep": grep}
 
 
 def main():
@@ -843,6 +894,25 @@ pub fn search(
         }),
     )?;
     crate::modules::fs::search::rank_remote_hits(data, query, limit)
+}
+
+/// Remote content search (`fs_grep_interactive`). The host helper walks + greps
+/// with a smart-case literal match, mirroring the local escaped-literal search.
+/// No server-side supersession over SSH — the caller debounces + drops stale
+/// responses.
+pub fn grep(
+    host: &str,
+    root: &str,
+    pattern: &str,
+    limit: usize,
+) -> Result<crate::modules::fs::grep::GrepResponse, String> {
+    let data = run_remote_json(
+        host,
+        &serde_json::json!({
+            "op": "grep", "path": root, "pattern": pattern, "limit": limit,
+        }),
+    )?;
+    serde_json::from_value(data).map_err(|e| format!("bad grep response: {e}"))
 }
 
 /// Remote `fs_create_file` (atomic O_EXCL create; refuses to clobber).
