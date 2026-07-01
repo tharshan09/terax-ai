@@ -16,6 +16,7 @@ import {
   terminalLineNavigationSequence,
   terminalWordNavigationSequence,
 } from "./keymap";
+import { findPathLinks } from "./terminalPathLinks";
 
 export const POOL_MAX_SIZE = 5;
 const FIT_DEBOUNCE_MS = 8;
@@ -74,6 +75,26 @@ const slots: Slot[] = [];
 let recyclerEl: HTMLDivElement | null = null;
 let adapter: SlotAdapter | null = null;
 
+// Cmd+Click on a file path in terminal output opens it in a tab (wired from
+// App). Path links are only offered while the modifier is held so ordinary
+// agent output isn't peppered with underlines.
+let pathOpener: ((leafId: number, path: string) => void) | null = null;
+let modifierHeld = false;
+let modifierTrackingBound = false;
+
+function bindModifierTracking(): void {
+  if (modifierTrackingBound || typeof window === "undefined") return;
+  modifierTrackingBound = true;
+  const sync = (e: KeyboardEvent) => {
+    modifierHeld = e.metaKey || e.ctrlKey;
+  };
+  window.addEventListener("keydown", sync);
+  window.addEventListener("keyup", sync);
+  window.addEventListener("blur", () => {
+    modifierHeld = false;
+  });
+}
+
 let windowActive =
   typeof document === "undefined" || (!document.hidden && document.hasFocus());
 let windowActivityBound = false;
@@ -103,6 +124,14 @@ function setWindowActive(active: boolean): void {
 export function configureRendererPool(a: SlotAdapter): void {
   adapter = a;
   bindWindowActivityListeners();
+}
+
+/** Register the handler that opens a file path Cmd+Clicked in the terminal. */
+export function setTerminalPathOpener(
+  fn: (leafId: number, path: string) => void,
+): void {
+  pathOpener = fn;
+  bindModifierTracking();
 }
 
 export function forEachSlot(fn: (slot: Slot) => void): void {
@@ -242,6 +271,33 @@ function createSlot(): Slot {
     lastH: 0,
     lastUsedAt: 0,
   };
+
+  // File-path links (Cmd/Ctrl+Click → open in a tab). WebLinksAddon still owns
+  // URLs; this provider only surfaces paths, and only while the modifier is
+  // held so untouched output stays clean.
+  term.registerLinkProvider({
+    provideLinks(bufferLine, callback) {
+      if (!modifierHeld || !pathOpener) return callback(undefined);
+      const line = term.buffer.active.getLine(bufferLine - 1);
+      if (!line) return callback(undefined);
+      const found = findPathLinks(line.translateToString(true));
+      if (found.length === 0) return callback(undefined);
+      callback(
+        found.map((l) => ({
+          text: l.path,
+          range: {
+            start: { x: l.start + 1, y: bufferLine },
+            end: { x: l.end, y: bufferLine },
+          },
+          activate: (event: MouseEvent) => {
+            if (!(event.metaKey || event.ctrlKey)) return;
+            const leafId = slot.currentLeafId;
+            if (leafId != null) pathOpener?.(leafId, l.path);
+          },
+        })),
+      );
+    },
+  });
 
   term.attachCustomKeyEventHandler((event) => {
     // During IME composition the browser is assembling a multi-keystroke
