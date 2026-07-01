@@ -188,6 +188,7 @@ export default function App() {
     focusPane,
     focusNextPaneInTab,
     splitActivePane,
+    movePane,
     closeActivePane,
     closePaneByLeaf,
     resetWorkspace,
@@ -1505,6 +1506,7 @@ export default function App() {
                       onCwd={handleTerminalCwd}
                       onExit={handleLeafExit}
                       onFocusLeaf={handleFocusLeaf}
+                      movePane={movePane}
                       registerEditorHandle={registerEditorHandle}
                       onEditorDirtyChange={handleEditorDirty}
                       onEditorCloseTab={disposeTab}

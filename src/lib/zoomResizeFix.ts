@@ -21,6 +21,13 @@ export function setResizeZoomFactor(z: number): void {
   appZoom = Number.isFinite(z) && z > 0 ? z : 1;
 }
 
+/** Current app zoom. Pointer coords report in this zoomed space; an un-patched
+ *  `getBoundingClientRect()` (any element without `data-panel*`) does not, so
+ *  scale such a rect by this factor to compare it against pointer coords. */
+export function getResizeZoomFactor(): number {
+  return appZoom;
+}
+
 let installed = false;
 
 export function installZoomResizeFix(): void {
