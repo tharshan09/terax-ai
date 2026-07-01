@@ -12,7 +12,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-use super::agent::{existing_config, settings_path};
+use super::agent::{claude_settings_path, existing_config};
 use crate::modules::workspace::WorkspaceEnv;
 use crate::modules::{ssh, tmux};
 
@@ -146,7 +146,7 @@ exit 0
 "#;
 
 fn terax_subdir() -> Result<PathBuf, String> {
-    let settings = settings_path()?;
+    let settings = claude_settings_path()?;
     let dir = settings
         .parent()
         .ok_or_else(|| "settings path has no parent".to_string())?;
@@ -258,7 +258,7 @@ pub fn claude_enable_statusline(workspace: Option<WorkspaceEnv>) -> Result<(), S
 }
 
 fn enable_local() -> Result<(), String> {
-    let settings = settings_path()?;
+    let settings = claude_settings_path()?;
     let dir = terax_subdir()?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
 
@@ -287,7 +287,7 @@ pub fn claude_disable_statusline(workspace: Option<WorkspaceEnv>) -> Result<(), 
 }
 
 fn disable_local() -> Result<(), String> {
-    let settings = settings_path()?;
+    let settings = claude_settings_path()?;
     let existing = read_settings(&settings)?;
 
     // Only act if the current statusLine is ours; otherwise leave it alone.
@@ -323,7 +323,7 @@ pub fn claude_statusline_enabled(workspace: Option<WorkspaceEnv>) -> bool {
 }
 
 fn enabled_local() -> bool {
-    let Ok(settings) = settings_path() else {
+    let Ok(settings) = claude_settings_path() else {
         return false;
     };
     let Ok(root) = read_settings(&settings) else {

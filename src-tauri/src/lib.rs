@@ -232,6 +232,22 @@ fn install_panic_logger() {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_panic_logger();
+
+    #[cfg(windows)]
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.get(1).map(String::as_str) == Some("__terax_notify") {
+            if let (Some(agent), Some(event)) = (args.get(2), args.get(3)) {
+                agent::emit_conout_marker(agent, event);
+            }
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            let _ = out.write_all(b"{}");
+            let _ = out.flush();
+            std::process::exit(0);
+        }
+    }
+
     let cli_dir = parse_launch_dir();
     workspace::init_launch_cwd(cli_dir.as_deref());
 
@@ -364,8 +380,8 @@ pub fn run() {
             get_launch_dir,
             build_info,
             open_settings_window,
-            agent::agent_enable_claude_hooks,
-            agent::agent_claude_hooks_status,
+            agent::agent_enable_hooks,
+            agent::agent_hooks_status,
             claude::claude_enable_statusline,
             claude::claude_disable_statusline,
             claude::claude_statusline_enabled,
