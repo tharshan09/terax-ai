@@ -34,6 +34,7 @@ This fork closes that gap. Source control, Claude Code's live stats, tmux sessio
 | **cwd-follow under tmux** | The file explorer and source-control panels follow `cd` even on hosts where tmux swallows the shell's `OSC 7` cwd signal. |
 | **Customizable status bar** | Reorderable, toggleable widgets — git branch & ahead/behind, working-tree line changes, workspace env (incl. the SSH host), and opt-in Claude Code stats. |
 | **Two-finger trackpad tab-swipe** | A native macOS (AppKit) two-finger horizontal swipe to switch between tabs. |
+| **Search over SSH** | Both file-name search (explorer) and full-text content search (command palette) run on the remote host, so they work over SSH exactly like locally — the previous local-only walk never saw remote files. |
 
 ### How the SSH features work
 
@@ -44,6 +45,9 @@ Transport is the **system `ssh` binary with ControlMaster multiplexing** — no 
 - **Security hardening** — host-key prompting (no silent first-connect trust), workspace-jailed filesystem mutations, tightened iframe/asset scope, an OSC 52 clipboard-write policy, and an "open with default app" executable guard — each covered by tests.
 - **Markdown & preview** — KaTeX math in both the markdown preview and the AI chat, a raw/rendered HTML preview toggle, and a unified document stack.
 - **Terminal & editor UX** — selection-aware native copy/paste (Cmd/Ctrl+C copies a selection, else sends SIGINT), IME fixes, a UI font independent of the terminal font, and opening unrenderable files with the system default app.
+- **Cmd+Click file paths** — Cmd/Ctrl+Click a file path in terminal output (e.g. one an agent just printed) opens it in a tab: HTML/Markdown rendered, `~` expanded, a `:line` suffix jumps to that line.
+- **Pane drag & drop** — reorder split panes by dragging a pane's grab handle onto another pane's edge; the live terminal session moves with it. Plus combinable active/inactive focus styles for split panes.
+- **More built-in themes** — One (Atom One), Vesper and Terminal dark themes, plus a Tokyo Day light variant, on top of the existing set.
 
 ## Everything else
 
