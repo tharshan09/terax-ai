@@ -777,24 +777,6 @@ export default function App() {
     [openFileTab, newMarkdownTab, newHtmlTab],
   );
 
-  // Cmd/Ctrl+Click on a file path in terminal output: resolve it against the
-  // clicked pane's cwd, confirm it exists (SSH-aware), then open it — HTML/MD
-  // rendered, everything else in the editor.
-  useEffect(() => {
-    setTerminalPathOpener((leafId, token) => {
-      const resolved = resolveTerminalPath(token, leafCwd(leafId));
-      if (!resolved) return;
-      const workspace = currentWorkspaceEnv();
-      void invoke<{ kind: string }>("fs_stat", { path: resolved, workspace })
-        .then((stat) => {
-          if (stat.kind !== "dir") handleOpenFile(resolved);
-        })
-        .catch(() => {
-          // Not a real file (or unreachable over SSH) — ignore the click.
-        });
-    });
-  }, [handleOpenFile]);
-
   const handlePathRenamed = useCallback(
     (from: string, to: string) => {
       for (const t of tabs) {
@@ -1365,6 +1347,31 @@ export default function App() {
     },
     [openFileTab],
   );
+
+  // Cmd/Ctrl+Click on a file path in terminal output: resolve it against the
+  // clicked pane's cwd (`~` expands to home locally; over SSH the host helper
+  // does it), confirm it exists via fs_stat, then open it — a `:line` suffix
+  // jumps there in the editor, HTML/MD render, everything else opens plain.
+  useEffect(() => {
+    setTerminalPathOpener((leafId, token, line) => {
+      const workspace = currentWorkspaceEnv();
+      const resolved = resolveTerminalPath(
+        token,
+        leafCwd(leafId),
+        workspace.kind === "ssh" ? undefined : home,
+      );
+      if (!resolved) return;
+      void invoke<{ kind: string }>("fs_stat", { path: resolved, workspace })
+        .then((stat) => {
+          if (stat.kind === "dir") return;
+          if (line != null) openContentHit(resolved, line);
+          else handleOpenFile(resolved);
+        })
+        .catch(() => {
+          // Not a real file (or unreachable over SSH) — ignore the click.
+        });
+    });
+  }, [handleOpenFile, openContentHit, home]);
 
   const insertHistoryCommand = useMemo(
     () =>

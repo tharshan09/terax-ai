@@ -16,6 +16,9 @@ describe("findPathLinks", () => {
     expect(findPathLinks("/Users/z/f.html")[0].path).toBe("/Users/z/f.html");
     expect(findPathLinks("./src/x.ts")[0].path).toBe("./src/x.ts");
     expect(findPathLinks("../y/z.md")[0].path).toBe("../y/z.md");
+    expect(findPathLinks("open ~/notes/todo.md")[0].path).toBe(
+      "~/notes/todo.md",
+    );
   });
 
   it("ignores URLs (WebLinksAddon owns those)", () => {
@@ -37,6 +40,7 @@ describe("findPathLinks", () => {
     const line = "at src/app/App.tsx:42:10 failed";
     const links = findPathLinks(line);
     expect(links[0].path).toBe("src/app/App.tsx");
+    expect(links[0].line).toBe(42);
     expect(line.slice(links[0].start, links[0].end)).toBe(
       "src/app/App.tsx:42:10",
     );
@@ -67,8 +71,11 @@ describe("resolveTerminalPath", () => {
     );
   });
 
-  it("returns null for ~ (home expansion is a follow-up) and cwd-less relatives", () => {
-    expect(resolveTerminalPath("~/x.html", "/cwd")).toBeNull();
+  it("expands ~ against home, keeps it literal without home (SSH), null for cwd-less relatives", () => {
+    expect(resolveTerminalPath("~/x.html", "/cwd", "/home/u")).toBe(
+      "/home/u/x.html",
+    );
+    expect(resolveTerminalPath("~/x.html", "/cwd")).toBe("~/x.html");
     expect(resolveTerminalPath("docs/x.html", null)).toBeNull();
   });
 });
