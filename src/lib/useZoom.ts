@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { setZoomLevel } from "@/modules/settings/store";
+import { installZoomResizeFix, setResizeZoomFactor } from "./zoomResizeFix";
 
 const ZOOM_STEP = 0.1;
 const MIN_ZOOM = 0.5;
@@ -13,7 +14,11 @@ function clampZoom(z: number): number {
 }
 
 function applyToDom(z: number): void {
+  // Keep the resize-panels coordinate fix in sync with the CSS zoom, and make
+  // sure the patch is installed before any resize interaction can happen.
+  installZoomResizeFix();
   document.documentElement.style.setProperty(CSS_VAR, String(z));
+  setResizeZoomFactor(z);
 }
 
 export function useZoom() {

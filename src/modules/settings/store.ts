@@ -30,6 +30,19 @@ export const DEFAULT_THEME_ID = "terax-default";
 
 export type BackgroundKind = "none" | "image";
 
+/** Marker drawn on the FOCUSED pane within a split: off, a single accent edge
+ *  on top, or an accent-colored divider next to it. Only visible when split. */
+export type ActivePaneMarker = "off" | "edge" | "divider";
+/** Treatment applied to the NON-focused panes within a split: none, faded
+ *  (dim), desaturated (grayer), a neutral gray veil (grayed, iTerm-style), or
+ *  dim + desaturate (both). */
+export type InactivePaneStyle =
+  | "none"
+  | "dim"
+  | "desaturate"
+  | "grayed"
+  | "both";
+
 export const EDITOR_THEMES = [
   "kanagawa",
   "kanagawa-lotus",
@@ -152,6 +165,12 @@ export type Preferences = {
   explorerGitDecorations: boolean;
   terminalWebglEnabled: boolean;
   terminalCursorBlink: boolean;
+  /** Marker on the focused pane within a split (off/border/edge/divider). */
+  activePaneMarker: ActivePaneMarker;
+  /** Treatment of the non-focused panes within a split (none/dim/desaturate/both). */
+  inactivePaneStyle: InactivePaneStyle;
+  /** Show a small header (working dir) on each pane within a split. */
+  paneHeaders: boolean;
   terminalFontFamily: string;
   terminalFontWeight: string;
   // OSC 52 clipboard-write policy: a terminal program (tmux/vim, or forged
@@ -215,6 +234,11 @@ const LEGACY_KEY_SHOW_HIDDEN_DIRS = "showHiddenDirectories";
 const KEY_EXPLORER_GIT_DECORATIONS = "explorerGitDecorations";
 const KEY_TERMINAL_WEBGL_ENABLED = "terminalWebglEnabled";
 const KEY_TERMINAL_CURSOR_BLINK = "terminalCursorBlink";
+const KEY_ACTIVE_PANE_MARKER = "activePaneMarker";
+const KEY_INACTIVE_PANE_STYLE = "inactivePaneStyle";
+const KEY_PANE_HEADERS = "paneHeaders";
+// Superseded by the three keys above; still read once to migrate old configs.
+const LEGACY_KEY_ACTIVE_PANE_HIGHLIGHT = "activePaneHighlight";
 const KEY_TERMINAL_FONT_FAMILY = "terminalFontFamily";
 const KEY_TERMINAL_FONT_WEIGHT = "terminalFontWeight";
 const KEY_TERMINAL_CLIPBOARD_WRITE = "terminalClipboardWrite";
@@ -285,6 +309,9 @@ export const DEFAULT_PREFERENCES: Preferences = {
   explorerGitDecorations: true,
   terminalWebglEnabled: true,
   terminalCursorBlink: false,
+  activePaneMarker: "divider",
+  inactivePaneStyle: "none",
+  paneHeaders: false,
   terminalFontFamily: "",
   terminalFontWeight: "normal",
   terminalClipboardWrite: "notify",
@@ -428,6 +455,16 @@ export async function loadPreferences(): Promise<Preferences> {
     terminalCursorBlink:
       get<boolean>(KEY_TERMINAL_CURSOR_BLINK) ??
       DEFAULT_PREFERENCES.terminalCursorBlink,
+    activePaneMarker: coerceActivePaneMarker(
+      get<string>(KEY_ACTIVE_PANE_MARKER) ??
+        legacyPaneHighlight(get<string>(LEGACY_KEY_ACTIVE_PANE_HIGHLIGHT)).marker,
+    ),
+    inactivePaneStyle: coerceInactivePaneStyle(
+      get<string>(KEY_INACTIVE_PANE_STYLE) ??
+        legacyPaneHighlight(get<string>(LEGACY_KEY_ACTIVE_PANE_HIGHLIGHT)).inactive,
+    ),
+    paneHeaders:
+      get<boolean>(KEY_PANE_HEADERS) ?? DEFAULT_PREFERENCES.paneHeaders,
     terminalFontFamily:
       get<string>(KEY_TERMINAL_FONT_FAMILY) ??
       DEFAULT_PREFERENCES.terminalFontFamily,
@@ -647,6 +684,62 @@ export async function setTerminalCursorBlink(value: boolean): Promise<void> {
   await writePref(KEY_TERMINAL_CURSOR_BLINK, value);
 }
 
+const ACTIVE_PANE_MARKERS = new Set<ActivePaneMarker>(["off", "edge", "divider"]);
+
+export function coerceActivePaneMarker(value: string): ActivePaneMarker {
+  return ACTIVE_PANE_MARKERS.has(value as ActivePaneMarker)
+    ? (value as ActivePaneMarker)
+    : "divider";
+}
+
+export async function setActivePaneMarker(
+  value: ActivePaneMarker,
+): Promise<void> {
+  await writePref(KEY_ACTIVE_PANE_MARKER, coerceActivePaneMarker(value));
+}
+
+const INACTIVE_PANE_STYLES = new Set<InactivePaneStyle>([
+  "none",
+  "dim",
+  "desaturate",
+  "grayed",
+  "both",
+]);
+
+export function coerceInactivePaneStyle(value: string): InactivePaneStyle {
+  return INACTIVE_PANE_STYLES.has(value as InactivePaneStyle)
+    ? (value as InactivePaneStyle)
+    : "none";
+}
+
+export async function setInactivePaneStyle(
+  value: InactivePaneStyle,
+): Promise<void> {
+  await writePref(KEY_INACTIVE_PANE_STYLE, coerceInactivePaneStyle(value));
+}
+
+export async function setPaneHeaders(value: boolean): Promise<void> {
+  await writePref(KEY_PANE_HEADERS, value);
+}
+
+/** Map the pre-split legacy `activePaneHighlight` value onto the new
+ *  marker + inactive-style pair, so existing configs keep their look. */
+function legacyPaneHighlight(v: string | undefined): {
+  marker: ActivePaneMarker;
+  inactive: InactivePaneStyle;
+} {
+  switch (v) {
+    case "dim":
+      return { marker: "off", inactive: "dim" };
+    case "both":
+      return { marker: "divider", inactive: "dim" };
+    case "off":
+      return { marker: "off", inactive: "none" };
+    default:
+      return { marker: "divider", inactive: "none" };
+  }
+}
+
 export async function setTerminalFontFamily(value: string): Promise<void> {
   await writePref(KEY_TERMINAL_FONT_FAMILY, value.trim());
 }
@@ -811,6 +904,9 @@ export async function onPreferencesChange(
     [KEY_EXPLORER_GIT_DECORATIONS]: "explorerGitDecorations",
     [KEY_TERMINAL_WEBGL_ENABLED]: "terminalWebglEnabled",
     [KEY_TERMINAL_CURSOR_BLINK]: "terminalCursorBlink",
+    [KEY_ACTIVE_PANE_MARKER]: "activePaneMarker",
+    [KEY_INACTIVE_PANE_STYLE]: "inactivePaneStyle",
+    [KEY_PANE_HEADERS]: "paneHeaders",
     [KEY_TERMINAL_FONT_FAMILY]: "terminalFontFamily",
     [KEY_TERMINAL_FONT_WEIGHT]: "terminalFontWeight",
     [KEY_TERMINAL_CLIPBOARD_WRITE]: "terminalClipboardWrite",
