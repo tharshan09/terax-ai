@@ -8,12 +8,15 @@ import { gruvbox } from "./gruvbox";
 import { kanagawa } from "./kanagawa";
 import { kanagawaDragon } from "./kanagawa-dragon";
 import { nord } from "./nord";
+import { one } from "./one";
 import { rosePine } from "./rose-pine";
 import { sage } from "./sage";
 import { solarized } from "./solarized";
 import { teraxDefault } from "./terax-default";
+import { terminal } from "./terminal";
 import { tide } from "./tide";
 import { tokyoNight } from "./tokyo-night";
+import { vesper } from "./vesper";
 
 const BUILTIN: Theme[] = [
   teraxDefault,
@@ -27,10 +30,13 @@ const BUILTIN: Theme[] = [
   nord,
   gruvbox,
   dracula,
+  one,
   solarized,
   tide,
   sage,
   caffeine,
+  terminal,
+  vesper,
 ];
 
 const BY_ID = new Map<string, Theme>(BUILTIN.map((t) => [t.id, t]));
