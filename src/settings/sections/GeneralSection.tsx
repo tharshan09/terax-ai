@@ -16,10 +16,17 @@ import {
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import type { ThemePref } from "@/modules/settings/store";
+import type {
+  ActivePaneMarker,
+  InactivePaneStyle,
+  ThemePref,
+} from "@/modules/settings/store";
 import {
   TERMINAL_FONT_SIZES,
   TERMINAL_SCROLLBACK_PRESETS,
+  setActivePaneMarker,
+  setInactivePaneStyle,
+  setPaneHeaders,
   setAgentNotifications,
   setAutostart,
   setEditorWordWrap,
@@ -74,6 +81,19 @@ const TERMINAL_FONT_WEIGHTS = [
 ] as const;
 const LETTER_SPACINGS = [-4, -3, -2, -1, 0, 1, 2, 3, 4] as const;
 
+const ACTIVE_PANE_MARKERS: { value: ActivePaneMarker; label: string }[] = [
+  { value: "edge", label: "Accent edge" },
+  { value: "divider", label: "Divider accent" },
+  { value: "off", label: "Off" },
+];
+const INACTIVE_PANE_STYLES: { value: InactivePaneStyle; label: string }[] = [
+  { value: "none", label: "None" },
+  { value: "dim", label: "Dim" },
+  { value: "desaturate", label: "Desaturate" },
+  { value: "grayed", label: "Grayed (iTerm)" },
+  { value: "both", label: "Dim + desaturate" },
+];
+
 type ShellInfo = { name: string; path: string; integrated: boolean };
 const SHELL_AUTO = "auto";
 const ZOOM_MIN = 0.5;
@@ -102,6 +122,9 @@ export function GeneralSection() {
   const terminalCursorBlink = usePreferencesStore(
     (s) => s.terminalCursorBlink,
   );
+  const activePaneMarker = usePreferencesStore((s) => s.activePaneMarker);
+  const inactivePaneStyle = usePreferencesStore((s) => s.inactivePaneStyle);
+  const paneHeaders = usePreferencesStore((s) => s.paneHeaders);
   const terminalFontFamily = usePreferencesStore((s) => s.terminalFontFamily);
   const terminalFontWeight = usePreferencesStore((s) => s.terminalFontWeight);
   const uiFontFamily = usePreferencesStore((s) => s.uiFontFamily);
@@ -325,6 +348,73 @@ export function GeneralSection() {
           <Switch
             checked={terminalCursorBlink}
             onCheckedChange={(v) => void setTerminalCursorBlink(v)}
+          />
+        </SettingRow>
+        <SettingRow
+          title="Active pane marker"
+          description="How the focused pane is marked when a tab is split (⌘D / ⌘⇧D): a bar on top (Accent edge) or a tinted divider next to it."
+        >
+          <Select
+            value={activePaneMarker}
+            onValueChange={(v) =>
+              void setActivePaneMarker(v as ActivePaneMarker)
+            }
+          >
+            <SelectTrigger
+              value={activePaneMarker}
+              className="h-8 w-40 text-[12px]"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {ACTIVE_PANE_MARKERS.map((o) => (
+                <SelectItem
+                  key={o.value}
+                  value={o.value}
+                  className="text-[12px]"
+                >
+                  {o.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </SettingRow>
+        <SettingRow
+          title="Inactive panes"
+          description="How the non-focused panes look in a split: faded (Dim), desaturated (grayer), a neutral gray veil (Grayed, iTerm-style), or both."
+        >
+          <Select
+            value={inactivePaneStyle}
+            onValueChange={(v) =>
+              void setInactivePaneStyle(v as InactivePaneStyle)
+            }
+          >
+            <SelectTrigger
+              value={inactivePaneStyle}
+              className="h-8 w-40 text-[12px]"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {INACTIVE_PANE_STYLES.map((o) => (
+                <SelectItem
+                  key={o.value}
+                  value={o.value}
+                  className="text-[12px]"
+                >
+                  {o.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </SettingRow>
+        <SettingRow
+          title="Pane headers"
+          description="Show a small header with the working directory on each pane when a tab is split."
+        >
+          <Switch
+            checked={paneHeaders}
+            onCheckedChange={(v) => void setPaneHeaders(v)}
           />
         </SettingRow>
         <FontFamilyInput
