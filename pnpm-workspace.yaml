@@ -4,3 +4,8 @@ allowBuilds:
   esbuild: true
   msgpackr-extract: false
   msw: true
+# Force the transitive dompurify (streamdown -> mermaid) past the moderate/low
+# XSS advisories in 3.4.8. CSP already blunts it; this closes it outright. Capped
+# below 4 so a future install can't silently jump to a major (mermaid wants ^3).
+overrides:
+  dompurify: ">=3.4.11 <4"
