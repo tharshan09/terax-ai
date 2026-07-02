@@ -406,12 +406,22 @@ fn status_from_value(v: &Value) -> Option<ClaudeStatus> {
 /// to `None`; never opens a fresh prompt (BatchMode). Reading via `cat` keeps a
 /// non-existent file from being treated as an error (so we never clobber).
 fn ssh_read(host: &str, rel: &str) -> Result<Option<String>, String> {
-    let cap = ssh::run_remote_capture(host, &format!("cat ~/.claude/{rel} 2>/dev/null"))?;
+    let cap = ssh::run_remote_capture(host, &ssh_read_command(rel))?;
     Ok(if cap.stdout.is_empty() {
         None
     } else {
         Some(cap.stdout)
     })
+}
+
+/// Every caller passes a literal or an allowlist-validated session name today,
+/// but the splice must not rely on that: quote the segment so it can never
+/// terminate the remote command.
+fn ssh_read_command(rel: &str) -> String {
+    format!(
+        "cat ~/.claude/{} 2>/dev/null",
+        crate::modules::git::quote_remote_arg(rel)
+    )
 }
 
 fn enable_ssh(host: &str) -> Result<(), String> {
@@ -596,5 +606,28 @@ mod tests {
         // Always forwards to the user's original statusLine and never fails.
         assert!(WRAPPER_SCRIPT.contains("statusline-original"));
         assert!(WRAPPER_SCRIPT.trim_end().ends_with("exit 0"));
+    }
+
+    #[test]
+    fn ssh_read_command_quotes_the_path_segment() {
+        assert_eq!(
+            ssh_read_command("settings.json"),
+            "cat ~/.claude/'settings.json' 2>/dev/null"
+        );
+        assert_eq!(
+            ssh_read_command(".terax/status-tmux-main.json"),
+            "cat ~/.claude/'.terax/status-tmux-main.json' 2>/dev/null"
+        );
+    }
+
+    #[test]
+    fn ssh_read_command_neutralizes_shell_metacharacters() {
+        // A hostile rel must stay one quoted word: the embedded quote is
+        // rewritten so nothing can terminate the cat and start a new command.
+        let cmd = ssh_read_command("x'; rm -rf ~; '");
+        assert_eq!(cmd, "cat ~/.claude/'x'\\''; rm -rf ~; '\\''' 2>/dev/null");
+
+        let cmd = ssh_read_command("$(reboot)`id`");
+        assert_eq!(cmd, "cat ~/.claude/'$(reboot)`id`' 2>/dev/null");
     }
 }

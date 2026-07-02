@@ -377,7 +377,7 @@ fn remote_git_command(cwd: Option<&str>, args: &[OsString]) -> String {
 
 /// POSIX single-quote: wrap in `'…'`, rewriting any embedded `'` as `'\''`.
 /// The result expands to the literal input in any POSIX shell.
-fn quote_remote_arg(s: &str) -> String {
+pub(crate) fn quote_remote_arg(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('\'');
     for ch in s.chars() {

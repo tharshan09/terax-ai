@@ -196,10 +196,11 @@ fn fs_check_readable_impl(
 #[tauri::command]
 pub fn fs_canonicalize(path: String, workspace: Option<WorkspaceEnv>) -> Result<String, String> {
     let workspace = WorkspaceEnv::from_option(workspace);
-    // Remote paths can't be canonicalized locally; return verbatim (they're
-    // already absolute POSIX paths from the remote shell / explorer).
-    if workspace.is_ssh() {
-        return Ok(path);
+    // Remote paths resolve host-side via the helper's realpath. Returning them
+    // verbatim would make every canonicalize-then-recheck guard a no-op over
+    // SSH: a remote symlink at an innocent path could point anywhere.
+    if let WorkspaceEnv::Ssh { host } = &workspace {
+        return crate::modules::ssh::realpath(host, &path);
     }
     let p = resolve_path(&path, &workspace);
     let canon = std::fs::canonicalize(&p).map_err(|e| e.to_string())?;

@@ -296,6 +296,12 @@ def stat(req):
     return {"size": st.st_size, "mtime": int(st.st_mtime * 1000), "kind": kind}
 
 
+def realpath(req):
+    # Resolve symlinks host-side. canonicalize-then-recheck guards depend on
+    # seeing the real target; without this op they were a no-op over SSH.
+    return os.path.realpath(os.path.expanduser(req["path"]))
+
+
 def read_file(req):
     path = os.path.expanduser(req["path"]); limit = req.get("limit", MAX_READ)
     size = os.stat(path).st_size
@@ -509,7 +515,7 @@ def grep(req):
 
 
 OPS = {"read_dir": read_dir, "list_subdirs": list_subdirs, "stat": stat,
-       "read_file": read_file, "write_file": write_file,
+       "realpath": realpath, "read_file": read_file, "write_file": write_file,
        "create_file": create_file, "create_dir": create_dir,
        "rename": rename, "delete": delete, "exists": exists,
        "write_bytes": write_bytes, "search": search, "grep": grep}
@@ -855,6 +861,13 @@ pub fn list_subdirs(host: &str, path: &str, show_hidden: bool) -> Result<Vec<Str
     serde_json::from_value(data).map_err(|e| format!("bad list_subdirs response: {e}"))
 }
 
+/// Remote `realpath` (backs `fs_canonicalize` on SSH): resolves symlinks on
+/// the host so a canonicalize-then-recheck guard sees the real target.
+pub fn realpath(host: &str, path: &str) -> Result<String, String> {
+    let data = run_remote_json(host, &serde_json::json!({ "op": "realpath", "path": path }))?;
+    serde_json::from_value(data).map_err(|e| format!("bad realpath response: {e}"))
+}
+
 /// Remote `fs_read_file`.
 pub fn read_file(host: &str, path: &str) -> Result<crate::modules::fs::file::ReadResult, String> {
     let data = run_remote_json(host, &serde_json::json!({ "op": "read_file", "path": path }))?;
@@ -1132,6 +1145,58 @@ Host !secret prod
         assert!(run_remote_capture("bad host", "echo hi").is_err());
     }
 
+    // Runs the embedded helper against the local python3 (skipped when absent)
+    // and locks the FS-3 invariant: realpath must resolve a symlink to its
+    // real target, because the canonicalize-then-recheck guards depend on it.
+    #[cfg(unix)]
+    #[test]
+    fn embedded_helper_realpath_resolves_symlinks() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let python_ok = Command::new("python3")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !python_ok {
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real.txt");
+        std::fs::write(&target, b"x").unwrap();
+        let link = dir.path().join("innocent.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let req = serde_json::json!({ "op": "realpath", "path": link.to_string_lossy() });
+        let mut child = Command::new("python3")
+            .arg("-c")
+            .arg(REMOTE_PYTHON)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn python3");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(req.to_string().as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().expect("helper output");
+        assert!(out.status.success());
+
+        let stdout = out.stdout;
+        let i = find_subslice(&stdout, TERAX_SENTINEL).expect("sentinel present");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&stdout[i + TERAX_SENTINEL.len()..]).expect("json envelope");
+        assert_eq!(parsed["ok"], serde_json::Value::Bool(true));
+        let resolved = parsed["data"].as_str().expect("string path");
+        let expected = std::fs::canonicalize(&target).unwrap();
+        assert_eq!(resolved, expected.to_string_lossy());
+        assert_ne!(resolved, link.to_string_lossy(), "must not echo the link back");
+    }
+
     // End-to-end check of the real ssh + python helper path. No-op unless
     // TERAX_SSH_TEST_HOST is set, so it's safe in CI; run locally with e.g.
     // `TERAX_SSH_TEST_HOST=litha-claude cargo test --lib remote_fs_smoke -- --nocapture`.
@@ -1144,6 +1209,9 @@ Host !secret prod
         assert!(entries.iter().any(|e| e.name == "etc"));
         // "~" must expand to the remote home (so the explorer can seed it).
         read_dir(&host, "~", false).expect("remote read_dir(~) failed");
+        // realpath backs fs_canonicalize on SSH; "~" must come back absolute.
+        let rp = realpath(&host, "~").expect("remote realpath failed");
+        assert!(rp.starts_with('/'), "expected absolute path, got {rp}");
         let subdirs = list_subdirs(&host, "/", false).expect("remote list_subdirs failed");
         assert!(subdirs.iter().any(|d| d == "home"));
 
