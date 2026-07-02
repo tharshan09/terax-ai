@@ -41,6 +41,8 @@ export function MarkdownPreviewPane({
     invoke<ReadResult>("fs_read_file", {
       path,
       workspace,
+      // The user explicitly opened this preview, so the read is trusted.
+      trusted: true,
     })
       .then((res) => {
         if (cancelled) return;

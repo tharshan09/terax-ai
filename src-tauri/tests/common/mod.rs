@@ -101,4 +101,10 @@ impl FsFixture {
     pub fn mkdir(&self, rel: &str) {
         std::fs::create_dir_all(self.root.join(rel)).expect("mkdir");
     }
+
+    pub fn registry(&self) -> WorkspaceRegistry {
+        let reg = WorkspaceRegistry::default();
+        reg.authorize(&self.root).expect("authorize root");
+        reg
+    }
 }

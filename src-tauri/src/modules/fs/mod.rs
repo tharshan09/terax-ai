@@ -1,6 +1,7 @@
 pub mod asset;
 pub mod file;
 pub mod grep;
+pub mod guard;
 pub mod mutate;
 pub mod search;
 pub mod tree;

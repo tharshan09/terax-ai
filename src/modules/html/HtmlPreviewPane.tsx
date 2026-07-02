@@ -70,7 +70,8 @@ export function HtmlPreviewPane({ path, workspace, visible, onSetView }: Props) 
     if (viaAsset) return;
     let cancelled = false;
     setStatus({ kind: "loading" });
-    invoke<ReadResult>("fs_read_file", { path, workspace })
+    // The user explicitly opened this preview, so the read is trusted.
+    invoke<ReadResult>("fs_read_file", { path, workspace, trusted: true })
       .then((res) => {
         if (cancelled) return;
         if (res.kind === "text") {

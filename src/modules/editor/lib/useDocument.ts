@@ -56,6 +56,9 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
         content,
         workspace: workspace ?? currentWorkspaceEnv(),
         source: "editor",
+        // Explicit user save: allow the editor to persist a file the user
+        // opened by name, even a secret like `.env`.
+        trusted: true,
       });
     } catch (e) {
       // Surface the failure and keep the buffer dirty — savedRef/setDirty below
@@ -88,6 +91,9 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
     invoke<ReadResult>("fs_read_file", {
       path,
       workspace: workspace ?? currentWorkspaceEnv(),
+      // Explicit user open in the editor: allow reading a file named by name,
+      // even a secret. The terminal Cmd+Click path stays untrusted.
+      trusted: true,
     })
       .then((res) => {
         if (cancelled) return;
@@ -125,6 +131,8 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
     void invoke<ReadResult>("fs_read_file", {
       path,
       workspace: workspace ?? currentWorkspaceEnv(),
+      // Reload of an already-open editor doc: same explicit-user trust.
+      trusted: true,
     })
       .then((res) => {
         if (res.kind === "text") {
