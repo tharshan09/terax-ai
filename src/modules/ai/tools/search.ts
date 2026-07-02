@@ -1,7 +1,7 @@
 import { tool } from "ai";
 import { z } from "zod";
 import { native } from "../lib/native";
-import { checkReadableCanonical } from "../lib/security";
+import { checkReadable, checkReadableCanonical } from "../lib/security";
 import { resolvePath, type ToolContext } from "./context";
 
 function resolveRoot(
@@ -30,6 +30,15 @@ const MAX_LINE_LEN = 160;
 function clipLine(s: string): string {
   if (s.length <= MAX_LINE_LEN) return s;
   return `${s.slice(0, MAX_LINE_LEN)}…[+${s.length - MAX_LINE_LEN}]`;
+}
+
+// Drop hits whose path is a secret basename or in a protected dir, so grep/glob
+// can't surface secret contents (or even the secret path itself) that the read
+// tool would refuse. Filtering is on `path` (the resolved absolute path the
+// checks understand), not `rel`; keeping it in one place stops that field choice
+// from silently regressing.
+export function filterReadableHits<T extends { path: string }>(hits: T[]): T[] {
+  return hits.filter((h) => checkReadable(h.path).ok);
 }
 
 export function buildSearchTools(ctx: ToolContext) {
@@ -79,9 +88,11 @@ export function buildSearchTools(ctx: ToolContext) {
             caseInsensitive: case_insensitive,
             maxResults: cap,
           });
+          // The root check can't see individual hits: a search over an allowed
+          // tree still surfaces lines from a `.env` / `id_rsa` inside it.
           return {
             root: r.path,
-            hits: res.hits.map((h) => ({
+            hits: filterReadableHits(res.hits).map((h) => ({
               path: h.path,
               rel: h.rel,
               line: h.line,
@@ -118,7 +129,8 @@ export function buildSearchTools(ctx: ToolContext) {
           });
           return {
             root: r.path,
-            hits: res.hits,
+            // Same secret filter as grep: never list a secret path by name.
+            hits: filterReadableHits(res.hits),
             truncated: res.truncated,
           };
         } catch (e) {

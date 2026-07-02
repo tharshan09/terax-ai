@@ -163,6 +163,56 @@ describe("checkReadableCanonical — symlink defense + always-recheck", () => {
   });
 });
 
+describe("checkWritable — agent/shell config deny (FS-8)", () => {
+  it("blocks writes into agent config dirs but allows reading them", () => {
+    for (const p of [
+      "/home/me/.claude/settings.json",
+      "/home/me/.codex/hooks.json",
+      "/home/me/.gemini/settings.json",
+      "/home/me/project/.claude/config.json",
+    ]) {
+      expect(checkWritable(p), p).toMatchObject({ ok: false });
+      expect(checkReadable(p), p).toMatchObject({ ok: true });
+    }
+  });
+
+  it("blocks writes to shell startup files, case/ADS-normalized", () => {
+    for (const p of [
+      "/home/me/.zshrc",
+      "/home/me/.bashrc",
+      "/home/me/.bash_profile",
+      "/home/me/.profile",
+      "/home/me/.config/fish/config.fish",
+      "/home/me/.ZSHRC",
+      "C:\\Users\\me\\.zshrc",
+      "/home/me/.zshrc.",
+      "/home/me/.zshrc ",
+      "C:\\Users\\me\\.zshrc::$DATA",
+    ]) {
+      expect(checkWritable(p), p).toMatchObject({ ok: false });
+    }
+  });
+
+  it("blocks writes to MCP config (.claude.json / .mcp.json), still readable", () => {
+    // FS-8 gap: `.claude.json` sits at the home root (not under a `/.claude/`
+    // segment) yet holds mcpServers stdio commands — writing it is code exec.
+    expect(checkWritable("/home/me/.claude.json")).toMatchObject({ ok: false });
+    expect(checkWritable("/home/me/project/.mcp.json")).toMatchObject({
+      ok: false,
+    });
+    expect(checkReadable("/home/me/.claude.json")).toMatchObject({ ok: true });
+  });
+
+  it("still allows writes to ordinary project files", () => {
+    expect(checkWritable("/home/me/project/src/main.ts")).toMatchObject({
+      ok: true,
+    });
+    expect(checkWritable("/home/me/notes/.zshrc-notes.md")).toMatchObject({
+      ok: true,
+    });
+  });
+});
+
 describe("checkWritableCanonical — symlink defense for writes + new-file parent", () => {
   it("catches a symlinked target that resolves into ~/.ssh", async () => {
     const resolves = async (p: string) =>
