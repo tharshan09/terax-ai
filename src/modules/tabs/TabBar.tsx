@@ -48,7 +48,8 @@ import {
   useState,
 } from "react";
 import { labelFor } from "./lib/tabLabel";
-import type { EditorTab, Tab } from "./lib/useTabs";
+import type { EditorTab, Tab, TerminalTab } from "./lib/useTabs";
+import { TabActivityIndicator } from "./TabActivityIndicator";
 
 type Props = {
   tabs: Tab[];
@@ -461,6 +462,11 @@ export function TabBar({
                       <span
                         aria-label="Unsaved changes"
                         className="size-1.5 shrink-0 rounded-full bg-foreground/70"
+                      />
+                    ) : null}
+                    {t.kind === "terminal" ? (
+                      <TabActivityIndicator
+                        paneTree={(t as TerminalTab).paneTree}
                       />
                     ) : null}
                   </span>
