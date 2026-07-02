@@ -23,7 +23,6 @@ Until `1.0.0`, only the latest minor gets security fixes. Right now that's `0.5.
 - The Rust backend in `src-tauri/` (PTY, FS, IPC, plugins)
 - The frontend in `src/` — anywhere untrusted input lands (terminal output, file content, AI tool results, credentials)
 - Release artifacts on GitHub and `terax.app`
-- The auto-updater
 
 ## What's not
 

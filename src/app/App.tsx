@@ -106,7 +106,6 @@ import {
 } from "@/modules/spaces";
 import { DEFAULT_SPACE_ID } from "@/modules/tabs/lib/useTabs";
 import { ThemeProvider, useThemeFileEditing } from "@/modules/theme";
-import { UpdaterDialog } from "@/modules/updater";
 import {
   currentWorkspaceEnv,
   LOCAL_WORKSPACE,
@@ -1668,8 +1667,6 @@ export default function App() {
             rootPath={explorerRoot ?? home}
             onCreated={(path) => openFileTab(path)}
           />
-
-          <UpdaterDialog />
 
           <CloseDialogs
             tabs={tabs}
