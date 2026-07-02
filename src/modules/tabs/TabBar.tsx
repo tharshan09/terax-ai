@@ -275,6 +275,20 @@ export function TabBar({
                 );
               }
 
+              const hasClose = tabs.length > 1;
+              // Content of the single rightmost slot while not hovering: an
+              // editor's unsaved-changes dot or the terminal agent activity
+              // indicator (which itself renders nothing when no agent is live).
+              const indicator =
+                t.kind === "editor" && t.dirty ? (
+                  <span
+                    aria-label="Unsaved changes"
+                    className="size-1.5 shrink-0 rounded-full bg-foreground/70"
+                  />
+                ) : t.kind === "terminal" ? (
+                  <TabActivityIndicator paneTree={(t as TerminalTab).paneTree} />
+                ) : null;
+
               const trigger = (
                 <TabsTrigger
                   value={String(t.id)}
@@ -458,36 +472,41 @@ export function TabBar({
                     <span className={cn("truncate", isPreview && "italic")}>
                       {labelFor(t)}
                     </span>
-                    {t.kind === "editor" && t.dirty ? (
-                      <span
-                        aria-label="Unsaved changes"
-                        className="size-1.5 shrink-0 rounded-full bg-foreground/70"
-                      />
-                    ) : null}
-                    {t.kind === "terminal" ? (
-                      <TabActivityIndicator
-                        paneTree={(t as TerminalTab).paneTree}
-                      />
-                    ) : null}
                   </span>
-                  {tabs.length > 1 && (
-                    <span
-                      role="button"
-                      aria-label="Close tab"
-                      data-no-drag
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onClose(t.id);
-                      }}
-                      className="rounded p-0.5 opacity-0 transition-opacity hover:bg-accent hover:opacity-100 group-hover:opacity-60"
-                    >
-                      <HugeiconsIcon
-                        icon={Cancel01Icon}
-                        size={11}
-                        strokeWidth={2}
-                      />
-                    </span>
-                  )}
+                  {/* One rightmost slot: on hover the close button takes over
+                      (priority); otherwise it shows the activity indicator /
+                      editor dirty-dot if any, else nothing. No space is reserved
+                      when empty, so the tab may widen on hover. */}
+                  <span className="flex shrink-0 items-center">
+                    {indicator ? (
+                      <span
+                        className={cn(
+                          "flex items-center",
+                          hasClose && "group-hover:hidden",
+                        )}
+                      >
+                        {indicator}
+                      </span>
+                    ) : null}
+                    {hasClose && (
+                      <span
+                        role="button"
+                        aria-label="Close tab"
+                        data-no-drag
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onClose(t.id);
+                        }}
+                        className="hidden rounded p-0.5 transition-colors hover:bg-accent group-hover:flex"
+                      >
+                        <HugeiconsIcon
+                          icon={Cancel01Icon}
+                          size={11}
+                          strokeWidth={2}
+                        />
+                      </span>
+                    )}
+                  </span>
                 </TabsTrigger>
               );
 
