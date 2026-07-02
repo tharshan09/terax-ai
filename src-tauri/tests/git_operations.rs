@@ -529,3 +529,26 @@ fn checkout_branch_rejects_unsafe_names() {
     let err_dash_long = operations::checkout_branch(&fx.registry, &fx.repo_str(), "--detach", &fx.workspace).unwrap_err();
     assert!(matches!(err_dash_long, GitError::InvalidPath(p) if p == "--detach"));
 }
+
+// The trailing `--` (SSH-2 hardening) must not break normal branch switching.
+#[test]
+fn checkout_branch_switches_to_real_branch() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "hi");
+    fx.run_git(&["add", "."]);
+    fx.run_git(&["commit", "-q", "-m", "init"]);
+    fx.run_git(&["branch", "feature"]);
+
+    operations::checkout_branch(&fx.registry, &fx.repo_str(), "feature", &fx.workspace)
+        .expect("checkout should switch to the feature branch");
+
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(&fx.repo_path)
+        .output()
+        .expect("git rev-parse");
+    assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "feature");
+}

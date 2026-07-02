@@ -37,6 +37,11 @@ import { useDocument } from "./lib/useDocument";
 import { initVimGlobals, vimHandlersExtension } from "./lib/vim";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import { inlineCompletion } from "./lib/autocomplete/inlineExtension";
+import {
+  binaryPreviewMode,
+  extOf,
+  isMediaPath,
+} from "./lib/binaryPreview";
 
 initVimGlobals();
 
@@ -72,17 +77,6 @@ function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
-}
-
-const MEDIA_EXTS = new Set([
-  "png", "jpg", "jpeg", "gif", "webp", "svg", "ico",
-  "mp4", "webm", "ogg", "mov",
-  "mp3", "wav", "flac", "aac", "m4a",
-  "pdf",
-]);
-
-function isMediaPath(p: string): boolean {
-  return MEDIA_EXTS.has(p.split(".").pop()?.toLowerCase() ?? "");
 }
 
 export const EditorPane = forwardRef<EditorPaneHandle, Props>(
@@ -366,24 +360,43 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
     // tag at it; media can't exfiltrate, but the viewer would be blank without
     // the allow.
     const [mediaReadyPath, setMediaReadyPath] = useState<string | null>(null);
+    // A .pdf renders in a sandbox-less PDFKit iframe (WKWebView blanks any
+    // sandboxed plugin). That is safe ONLY for a real pdf, so we additionally
+    // ask the backend whether the file truly begins with the %PDF- magic bytes;
+    // a file merely named .pdf whose bytes are HTML fails this and drops to the
+    // inert card instead of being served as text/html in the asset:// origin.
+    // null = pending, true/false = verified result.
+    const [pdfVerified, setPdfVerified] = useState<boolean | null>(null);
     useEffect(() => {
       const showsMedia =
         (doc.status === "binary" || doc.status === "toolarge") &&
         isMediaPath(path);
       if (!showsMedia) return;
+      const isPdf = extOf(path) === "pdf";
       let cancelled = false;
       setMediaReadyPath(null);
-      invoke("asset_allow", { path, directory: false })
-        .then(() => {
-          if (!cancelled) setMediaReadyPath(path);
-        })
-        .catch(() => {
-          if (!cancelled) setMediaReadyPath(path);
-        });
+      setPdfVerified(null);
+      // Authorize the single file on the asset scope, and — for a pdf — verify
+      // its real magic bytes. Both must settle before we render, so the iframe
+      // never flashes for an unverified pdf. trusted:true mirrors the editor
+      // open (the user explicitly opened this file).
+      const authorize = invoke("asset_allow", { path, directory: false }).catch(
+        () => {},
+      );
+      const verify: Promise<boolean> = isPdf
+        ? invoke<boolean>("fs_is_pdf", { path, workspace, trusted: true }).catch(
+            () => false,
+          )
+        : Promise.resolve(true);
+      void Promise.all([authorize, verify]).then(([, ok]) => {
+        if (cancelled) return;
+        setPdfVerified(ok);
+        setMediaReadyPath(path);
+      });
       return () => {
         cancelled = true;
       };
-    }, [path, doc.status]);
+    }, [path, doc.status, workspace]);
 
     if (doc.status === "loading") {
       return (
@@ -400,24 +413,25 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
       );
     }
     if (doc.status === "binary" || doc.status === "toolarge") {
-      const ext = path.split(".").pop()?.toLowerCase() ?? "";
-      const isImage = ["png", "jpg", "jpeg", "gif", "webp", "svg", "ico"].includes(ext);
-      const isVideo = ["mp4", "webm", "ogg", "mov"].includes(ext);
-      const isAudio = ["mp3", "wav", "flac", "aac", "m4a"].includes(ext);
-      const isPdf = ext === "pdf";
+      const mode = binaryPreviewMode(
+        extOf(path),
+        mediaReadyPath === path,
+        pdfVerified,
+      );
 
-      if (isImage || isVideo || isAudio || isPdf) {
-        if (mediaReadyPath !== path) {
-          return (
-            <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-              Loading…
-            </div>
-          );
-        }
+      if (mode === "loading") {
+        return (
+          <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+            Loading…
+          </div>
+        );
+      }
+
+      if (mode !== "card") {
         const assetUrl = convertFileSrc(path);
         return (
           <div className="flex h-full min-h-0 flex-col items-center justify-center bg-background p-4 overflow-auto">
-            {isImage && (
+            {mode === "image" && (
               <img
                 src={assetUrl}
                 loading="lazy"
@@ -430,7 +444,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
                 alt={path.split('/').pop()}
               />
             )}
-            {isVideo && (
+            {mode === "video" && (
               // biome-ignore lint/a11y/useMediaCaption: local media preview opens arbitrary files with no caption track
               <video
                 controls
@@ -439,7 +453,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
                 src={assetUrl}
               />
             )}
-            {isAudio && (
+            {mode === "audio" && (
               // biome-ignore lint/a11y/useMediaCaption: local media preview opens arbitrary files with no caption track
               <audio
                 controls
@@ -448,11 +462,23 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
                 src={assetUrl}
               />
             )}
-            {isPdf && (
+            {mode === "pdf" && (
               <iframe
                 src={assetUrl}
                 className="w-full h-full border-none"
                 title={path.split('/').pop()}
+                // No sandbox attribute: in WKWebView any sandbox value (even an
+                // empty one) disables the native PDFKit plugin path, leaving the
+                // viewer blank. Safety here does NOT come from a sandbox but from
+                // the server-side magic-byte gate: this branch is only reached
+                // once fs_is_pdf confirmed the file really begins with %PDF-, so
+                // the asset protocol serves it as application/pdf → PDFKit (which
+                // does not execute a PDF's embedded JavaScript). A file merely
+                // named .pdf whose bytes are HTML fails that gate and shows the
+                // inert card instead, so no attacker HTML is ever served here in
+                // the real asset:// origin. Isolation is further bounded by the
+                // single-file asset scope (asset_allow directory:false authorizes
+                // only this one path — no directory listing, no other files).
               />
             )}
           </div>

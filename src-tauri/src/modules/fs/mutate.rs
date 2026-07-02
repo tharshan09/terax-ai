@@ -68,7 +68,10 @@ fn fs_create_file_impl(
     }
     let p = resolve_path(&path, &workspace);
     authorize_mutation_dir(registry, p.parent(), &p)?;
-    if p.exists() {
+    // symlink_metadata (not exists): a dangling symlink pre-staged at the leaf
+    // reports exists()==false, so a plain write would follow it and create the
+    // target outside the jail. Refuse any existing name, symlink included.
+    if std::fs::symlink_metadata(&p).is_ok() {
         return Err(format!("already exists: {}", p.display()));
     }
     std::fs::write(&p, "").map_err(|e| {
@@ -235,7 +238,10 @@ fn fs_copy_impl(
             .file_name()
             .ok_or_else(|| format!("invalid source: {source}"))?;
         let target = dest.join(name);
-        if target.exists() {
+        // symlink_metadata (not exists): refuse any pre-existing leaf, including
+        // a dangling symlink that std::fs::copy would otherwise follow to write
+        // outside the destination directory.
+        if std::fs::symlink_metadata(&target).is_ok() {
             return Err(format!("already exists: {}", target.display()));
         }
         copy_recursive(&src, &target).map_err(|e| {
@@ -486,6 +492,49 @@ mod tests {
         let file_escape = allowed.path().join("..").join("evil.txt");
         let err = fs_create_file_impl(s(file_escape), None, &reg).unwrap_err();
         assert!(err.contains("outside the authorized workspace"), "got: {err}");
+    }
+
+    // FS-5: a dangling symlink pre-staged at the create target must not be
+    // followed. A plain write would create the (outside) target it points at;
+    // symlink_metadata catches it and we refuse instead.
+    #[cfg(unix)]
+    #[test]
+    fn create_file_refuses_prestaged_dangling_symlink() {
+        let allowed = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let reg = reg_for(allowed.path());
+        let victim = outside.path().join("victim.txt"); // does not exist yet
+        let link = allowed.path().join("new.txt");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        let err = fs_create_file_impl(s(link.clone()), None, &reg).unwrap_err();
+        assert!(err.contains("already exists"), "got: {err}");
+        // The symlink target must not have been written through.
+        assert!(!victim.exists(), "must not create the symlink target");
+    }
+
+    // FS-5: same defense on the copy destination leaf.
+    #[cfg(unix)]
+    #[test]
+    fn copy_refuses_prestaged_dangling_symlink_at_dest() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let reg = reg_for(dest.path());
+        std::fs::write(src.path().join("a.txt"), b"payload").unwrap();
+        let victim = outside.path().join("victim.txt"); // does not exist yet
+        let link = dest.path().join("a.txt");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        let err = fs_copy_impl(
+            vec![s(src.path().join("a.txt"))],
+            s(dest.path().to_path_buf()),
+            None,
+            &reg,
+        )
+        .unwrap_err();
+        assert!(err.contains("already exists"), "got: {err}");
+        assert!(!victim.exists(), "must not write through the symlink");
     }
 
     // A symlink that lives inside the jail but points outside it can still be
