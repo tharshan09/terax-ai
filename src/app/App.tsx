@@ -117,6 +117,7 @@ import { listSshHosts, type SshHost } from "@/modules/workspace/sshHosts";
 import { setTerminalPathOpener } from "@/modules/terminal/lib/rendererPool";
 import { resolveTerminalPath } from "@/modules/terminal/lib/terminalPathLinks";
 import { invoke } from "@tauri-apps/api/core";
+import { toast } from "sonner";
 import type { SearchAddon } from "@xterm/addon-search";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CloseDialogs } from "./components/CloseDialogs";
@@ -1363,8 +1364,17 @@ export default function App() {
       );
       if (!resolved) return;
       void invoke<{ kind: string }>("fs_stat", { path: resolved, workspace })
-        .then((stat) => {
+        .then(async (stat) => {
           if (stat.kind === "dir") return;
+          // A terminal link is an untrusted vector: run the untrusted read
+          // guard before opening a tab so a link to a secret is refused. The
+          // editor and explorer opens stay trusted and are not gated here.
+          try {
+            await invoke("fs_check_readable", { path: resolved, workspace });
+          } catch {
+            toast.warning("Won't open this path - it looks like a secret file.");
+            return;
+          }
           if (line != null) openContentHit(resolved, line);
           else handleOpenFile(resolved);
         })

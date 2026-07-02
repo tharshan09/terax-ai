@@ -39,6 +39,8 @@ export async function writeThemeFile(theme: Theme): Promise<string> {
     content: JSON.stringify(theme, null, 2),
     workspace: ws,
     source: "theme",
+    // The user is editing their own theme file, so the write is trusted.
+    trusted: true,
   });
   return path;
 }

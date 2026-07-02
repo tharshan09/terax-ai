@@ -7,7 +7,8 @@ use nucleo_matcher::{Config, Matcher, Utf32Str};
 use serde::{Deserialize, Serialize};
 
 use super::to_canon;
-use crate::modules::workspace::{resolve_path, WorkspaceEnv};
+use crate::modules::fs::guard;
+use crate::modules::workspace::{resolve_path, WorkspaceEnv, WorkspaceRegistry};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SearchHit {
@@ -56,6 +57,18 @@ pub fn fs_search(
     limit: Option<usize>,
     workspace: Option<WorkspaceEnv>,
     show_hidden: Option<bool>,
+    registry: tauri::State<'_, WorkspaceRegistry>,
+) -> Result<SearchResult, String> {
+    fs_search_impl(root, query, limit, workspace, show_hidden, &registry)
+}
+
+pub fn fs_search_impl(
+    root: String,
+    query: String,
+    limit: Option<usize>,
+    workspace: Option<WorkspaceEnv>,
+    show_hidden: Option<bool>,
+    registry: &WorkspaceRegistry,
 ) -> Result<SearchResult, String> {
     let q = query.trim();
     if q.is_empty() {
@@ -74,6 +87,7 @@ pub fn fs_search(
     if !root_path.is_dir() {
         return Err(format!("not a directory: {root}"));
     }
+    guard::authorize_search_root(registry, &root_path)?;
 
     let walker = WalkBuilder::new(&root_path)
         .hidden(!show_hidden)
@@ -242,6 +256,18 @@ pub fn fs_list_files(
     max_depth: Option<usize>,
     workspace: Option<WorkspaceEnv>,
     show_hidden: Option<bool>,
+    registry: tauri::State<'_, WorkspaceRegistry>,
+) -> Result<ListFilesResult, String> {
+    fs_list_files_impl(root, limit, max_depth, workspace, show_hidden, &registry)
+}
+
+pub fn fs_list_files_impl(
+    root: String,
+    limit: Option<usize>,
+    max_depth: Option<usize>,
+    workspace: Option<WorkspaceEnv>,
+    show_hidden: Option<bool>,
+    registry: &WorkspaceRegistry,
 ) -> Result<ListFilesResult, String> {
     const DEFAULT_LIMIT: usize = 2_000;
     const HARD_LIMIT: usize = 10_000;
@@ -256,6 +282,7 @@ pub fn fs_list_files(
     if !root_path.is_dir() {
         return Err(format!("not a directory: {root}"));
     }
+    guard::authorize_search_root(registry, &root_path)?;
 
     let walker = WalkBuilder::new(&root_path)
         .hidden(!show_hidden)
@@ -362,5 +389,74 @@ mod tests {
         let out = rank_fuzzy(cands, "cmdp", 10);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].rel, "CommandPalette.tsx");
+    }
+
+    fn reg_for(dir: &std::path::Path) -> WorkspaceRegistry {
+        let reg = WorkspaceRegistry::default();
+        reg.authorize(dir).expect("authorize tempdir root");
+        reg
+    }
+
+    #[test]
+    fn search_works_inside_root_and_refuses_outside() {
+        let jail = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let reg = reg_for(jail.path());
+        std::fs::write(jail.path().join("hello.txt"), b"x").unwrap();
+        std::fs::write(outside.path().join("hello.txt"), b"x").unwrap();
+
+        let ok = fs_search_impl(
+            jail.path().to_string_lossy().into_owned(),
+            "hello".into(),
+            None,
+            None,
+            None,
+            &reg,
+        )
+        .expect("authorized root searches fine");
+        assert_eq!(ok.hits.len(), 1);
+
+        let err = fs_search_impl(
+            outside.path().to_string_lossy().into_owned(),
+            "hello".into(),
+            None,
+            None,
+            None,
+            &reg,
+        )
+        .err()
+        .expect("must refuse unauthorized root");
+        assert!(err.contains("outside the authorized workspace"), "got: {err}");
+    }
+
+    #[test]
+    fn list_files_works_inside_root_and_refuses_outside() {
+        let jail = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let reg = reg_for(jail.path());
+        std::fs::write(jail.path().join("a.txt"), b"x").unwrap();
+
+        let ok = fs_list_files_impl(
+            jail.path().to_string_lossy().into_owned(),
+            None,
+            None,
+            None,
+            None,
+            &reg,
+        )
+        .expect("authorized root lists fine");
+        assert_eq!(ok.files, vec!["a.txt".to_string()]);
+
+        let err = fs_list_files_impl(
+            outside.path().to_string_lossy().into_owned(),
+            None,
+            None,
+            None,
+            None,
+            &reg,
+        )
+        .err()
+        .expect("must refuse unauthorized root");
+        assert!(err.contains("outside the authorized workspace"), "got: {err}");
     }
 }

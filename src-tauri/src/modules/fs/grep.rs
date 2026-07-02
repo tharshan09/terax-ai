@@ -10,7 +10,8 @@ use ignore::{WalkBuilder, WalkState};
 use serde::{Deserialize, Serialize};
 
 use super::to_canon;
-use crate::modules::workspace::{resolve_path, WorkspaceEnv};
+use crate::modules::fs::guard;
+use crate::modules::workspace::{resolve_path, WorkspaceEnv, WorkspaceRegistry};
 
 const FILE_SIZE_CAP: u64 = 5 * 1024 * 1024;
 const DEFAULT_MAX_RESULTS: usize = 200;
@@ -177,6 +178,28 @@ pub fn fs_grep(
     case_insensitive: Option<bool>,
     max_results: Option<usize>,
     workspace: Option<WorkspaceEnv>,
+    registry: tauri::State<'_, WorkspaceRegistry>,
+) -> Result<GrepResponse, String> {
+    fs_grep_impl(
+        pattern,
+        root,
+        glob,
+        case_insensitive,
+        max_results,
+        workspace,
+        &registry,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn fs_grep_impl(
+    pattern: String,
+    root: String,
+    glob: Option<Vec<String>>,
+    case_insensitive: Option<bool>,
+    max_results: Option<usize>,
+    workspace: Option<WorkspaceEnv>,
+    registry: &WorkspaceRegistry,
 ) -> Result<GrepResponse, String> {
     if pattern.is_empty() {
         return Err("empty pattern".into());
@@ -186,6 +209,7 @@ pub fn fs_grep(
     if !root_path.is_dir() {
         return Err(format!("not a directory: {root}"));
     }
+    guard::authorize_search_root(registry, &root_path)?;
     let cap = max_results
         .unwrap_or(DEFAULT_MAX_RESULTS)
         .clamp(1, HARD_MAX_RESULTS);
@@ -218,6 +242,18 @@ pub fn fs_grep_interactive(
     root: String,
     max_results: Option<usize>,
     workspace: Option<WorkspaceEnv>,
+    registry: tauri::State<'_, WorkspaceRegistry>,
+) -> Result<GrepResponse, String> {
+    fs_grep_interactive_impl(&state, pattern, root, max_results, workspace, &registry)
+}
+
+fn fs_grep_interactive_impl(
+    state: &ContentSearchState,
+    pattern: String,
+    root: String,
+    max_results: Option<usize>,
+    workspace: Option<WorkspaceEnv>,
+    registry: &WorkspaceRegistry,
 ) -> Result<GrepResponse, String> {
     if pattern.trim().is_empty() {
         return Err("empty pattern".into());
@@ -234,6 +270,7 @@ pub fn fs_grep_interactive(
     if !root_path.is_dir() {
         return Err(format!("not a directory: {root}"));
     }
+    guard::authorize_search_root(registry, &root_path)?;
     let cap = max_results
         .unwrap_or(DEFAULT_MAX_RESULTS)
         .clamp(1, HARD_MAX_RESULTS);
@@ -274,6 +311,17 @@ pub fn fs_glob(
     root: String,
     max_results: Option<usize>,
     workspace: Option<WorkspaceEnv>,
+    registry: tauri::State<'_, WorkspaceRegistry>,
+) -> Result<GlobResponse, String> {
+    fs_glob_impl(pattern, root, max_results, workspace, &registry)
+}
+
+pub fn fs_glob_impl(
+    pattern: String,
+    root: String,
+    max_results: Option<usize>,
+    workspace: Option<WorkspaceEnv>,
+    registry: &WorkspaceRegistry,
 ) -> Result<GlobResponse, String> {
     if pattern.is_empty() {
         return Err("empty pattern".into());
@@ -283,6 +331,7 @@ pub fn fs_glob(
     if !root_path.is_dir() {
         return Err(format!("not a directory: {root}"));
     }
+    guard::authorize_search_root(registry, &root_path)?;
     let cap = max_results.unwrap_or(500).clamp(1, HARD_MAX_RESULTS);
 
     let glob = Glob::new(&pattern).map_err(|e| format!("bad glob: {e}"))?;
@@ -372,5 +421,95 @@ mod tests {
         let stopped =
             search_tree(dir.path(), &root_display, &ws, &matcher, &None, 100, &|| true);
         assert!(stopped.hits.is_empty(), "cancelled search yields nothing");
+    }
+
+    fn reg_for(dir: &Path) -> WorkspaceRegistry {
+        let reg = WorkspaceRegistry::default();
+        reg.authorize(dir).expect("authorize tempdir root");
+        reg
+    }
+
+    #[test]
+    fn grep_works_inside_root_and_refuses_outside() {
+        let jail = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let reg = reg_for(jail.path());
+        std::fs::write(jail.path().join("a.txt"), b"needle here\n").unwrap();
+        std::fs::write(outside.path().join("a.txt"), b"needle here\n").unwrap();
+
+        let ok = fs_grep_impl(
+            "needle".into(),
+            jail.path().to_string_lossy().into_owned(),
+            None,
+            None,
+            None,
+            None,
+            &reg,
+        )
+        .expect("authorized root greps fine");
+        assert_eq!(ok.hits.len(), 1);
+
+        let err = fs_grep_impl(
+            "needle".into(),
+            outside.path().to_string_lossy().into_owned(),
+            None,
+            None,
+            None,
+            None,
+            &reg,
+        )
+        .err()
+        .expect("must refuse unauthorized root");
+        assert!(err.contains("outside the authorized workspace"), "got: {err}");
+    }
+
+    #[test]
+    fn grep_interactive_refuses_unauthorized_root() {
+        let jail = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let reg = reg_for(jail.path());
+        std::fs::write(outside.path().join("a.txt"), b"needle\n").unwrap();
+        let state = ContentSearchState::default();
+        let err = fs_grep_interactive_impl(
+            &state,
+            "needle".into(),
+            outside.path().to_string_lossy().into_owned(),
+            None,
+            None,
+            &reg,
+        )
+        .err()
+        .expect("must refuse unauthorized root");
+        assert!(err.contains("outside the authorized workspace"), "got: {err}");
+    }
+
+    #[test]
+    fn glob_works_inside_root_and_refuses_outside() {
+        let jail = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let reg = reg_for(jail.path());
+        std::fs::write(jail.path().join("a.rs"), b"x").unwrap();
+        std::fs::write(outside.path().join("a.rs"), b"x").unwrap();
+
+        let ok = fs_glob_impl(
+            "*.rs".into(),
+            jail.path().to_string_lossy().into_owned(),
+            None,
+            None,
+            &reg,
+        )
+        .expect("authorized root globs fine");
+        assert_eq!(ok.hits.len(), 1);
+
+        let err = fs_glob_impl(
+            "*.rs".into(),
+            outside.path().to_string_lossy().into_owned(),
+            None,
+            None,
+            &reg,
+        )
+        .err()
+        .expect("must refuse unauthorized root");
+        assert!(err.contains("outside the authorized workspace"), "got: {err}");
     }
 }

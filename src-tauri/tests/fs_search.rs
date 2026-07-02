@@ -1,23 +1,26 @@
 mod common;
 
 use common::{git_available, FsFixture, GitRepoFixture};
-use terax_lib::modules::fs::grep::{fs_glob, fs_grep};
-use terax_lib::modules::fs::search::{fs_list_files, fs_search};
+use terax_lib::modules::fs::grep::{fs_glob_impl, fs_grep_impl};
+use terax_lib::modules::fs::search::{fs_list_files_impl, fs_search_impl};
 use terax_lib::modules::fs::tree::{fs_read_dir, list_subdirs, EntryKind};
+use terax_lib::modules::workspace::WorkspaceRegistry;
 
 #[test]
 fn grep_finds_matches_and_returns_relative_paths() {
     let fx = FsFixture::new();
+    let reg = fx.registry();
     fx.write("src/main.rs", "fn main() {\n    println!(\"hello world\");\n}\n");
     fx.write("src/lib.rs", "pub fn greet() {}\n");
 
-    let res = fs_grep(
+    let res = fs_grep_impl(
         "hello".into(),
         fx.root_str(),
         None,
         None,
         None,
         None,
+        &reg,
     )
     .expect("grep");
 
@@ -33,30 +36,49 @@ fn grep_finds_matches_and_returns_relative_paths() {
 #[test]
 fn grep_case_insensitive_finds_mixed_case() {
     let fx = FsFixture::new();
+    let reg = fx.registry();
     fx.write("a.txt", "Hello World\n");
 
-    let strict = fs_grep("hello".into(), fx.root_str(), None, Some(false), None, None)
-        .expect("grep");
+    let strict = fs_grep_impl(
+        "hello".into(),
+        fx.root_str(),
+        None,
+        Some(false),
+        None,
+        None,
+        &reg,
+    )
+    .expect("grep");
     assert!(strict.hits.is_empty());
 
-    let loose = fs_grep("hello".into(), fx.root_str(), None, Some(true), None, None)
-        .expect("grep");
+    let loose = fs_grep_impl(
+        "hello".into(),
+        fx.root_str(),
+        None,
+        Some(true),
+        None,
+        None,
+        &reg,
+    )
+    .expect("grep");
     assert_eq!(loose.hits.len(), 1);
 }
 
 #[test]
 fn grep_glob_filter_restricts_files() {
     let fx = FsFixture::new();
+    let reg = fx.registry();
     fx.write("a.rs", "target\n");
     fx.write("b.ts", "target\n");
 
-    let res = fs_grep(
+    let res = fs_grep_impl(
         "target".into(),
         fx.root_str(),
         Some(vec!["*.rs".into()]),
         None,
         None,
         None,
+        &reg,
     )
     .expect("grep");
 
@@ -67,12 +89,21 @@ fn grep_glob_filter_restricts_files() {
 #[test]
 fn grep_max_results_truncates() {
     let fx = FsFixture::new();
+    let reg = fx.registry();
     for i in 0..10 {
         fx.write(&format!("f{i}.txt"), "needle\n");
     }
 
-    let res = fs_grep("needle".into(), fx.root_str(), None, None, Some(3), None)
-        .expect("grep");
+    let res = fs_grep_impl(
+        "needle".into(),
+        fx.root_str(),
+        None,
+        None,
+        Some(3),
+        None,
+        &reg,
+    )
+    .expect("grep");
 
     assert!(res.hits.len() <= 3);
     assert!(res.truncated);
@@ -81,19 +112,21 @@ fn grep_max_results_truncates() {
 #[test]
 fn grep_empty_pattern_errors() {
     let fx = FsFixture::new();
-    let err = fs_grep("".into(), fx.root_str(), None, None, None, None);
+    let reg = fx.registry();
+    let err = fs_grep_impl("".into(), fx.root_str(), None, None, None, None, &reg);
     assert!(err.is_err());
 }
 
 #[test]
 fn grep_non_dir_root_errors() {
-    let err = fs_grep(
+    let err = fs_grep_impl(
         "x".into(),
         "/this/does/not/exist".into(),
         None,
         None,
         None,
         None,
+        &WorkspaceRegistry::default(),
     );
     assert!(err.is_err());
 }
@@ -101,11 +134,12 @@ fn grep_non_dir_root_errors() {
 #[test]
 fn grep_respects_ignore_file() {
     let fx = FsFixture::new();
+    let reg = fx.registry();
     fx.write(".ignore", "ignored.txt\n");
     fx.write("ignored.txt", "secret\n");
     fx.write("visible.txt", "secret\n");
 
-    let res = fs_grep("secret".into(), fx.root_str(), None, None, None, None)
+    let res = fs_grep_impl("secret".into(), fx.root_str(), None, None, None, None, &reg)
         .expect("grep");
 
     let rels: Vec<&str> = res.hits.iter().map(|h| h.rel.as_str()).collect();
@@ -116,11 +150,12 @@ fn grep_respects_ignore_file() {
 #[test]
 fn glob_finds_files_by_pattern() {
     let fx = FsFixture::new();
+    let reg = fx.registry();
     fx.write("src/a.rs", "");
     fx.write("src/b.rs", "");
     fx.write("README.md", "");
 
-    let res = fs_glob("**/*.rs".into(), fx.root_str(), None, None).expect("glob");
+    let res = fs_glob_impl("**/*.rs".into(), fx.root_str(), None, None, &reg).expect("glob");
 
     let mut rels: Vec<&str> = res.hits.iter().map(|h| h.rel.as_str()).collect();
     rels.sort();
@@ -130,11 +165,12 @@ fn glob_finds_files_by_pattern() {
 #[test]
 fn glob_truncates_on_limit() {
     let fx = FsFixture::new();
+    let reg = fx.registry();
     for i in 0..20 {
         fx.write(&format!("file{i}.txt"), "");
     }
 
-    let res = fs_glob("*.txt".into(), fx.root_str(), Some(5), None).expect("glob");
+    let res = fs_glob_impl("*.txt".into(), fx.root_str(), Some(5), None, &reg).expect("glob");
     assert!(res.hits.len() <= 5);
     assert!(res.truncated);
 }
@@ -142,17 +178,20 @@ fn glob_truncates_on_limit() {
 #[test]
 fn glob_empty_pattern_errors() {
     let fx = FsFixture::new();
-    assert!(fs_glob("".into(), fx.root_str(), None, None).is_err());
+    let reg = fx.registry();
+    assert!(fs_glob_impl("".into(), fx.root_str(), None, None, &reg).is_err());
 }
 
 #[test]
 fn search_substring_matches_filename() {
     let fx = FsFixture::new();
+    let reg = fx.registry();
     fx.write("src/main.rs", "");
     fx.write("src/lib.rs", "");
     fx.write("docs/main.md", "");
 
-    let res = fs_search(fx.root_str(), "main".into(), None, None, None).expect("search");
+    let res =
+        fs_search_impl(fx.root_str(), "main".into(), None, None, None, &reg).expect("search");
     let rels: Vec<&str> = res.hits.iter().map(|h| h.rel.as_str()).collect();
     assert!(rels.contains(&"src/main.rs"));
     assert!(rels.contains(&"docs/main.md"));
@@ -162,16 +201,20 @@ fn search_substring_matches_filename() {
 #[test]
 fn search_is_case_insensitive() {
     let fx = FsFixture::new();
+    let reg = fx.registry();
     fx.write("README.md", "");
-    let res = fs_search(fx.root_str(), "readme".into(), None, None, None).expect("search");
+    let res =
+        fs_search_impl(fx.root_str(), "readme".into(), None, None, None, &reg).expect("search");
     assert_eq!(res.hits.len(), 1);
 }
 
 #[test]
 fn search_empty_query_returns_empty() {
     let fx = FsFixture::new();
+    let reg = fx.registry();
     fx.write("a.txt", "");
-    let res = fs_search(fx.root_str(), "   ".into(), None, None, None).expect("search");
+    let res =
+        fs_search_impl(fx.root_str(), "   ".into(), None, None, None, &reg).expect("search");
     assert!(res.hits.is_empty());
     assert!(!res.truncated);
 }
@@ -179,10 +222,12 @@ fn search_empty_query_returns_empty() {
 #[test]
 fn search_prunes_node_modules() {
     let fx = FsFixture::new();
+    let reg = fx.registry();
     fx.write("node_modules/lodash/index.js", "");
     fx.write("src/index.js", "");
 
-    let res = fs_search(fx.root_str(), "index".into(), None, None, None).expect("search");
+    let res =
+        fs_search_impl(fx.root_str(), "index".into(), None, None, None, &reg).expect("search");
     let rels: Vec<&str> = res.hits.iter().map(|h| h.rel.as_str()).collect();
     assert!(rels.iter().any(|r| r.starts_with("src/")));
     assert!(!rels.iter().any(|r| r.starts_with("node_modules")));
@@ -191,10 +236,12 @@ fn search_prunes_node_modules() {
 #[test]
 fn search_ranks_filename_hits_before_path_hits() {
     let fx = FsFixture::new();
+    let reg = fx.registry();
     fx.write("zeta/inner.txt", "");
     fx.write("beta/zeta.txt", "");
 
-    let res = fs_search(fx.root_str(), "zeta".into(), None, None, None).expect("search");
+    let res =
+        fs_search_impl(fx.root_str(), "zeta".into(), None, None, None, &reg).expect("search");
     let zeta_file = res
         .hits
         .iter()
@@ -214,28 +261,38 @@ fn search_ranks_filename_hits_before_path_hits() {
 #[test]
 fn list_files_returns_sorted_relative_paths() {
     let fx = FsFixture::new();
+    let reg = fx.registry();
     fx.write("z.txt", "");
     fx.write("a.txt", "");
     fx.write("nested/b.txt", "");
 
-    let res = fs_list_files(fx.root_str(), None, None, None, None).expect("list");
+    let res = fs_list_files_impl(fx.root_str(), None, None, None, None, &reg).expect("list");
     assert_eq!(res.files, vec!["a.txt", "nested/b.txt", "z.txt"]);
 }
 
 #[test]
 fn list_files_max_depth_clamps() {
     let fx = FsFixture::new();
+    let reg = fx.registry();
     fx.write("d1/d2/d3/deep.txt", "");
     fx.write("shallow.txt", "");
 
-    let res = fs_list_files(fx.root_str(), None, Some(1), None, None).expect("list");
+    let res = fs_list_files_impl(fx.root_str(), None, Some(1), None, None, &reg).expect("list");
     assert!(res.files.contains(&"shallow.txt".to_string()));
     assert!(!res.files.iter().any(|f| f.contains("deep.txt")));
 }
 
 #[test]
 fn list_files_non_dir_errors() {
-    assert!(fs_list_files("/no/such/dir".into(), None, None, None, None).is_err());
+    assert!(fs_list_files_impl(
+        "/no/such/dir".into(),
+        None,
+        None,
+        None,
+        None,
+        &WorkspaceRegistry::default(),
+    )
+    .is_err());
 }
 
 #[test]
@@ -338,4 +395,42 @@ fn list_subdirs_hides_dot_dirs_by_default() {
 
     let on = list_subdirs(fx.root_str(), true, None).expect("list_subdirs");
     assert!(on.contains(&".hidden".to_string()));
+}
+
+// --- root jail (FS-4): the search family refuses unauthorized roots ---
+
+#[test]
+fn search_family_refuses_unauthorized_root() {
+    let jail = FsFixture::new();
+    let outside = FsFixture::new();
+    let reg = jail.registry();
+    outside.write("hit.txt", "needle\n");
+
+    let err = fs_search_impl(outside.root_str(), "hit".into(), None, None, None, &reg)
+        .err()
+        .expect("search must refuse");
+    assert!(err.contains("outside the authorized workspace"), "got: {err}");
+
+    let err = fs_list_files_impl(outside.root_str(), None, None, None, None, &reg)
+        .err()
+        .expect("list must refuse");
+    assert!(err.contains("outside the authorized workspace"), "got: {err}");
+
+    let err = fs_grep_impl(
+        "needle".into(),
+        outside.root_str(),
+        None,
+        None,
+        None,
+        None,
+        &reg,
+    )
+    .err()
+    .expect("grep must refuse");
+    assert!(err.contains("outside the authorized workspace"), "got: {err}");
+
+    let err = fs_glob_impl("*.txt".into(), outside.root_str(), None, None, &reg)
+        .err()
+        .expect("glob must refuse");
+    assert!(err.contains("outside the authorized workspace"), "got: {err}");
 }

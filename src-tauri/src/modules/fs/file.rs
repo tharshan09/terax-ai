@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 use tempfile::NamedTempFile;
 
-use crate::modules::workspace::{resolve_path, WorkspaceEnv};
+use crate::modules::fs::guard;
+use crate::modules::workspace::{resolve_path, WorkspaceEnv, WorkspaceRegistry};
 
 const MAX_READ_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
 const BINARY_SNIFF_BYTES: usize = 8 * 1024;
@@ -44,12 +45,33 @@ pub struct FileStat {
 }
 
 #[tauri::command]
-pub fn fs_read_file(path: String, workspace: Option<WorkspaceEnv>) -> Result<ReadResult, String> {
+pub fn fs_read_file(
+    path: String,
+    workspace: Option<WorkspaceEnv>,
+    trusted: Option<bool>,
+    registry: tauri::State<'_, WorkspaceRegistry>,
+) -> Result<ReadResult, String> {
+    fs_read_file_impl(path, workspace, trusted, &registry)
+}
+
+fn fs_read_file_impl(
+    path: String,
+    workspace: Option<WorkspaceEnv>,
+    trusted: Option<bool>,
+    registry: &WorkspaceRegistry,
+) -> Result<ReadResult, String> {
+    // Default = untrusted/guarded: an unmarked caller fails closed.
+    let trusted = trusted.unwrap_or(false);
     let workspace = WorkspaceEnv::from_option(workspace);
     if let WorkspaceEnv::Ssh { host } = &workspace {
+        // Remote symlinks resolve host-side; the string-level deny-list is
+        // what we can enforce before dispatch.
+        if !trusted {
+            guard::check_read_str(&path)?;
+        }
         return crate::modules::ssh::read_file(host, &path);
     }
-    let p = resolve_path(&path, &workspace);
+    let p = guard::enforce_read(registry, &resolve_path(&path, &workspace), &path, trusted)?;
     let meta = std::fs::metadata(&p).map_err(|e| {
         log::debug!("fs_read_file stat({}) failed: {e}", p.display());
         e.to_string()
@@ -107,21 +129,32 @@ pub fn fs_write_file(
     content: String,
     workspace: Option<WorkspaceEnv>,
     source: Option<String>,
+    trusted: Option<bool>,
     app: tauri::AppHandle,
+    registry: tauri::State<'_, WorkspaceRegistry>,
 ) -> Result<(), String> {
+    fs_write_file_impl(&path, &content, workspace, trusted, &registry)?;
+    let _ = app.emit("fs:file-written", FileWrittenEvent { path, source });
+    Ok(())
+}
+
+fn fs_write_file_impl(
+    path: &str,
+    content: &str,
+    workspace: Option<WorkspaceEnv>,
+    trusted: Option<bool>,
+    registry: &WorkspaceRegistry,
+) -> Result<(), String> {
+    // Default = untrusted/guarded: an unmarked caller fails closed.
+    let trusted = trusted.unwrap_or(false);
     let workspace = WorkspaceEnv::from_option(workspace);
     if let WorkspaceEnv::Ssh { host } = &workspace {
-        crate::modules::ssh::write_file(host, &path, &content)?;
-        let _ = app.emit(
-            "fs:file-written",
-            FileWrittenEvent {
-                path: path.clone(),
-                source,
-            },
-        );
-        return Ok(());
+        if !trusted {
+            guard::check_write_str(path)?;
+        }
+        return crate::modules::ssh::write_file(host, path, content);
     }
-    let target = resolve_path(&path, &workspace);
+    let target = guard::enforce_write(registry, &resolve_path(path, &workspace), path, trusted)?;
     let original_permissions = fs::metadata(&target).ok().map(|m| m.permissions());
     write_atomic(&target, content.as_bytes()).map_err(|e| {
         log::warn!("fs_write_file({}) failed: {e}", target.display());
@@ -131,15 +164,33 @@ pub fn fs_write_file(
     if let Some(perms) = original_permissions {
         let _ = fs::set_permissions(&target, perms);
     }
-    let _ = app.emit(
-        "fs:file-written",
-        FileWrittenEvent {
-            path: path.clone(),
-            source,
-        },
-    );
-
     Ok(())
+}
+
+/// Runs the UNTRUSTED read guard without reading the file. The terminal
+/// Cmd+Click opener calls this before opening a tab, so a link to a secret is
+/// refused there while the explicit editor/explorer path stays trusted.
+#[tauri::command]
+pub fn fs_check_readable(
+    path: String,
+    workspace: Option<WorkspaceEnv>,
+    registry: tauri::State<'_, WorkspaceRegistry>,
+) -> Result<(), String> {
+    fs_check_readable_impl(path, workspace, &registry)
+}
+
+fn fs_check_readable_impl(
+    path: String,
+    workspace: Option<WorkspaceEnv>,
+    registry: &WorkspaceRegistry,
+) -> Result<(), String> {
+    let workspace = WorkspaceEnv::from_option(workspace);
+    if workspace.is_ssh() {
+        // Remote symlinks resolve host-side; the string-level deny-list is all
+        // we can enforce without touching the host.
+        return guard::check_read_str(&path);
+    }
+    guard::enforce_read(registry, &resolve_path(&path, &workspace), &path, false).map(|_| ())
 }
 
 #[tauri::command]
@@ -187,12 +238,23 @@ pub fn fs_stat(path: String, workspace: Option<WorkspaceEnv>) -> Result<FileStat
 mod tests {
     use super::*;
 
+    fn reg_for(dir: &Path) -> WorkspaceRegistry {
+        let reg = WorkspaceRegistry::default();
+        reg.authorize(dir).expect("authorize tempdir root");
+        reg
+    }
+
+    fn s(p: &Path) -> String {
+        p.to_string_lossy().into_owned()
+    }
+
     #[test]
     fn read_file_classifies_utf8_as_text() {
         let dir = tempfile::tempdir().unwrap();
+        let reg = reg_for(dir.path());
         let f = dir.path().join("a.txt");
         std::fs::write(&f, b"hello world").unwrap();
-        match fs_read_file(f.to_string_lossy().into_owned(), None).unwrap() {
+        match fs_read_file_impl(s(&f), None, Some(false), &reg).unwrap() {
             ReadResult::Text { content, size } => {
                 assert_eq!(content, "hello world");
                 assert_eq!(size, 11);
@@ -204,10 +266,11 @@ mod tests {
     #[test]
     fn read_file_detects_binary_via_null_byte() {
         let dir = tempfile::tempdir().unwrap();
+        let reg = reg_for(dir.path());
         let f = dir.path().join("a.bin");
         std::fs::write(&f, b"PNG\0\x89image").unwrap();
         assert!(matches!(
-            fs_read_file(f.to_string_lossy().into_owned(), None).unwrap(),
+            fs_read_file_impl(s(&f), None, Some(false), &reg).unwrap(),
             ReadResult::Binary { .. }
         ));
     }
@@ -215,13 +278,216 @@ mod tests {
     #[test]
     fn read_file_detects_binary_via_invalid_utf8() {
         let dir = tempfile::tempdir().unwrap();
+        let reg = reg_for(dir.path());
         let f = dir.path().join("a.bin");
         // Invalid UTF-8 with no null byte: must still classify as binary.
         std::fs::write(&f, [0xff, 0xfe, 0xfd, 0xfc]).unwrap();
         assert!(matches!(
-            fs_read_file(f.to_string_lossy().into_owned(), None).unwrap(),
+            fs_read_file_impl(s(&f), None, Some(false), &reg).unwrap(),
             ReadResult::Binary { .. }
         ));
+    }
+
+    // --- deny-list + jail on the normal file surface (FS-1, FS-2, FS-4) ---
+
+    #[test]
+    fn read_refuses_secret_file_in_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = reg_for(dir.path());
+        let f = dir.path().join(".env");
+        std::fs::write(&f, b"KEY=1").unwrap();
+        let err = fs_read_file_impl(s(&f), None, Some(false), &reg).unwrap_err();
+        assert!(err.contains("sensitive-file"), "got: {err}");
+    }
+
+    #[test]
+    fn read_refuses_ssh_secret_path_before_dispatch() {
+        let reg = WorkspaceRegistry::default();
+        let err = fs_read_file_impl(
+            "~/.ssh/id_rsa".into(),
+            Some(WorkspaceEnv::Ssh {
+                host: "terax-test-never-connects".into(),
+            }),
+            Some(false),
+            &reg,
+        )
+        .unwrap_err();
+        // The refusal must come from the guard, not from a connection attempt.
+        assert!(err.contains("sensitive-file"), "got: {err}");
+    }
+
+    #[test]
+    fn read_refuses_ssh_protected_dir_before_dispatch() {
+        let reg = WorkspaceRegistry::default();
+        // Non-secret basename inside a protected dir: only the directory check
+        // can catch it, and it must fire before any remote connection. Both the
+        // bare relative form and the tilde form resolve against the remote
+        // $HOME, so both must be refused here.
+        for p in [".kube/config", "~/.kube/config"] {
+            let err = fs_read_file_impl(
+                p.into(),
+                Some(WorkspaceEnv::Ssh {
+                    host: "terax-test-never-connects".into(),
+                }),
+                Some(false),
+                &reg,
+            )
+            .unwrap_err();
+            assert!(err.contains("protected directory"), "got: {err}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_refuses_leaf_symlink_escaping_workspace() {
+        let jail = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let reg = reg_for(jail.path());
+        let target = outside.path().join("plain.txt");
+        std::fs::write(&target, b"data").unwrap();
+        let link = jail.path().join("innocent.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let err = fs_read_file_impl(s(&link), None, Some(false), &reg).unwrap_err();
+        assert!(err.contains("outside the authorized workspace"), "got: {err}");
+    }
+
+    #[test]
+    fn read_allows_explicit_file_outside_workspace() {
+        let jail = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let reg = reg_for(jail.path());
+        let f = outside.path().join("readme.md");
+        std::fs::write(&f, b"hi").unwrap();
+        assert!(matches!(
+            fs_read_file_impl(s(&f), None, Some(false), &reg).unwrap(),
+            ReadResult::Text { .. }
+        ));
+    }
+
+    #[test]
+    fn read_trusted_allows_secret_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = reg_for(dir.path());
+        let f = dir.path().join(".env");
+        std::fs::write(&f, b"KEY=1").unwrap();
+        // Explicit editor open of the user's own secret is allowed.
+        assert!(matches!(
+            fs_read_file_impl(s(&f), None, Some(true), &reg).unwrap(),
+            ReadResult::Text { .. }
+        ));
+    }
+
+    #[test]
+    fn read_trusted_allows_direct_protected_dir_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = reg_for(dir.path());
+        let ssh = dir.path().join(".ssh");
+        std::fs::create_dir(&ssh).unwrap();
+        let f = ssh.join("config");
+        std::fs::write(&f, b"Host x").unwrap();
+        assert!(matches!(
+            fs_read_file_impl(s(&f), None, Some(true), &reg).unwrap(),
+            ReadResult::Text { .. }
+        ));
+    }
+
+    // Deception: an innocent name whose leaf symlink target is a secret must be
+    // refused even in trusted mode, because the user never named the secret.
+    #[cfg(unix)]
+    #[test]
+    fn read_trusted_still_refuses_deceptive_leaf_symlink() {
+        let jail = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let reg = reg_for(jail.path());
+        let ssh = outside.path().join(".ssh");
+        std::fs::create_dir(&ssh).unwrap();
+        let secret = ssh.join("id_rsa");
+        std::fs::write(&secret, b"PRIVATE").unwrap();
+        let link = jail.path().join("innocent.txt");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+        let err = fs_read_file_impl(s(&link), None, Some(true), &reg).unwrap_err();
+        assert!(err.contains("sensitive-file"), "got: {err}");
+    }
+
+    #[test]
+    fn check_readable_refuses_secret_and_allows_normal() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = reg_for(dir.path());
+        let env = dir.path().join(".env");
+        std::fs::write(&env, b"KEY=1").unwrap();
+        let err = fs_check_readable_impl(s(&env), None, &reg).unwrap_err();
+        assert!(err.contains("sensitive-file"), "got: {err}");
+        let ok = dir.path().join("notes.txt");
+        std::fs::write(&ok, b"hi").unwrap();
+        assert!(fs_check_readable_impl(s(&ok), None, &reg).is_ok());
+    }
+
+    #[test]
+    fn write_creates_inside_workspace_and_refuses_outside() {
+        let jail = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let reg = reg_for(jail.path());
+
+        let inside = jail.path().join("new.txt");
+        fs_write_file_impl(&s(&inside), "ok", None, Some(false), &reg).expect("write inside");
+        assert_eq!(std::fs::read(&inside).unwrap(), b"ok");
+
+        let evil = outside.path().join("evil.txt");
+        let err = fs_write_file_impl(&s(&evil), "x", None, Some(false), &reg).unwrap_err();
+        assert!(err.contains("outside the authorized workspace"), "got: {err}");
+        assert!(!evil.exists());
+    }
+
+    #[test]
+    fn write_saves_existing_file_outside_workspace() {
+        let jail = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let reg = reg_for(jail.path());
+        let f = outside.path().join("opened.txt");
+        std::fs::write(&f, b"old").unwrap();
+        fs_write_file_impl(&s(&f), "new", None, Some(false), &reg).expect("editor save outside");
+        assert_eq!(std::fs::read(&f).unwrap(), b"new");
+    }
+
+    #[test]
+    fn write_refuses_secret_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = reg_for(dir.path());
+        let f = dir.path().join(".env");
+        let err = fs_write_file_impl(&s(&f), "KEY=1", None, Some(false), &reg).unwrap_err();
+        assert!(err.contains("sensitive-file"), "got: {err}");
+        assert!(!f.exists());
+    }
+
+    #[test]
+    fn write_trusted_saves_existing_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = reg_for(dir.path());
+        let f = dir.path().join(".env");
+        std::fs::write(&f, b"OLD=1").unwrap();
+        // Explicit editor save of the user's own secret is allowed.
+        fs_write_file_impl(&s(&f), "NEW=2", None, Some(true), &reg).expect("trusted save");
+        assert_eq!(std::fs::read(&f).unwrap(), b"NEW=2");
+    }
+
+    // Writing through a leaf symlink must replace the link, never write
+    // through to a target outside the workspace.
+    #[cfg(unix)]
+    #[test]
+    fn write_replaces_leaf_symlink_instead_of_following() {
+        let jail = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let reg = reg_for(jail.path());
+        let target = outside.path().join("victim.txt");
+        std::fs::write(&target, b"untouched").unwrap();
+        let link = jail.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        fs_write_file_impl(&s(&link), "payload", None, Some(false), &reg).expect("write");
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
+        assert!(!std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&link).unwrap(), b"payload");
     }
 
     #[test]
