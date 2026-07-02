@@ -86,5 +86,9 @@
     "shortDescription": "AI-native terminal emulator",
     "longDescription": "Terax — an open-source AI-native terminal emulator with multi-tab, file explorer, code editor, web preview, voice input, and AI agents."
   },
-  "plugins": {}
+  "plugins": {
+    "opener": {
+      "requireLiteralLeadingDot": false
+    }
+  }
 }

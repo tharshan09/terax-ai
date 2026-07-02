@@ -1,6 +1,9 @@
 use std::path::Path;
 use std::time::UNIX_EPOCH;
-use std::{fs, io::Write};
+use std::{
+    fs,
+    io::{Read, Write},
+};
 
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
@@ -101,6 +104,75 @@ fn fs_read_file_impl(
         Ok(content) => Ok(ReadResult::Text { content, size }),
         Err(_) => Ok(ReadResult::Binary { size }),
     }
+}
+
+/// A genuine PDF begins with these magic bytes.
+const PDF_MAGIC: &[u8] = b"%PDF-";
+
+/// True only if the file at `path` really begins with the `%PDF-` magic bytes.
+///
+/// The editor's PDF preview renders asset-served bytes in an iframe WITHOUT a
+/// sandbox attribute, because in WKWebView any sandbox value disables the
+/// native PDFKit plugin. That is safe *only* for a genuine PDF: the asset
+/// protocol serves `%PDF-` content as `application/pdf` (→ PDFKit, which does
+/// not execute the document's embedded JavaScript), whereas a file merely
+/// *named* `.pdf` whose bytes are HTML would be served as `text/html` and run
+/// scripts in the real `asset://` origin. The extension is attacker-controlled,
+/// so the iframe must be gated on the true bytes — this command supplies that
+/// gate. It runs the same read guard as `fs_read_file`, so a secret path or an
+/// escaping leaf symlink is refused with `Err`, not silently sniffed.
+#[tauri::command]
+pub fn fs_is_pdf(
+    path: String,
+    workspace: Option<WorkspaceEnv>,
+    trusted: Option<bool>,
+    registry: tauri::State<'_, WorkspaceRegistry>,
+) -> Result<bool, String> {
+    fs_is_pdf_impl(path, workspace, trusted, &registry)
+}
+
+fn fs_is_pdf_impl(
+    path: String,
+    workspace: Option<WorkspaceEnv>,
+    trusted: Option<bool>,
+    registry: &WorkspaceRegistry,
+) -> Result<bool, String> {
+    // Default = untrusted/guarded: an unmarked caller fails closed.
+    let trusted = trusted.unwrap_or(false);
+    let workspace = WorkspaceEnv::from_option(workspace);
+    if let WorkspaceEnv::Ssh { .. } = &workspace {
+        // Mirror fs_read_file's SSH guard (string-level deny-list before any
+        // remote dispatch) so a secret path is still refused, not sniffed.
+        if !trusted {
+            guard::check_read_str(&path)?;
+        }
+        // Fail closed over SSH. The asset protocol can only serve LOCAL bytes,
+        // so a remote PDF's iframe would be blank regardless, and the remote
+        // read_file op returns no content for a binary file to sniff. Returning
+        // false makes the caller show the inert "preview not supported" card,
+        // which is the safe outcome — no sandbox-less HTML can be served here.
+        return Ok(false);
+    }
+    let p = guard::enforce_read(registry, &resolve_path(&path, &workspace), &path, trusted)?;
+    // Read only the leading bytes; enough to compare the magic, never the file.
+    let mut file = std::fs::File::open(&p).map_err(|e| {
+        log::debug!("fs_is_pdf open({}) failed: {e}", p.display());
+        e.to_string()
+    })?;
+    let mut buf = [0u8; PDF_MAGIC.len()];
+    let mut filled = 0;
+    while filled < buf.len() {
+        match file.read(&mut buf[filled..]) {
+            Ok(0) => break, // EOF: file shorter than the magic → not a PDF.
+            Ok(n) => filled += n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => {
+                log::debug!("fs_is_pdf read({}) failed: {e}", p.display());
+                return Err(e.to_string());
+            }
+        }
+    }
+    Ok(filled == buf.len() && &buf[..] == PDF_MAGIC)
 }
 
 #[derive(Serialize, Clone)]
@@ -518,5 +590,101 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"payload");
         // The pre-staged symlink target must not have been written through.
         assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
+    }
+
+    // --- fs_is_pdf: the magic-byte gate for the sandbox-less PDF iframe ---
+
+    #[test]
+    fn is_pdf_true_for_real_pdf_magic() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = reg_for(dir.path());
+        let f = dir.path().join("real.pdf");
+        std::fs::write(&f, b"%PDF-1.7\n1 0 obj\n<< >>\n").unwrap();
+        assert!(fs_is_pdf_impl(s(&f), None, Some(true), &reg).unwrap());
+    }
+
+    #[test]
+    fn is_pdf_false_for_html_named_pdf_with_null_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = reg_for(dir.path());
+        let f = dir.path().join("report.pdf");
+        // HTML payload made "binary" with a NUL byte so it reaches the media
+        // branch. It must NOT be treated as a PDF: this is the exploit input.
+        std::fs::write(&f, b"<html>\0<script>fetch('//evil')</script></html>").unwrap();
+        assert!(!fs_is_pdf_impl(s(&f), None, Some(true), &reg).unwrap());
+    }
+
+    #[test]
+    fn is_pdf_false_for_file_shorter_than_magic() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = reg_for(dir.path());
+        let f = dir.path().join("tiny.pdf");
+        std::fs::write(&f, b"%PD").unwrap();
+        assert!(!fs_is_pdf_impl(s(&f), None, Some(true), &reg).unwrap());
+    }
+
+    #[test]
+    fn is_pdf_false_for_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = reg_for(dir.path());
+        let f = dir.path().join("empty.pdf");
+        std::fs::write(&f, b"").unwrap();
+        assert!(!fs_is_pdf_impl(s(&f), None, Some(true), &reg).unwrap());
+    }
+
+    #[test]
+    fn is_pdf_refuses_secret_untrusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = reg_for(dir.path());
+        let f = dir.path().join(".env");
+        std::fs::write(&f, b"%PDF-nope").unwrap();
+        // Untrusted: the deny-list must refuse before any bytes are read.
+        let err = fs_is_pdf_impl(s(&f), None, Some(false), &reg).unwrap_err();
+        assert!(err.contains("sensitive-file"), "got: {err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_pdf_refuses_leaf_symlink_escaping_workspace() {
+        let jail = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let reg = reg_for(jail.path());
+        let target = outside.path().join("real.pdf");
+        std::fs::write(&target, b"%PDF-1.4").unwrap();
+        let link = jail.path().join("innocent.pdf");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let err = fs_is_pdf_impl(s(&link), None, Some(false), &reg).unwrap_err();
+        assert!(err.contains("outside the authorized workspace"), "got: {err}");
+    }
+
+    #[test]
+    fn is_pdf_false_over_ssh_without_connecting() {
+        let reg = WorkspaceRegistry::default();
+        // Non-secret remote path, trusted: fail closed to false, no connection.
+        let ok = fs_is_pdf_impl(
+            "/home/u/report.pdf".into(),
+            Some(WorkspaceEnv::Ssh {
+                host: "terax-test-never-connects".into(),
+            }),
+            Some(true),
+            &reg,
+        )
+        .unwrap();
+        assert!(!ok);
+    }
+
+    #[test]
+    fn is_pdf_refuses_ssh_secret_before_dispatch() {
+        let reg = WorkspaceRegistry::default();
+        let err = fs_is_pdf_impl(
+            "~/.ssh/id_rsa".into(),
+            Some(WorkspaceEnv::Ssh {
+                host: "terax-test-never-connects".into(),
+            }),
+            Some(false),
+            &reg,
+        )
+        .unwrap_err();
+        assert!(err.contains("sensitive-file"), "got: {err}");
     }
 }

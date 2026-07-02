@@ -1309,10 +1309,12 @@ pub fn checkout_branch(
     if branch_name.starts_with('-') || branch_name.is_empty() {
         return Err(GitError::InvalidPath(branch_name.into()));
     }
+    // Trailing `--` ends option/pathspec parsing so branch_name is always read
+    // as the ref to switch to, never as a flag or a colliding pathspec.
     let output = run_git(
         &repo_root.workspace,
         Some(&repo_root.git_path),
-        ["checkout", branch_name],
+        ["checkout", branch_name, "--"],
         DEFAULT_TIMEOUT_SECS,
     )?;
     ensure_success(&output, "git checkout failed")

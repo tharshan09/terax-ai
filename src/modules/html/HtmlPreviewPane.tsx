@@ -27,10 +27,12 @@ function rendersViaAsset(ws: WorkspaceEnv | undefined): boolean {
   return !ws || ws.kind === "local";
 }
 
-// Local: cross-origin to the app (asset.localhost), so same-origin is safe and
-// lets the doc use its own fetch / storage. Remote: opaque srcdoc origin, never
-// same-origin, so the embedded HTML can never reach the host app.
-const LOCAL_SANDBOX = "allow-scripts allow-same-origin allow-forms allow-popups allow-modals";
+// Both paths omit allow-same-origin: with allow-scripts a same-origin frame can
+// reach into the asset origin (and, for a local file, script the asset:// scheme
+// the app itself serves from). Dropping it forces an opaque origin, so a
+// workspace HTML file can render and run its own scripts but can't touch the
+// host app's storage or assets. Local and remote now share one policy.
+const LOCAL_SANDBOX = "allow-scripts allow-forms allow-popups allow-modals";
 const REMOTE_SANDBOX = "allow-scripts allow-forms allow-popups allow-modals";
 
 // The asset protocol sends no cache validators, so the webview can serve a
