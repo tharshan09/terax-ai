@@ -5,6 +5,10 @@ import { useEffect, useRef } from "react";
 import { displayAgent } from "../lib/format";
 import { maybeTriggerManagedReview } from "../lib/review";
 import { routeAgentNotification } from "../lib/route";
+import {
+  createStatusScheduler,
+  type StatusScheduler,
+} from "../lib/statusScheduler";
 import type { AgentSession, AgentSignal } from "../lib/types";
 import { useWindowFocus } from "../lib/useWindowFocus";
 import { useAgentStore } from "../store/agentStore";
@@ -56,7 +60,11 @@ function route(
   });
 }
 
-function handleSignal(sig: AgentSignal, ctx: Ctx): void {
+function handleSignal(
+  sig: AgentSignal,
+  ctx: Ctx,
+  scheduler: StatusScheduler,
+): void {
   const leafId = leafIdForPty(sig.id);
   if (leafId === null) return;
   const store = useAgentStore.getState();
@@ -65,26 +73,30 @@ function handleSignal(sig: AgentSignal, ctx: Ctx): void {
     case "started": {
       const info = tabInfo(ctx.tabs, leafId);
       if (!info) return;
+      scheduler.apply(leafId, "started");
       store.start(leafId, info.tabId, sig.agent ?? "agent");
       return;
     }
     case "working":
-      store.setStatus(leafId, "working");
+      scheduler.apply(leafId, "working");
       return;
     case "attention": {
-      store.setStatus(leafId, "waiting");
+      scheduler.apply(leafId, "attention");
       const session = store.sessions[leafId];
       if (session) route(session, "attention", ctx);
       return;
     }
     case "finished": {
-      store.setStatus(leafId, "waiting");
+      // The bell and managed-review fire on the finished SIGNAL immediately;
+      // only the drop to "waiting" is debounced (see statusScheduler).
+      scheduler.apply(leafId, "finished");
       const session = store.sessions[leafId];
       if (session) route(session, "finished", ctx);
       maybeTriggerManagedReview(leafId);
       return;
     }
     case "exited":
+      scheduler.apply(leafId, "exited");
       store.finish(leafId);
       useManagedAgentsStore.getState().remove(leafId);
       return;
@@ -103,12 +115,20 @@ export function AgentNotificationsBridge({
   const focused = useWindowFocus();
   const ctxRef = useRef<Ctx>({ tabs, activeId, focused, onActivate });
   ctxRef.current = { tabs, activeId, focused, onActivate };
+  const schedulerRef = useRef<StatusScheduler | null>(null);
+  if (schedulerRef.current === null) {
+    schedulerRef.current = createStatusScheduler((leafId, status) =>
+      useAgentStore.getState().setStatus(leafId, status),
+    );
+  }
 
   useEffect(() => {
+    const scheduler = schedulerRef.current;
+    if (!scheduler) return;
     let alive = true;
     let unlisten: (() => void) | undefined;
     listen<AgentSignal>("terax:agent-signal", (e) =>
-      handleSignal(e.payload, ctxRef.current),
+      handleSignal(e.payload, ctxRef.current, scheduler),
     )
       .then((u) => {
         if (alive) unlisten = u;
@@ -118,6 +138,7 @@ export function AgentNotificationsBridge({
     return () => {
       alive = false;
       unlisten?.();
+      scheduler.dispose();
     };
   }, []);
 
