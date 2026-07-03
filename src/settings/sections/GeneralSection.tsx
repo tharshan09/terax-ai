@@ -38,6 +38,7 @@ import {
   setTerminalFontFamily,
   setTerminalFontWeight,
   setTerminalShell,
+  setRestartSafeSessions,
   setTerminalLetterSpacing,
   setTerminalFontSize,
   setTerminalCursorBlink,
@@ -121,6 +122,9 @@ export function GeneralSection() {
   );
   const terminalCursorBlink = usePreferencesStore(
     (s) => s.terminalCursorBlink,
+  );
+  const restartSafeSessions = usePreferencesStore(
+    (s) => s.restartSafeSessions,
   );
   const activePaneMarker = usePreferencesStore((s) => s.activePaneMarker);
   const inactivePaneStyle = usePreferencesStore((s) => s.inactivePaneStyle);
@@ -348,6 +352,15 @@ export function GeneralSection() {
           <Switch
             checked={terminalCursorBlink}
             onCheckedChange={(v) => void setTerminalCursorBlink(v)}
+          />
+        </SettingRow>
+        <SettingRow
+          title="Restart-safe sessions"
+          description="Run new local terminals inside a managed tmux session so they survive quitting or updating Terax (reattached on next launch). Requires tmux; shell integration (cwd follow, blocks) is best-effort inside tmux."
+        >
+          <Switch
+            checked={restartSafeSessions}
+            onCheckedChange={(v) => void setRestartSafeSessions(v)}
           />
         </SettingRow>
         <SettingRow

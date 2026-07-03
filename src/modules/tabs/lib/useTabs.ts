@@ -1,5 +1,10 @@
 import { basename, titleFromUrl } from "@/lib/utils";
 import {
+  collectManagedSessions,
+  newManagedSession,
+  removedManagedSessions,
+} from "@/modules/terminal/lib/managedTmux";
+import {
   type DropEdge,
   findLeafCwd,
   hasLeaf,
@@ -14,14 +19,36 @@ import {
   siblingLeafOf,
   splitLeaf,
 } from "@/modules/terminal/lib/panes";
+import { killTmuxSession } from "@/modules/terminal/lib/tmux";
 import { disposeSession } from "@/modules/terminal/lib/useTerminalSession";
-import { currentWorkspaceEnv, type WorkspaceEnv } from "@/modules/workspace";
+import { usePreferencesStore } from "@/modules/settings/preferences";
+import {
+  currentWorkspaceEnv,
+  LOCAL_WORKSPACE,
+  type WorkspaceEnv,
+} from "@/modules/workspace";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { applyDocView } from "./applyDocView";
 import { resolveFileTabOpen } from "./resolveFileTabOpen";
 
 // Matches the renderer slot pool size — over this we'd evict an active leaf.
 export const MAX_PANES_PER_TAB = 4;
+
+/** Managed tmux session for a new LOCAL terminal when restart-safe mode is on;
+ *  undefined otherwise (a plain shell). Only the primary leaf gets one, so a
+ *  split pane stays a plain shell (matching the tmux-tab convention). */
+function managedSessionForNewLocalTab(): string | undefined {
+  return usePreferencesStore.getState().restartSafeSessions
+    ? newManagedSession()
+    : undefined;
+}
+
+/** Kill Terax-managed tmux sessions on an explicit tab/pane close so they do
+ *  not leak. Managed sessions are always local, so this always targets the
+ *  local host, never the ambient SSH env. Idempotent on the backend. */
+function killManagedSessions(names: string[]): void {
+  for (const name of names) void killTmuxSession(LOCAL_WORKSPACE, name);
+}
 
 type TabBase = {
   spaceId: string;
@@ -331,6 +358,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   const newTabInSpace = useCallback((spaceId: string, cwd?: string) => {
     const tabId = nextIdRef.current++;
     const leafId = nextIdRef.current++;
+    const tmuxSession = managedSessionForNewLocalTab();
     setTabs((curr) => [
       ...curr,
       {
@@ -340,7 +368,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         cold: true,
         title: cwd ? basename(cwd) : "shell",
         cwd,
-        paneTree: { kind: "leaf", id: leafId, cwd },
+        paneTree: { kind: "leaf", id: leafId, cwd, tmuxSession },
         activeLeafId: leafId,
       },
     ]);
@@ -406,6 +434,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   const removeTabsForSpace = useCallback(
     (spaceId: string, fallbackSpaceId: string, fallbackCwd?: string) => {
       let toDispose: number[] = [];
+      let managed: string[] = [];
       setTabs((curr) => {
         const plan = planSpaceRemoval(
           curr,
@@ -417,10 +446,16 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         );
         if (!plan) return curr;
         toDispose = plan.disposeLeafIds;
+        managed = curr
+          .filter((t) => !plan.tabs.some((p) => p.id === t.id))
+          .flatMap((t) =>
+            t.kind === "terminal" ? collectManagedSessions(t.paneTree) : [],
+          );
         setActiveId(plan.activeId);
         return plan.tabs;
       });
       for (const lid of toDispose) disposeSession(lid);
+      killManagedSessions(managed);
     },
     [],
   );
@@ -428,6 +463,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   const newTab = useCallback((cwd?: string) => {
     const tabId = nextIdRef.current++;
     const leafId = nextIdRef.current++;
+    const tmuxSession = managedSessionForNewLocalTab();
     setTabs((t) => [
       ...t,
       {
@@ -436,7 +472,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         spaceId: activeSpaceIdRef.current,
         title: "shell",
         cwd,
-        paneTree: { kind: "leaf", id: leafId, cwd },
+        paneTree: { kind: "leaf", id: leafId, cwd, tmuxSession },
         activeLeafId: leafId,
       },
     ]);
@@ -936,18 +972,21 @@ export function useTabs(initial?: Partial<TerminalTab>) {
 
   const closeTab = useCallback((id: number) => {
     let toDispose: number[] = [];
+    let managed: string[] = [];
     setTabs((curr) => {
       const fallback = nextActiveInSpace(curr, id);
       if (fallback === null) return curr;
       const target = curr.find((t) => t.id === id);
       if (target?.kind === "terminal") {
         toDispose = leafIds(target.paneTree);
+        managed = collectManagedSessions(target.paneTree);
       }
       const next = curr.filter((t) => t.id !== id);
       setActiveId((active) => (id === active ? fallback : active));
       return next;
     });
     for (const lid of toDispose) disposeSession(lid);
+    killManagedSessions(managed);
   }, []);
 
   const updateTab = useCallback((id: number, patch: TabPatch) => {
@@ -1117,12 +1156,14 @@ export function useTabs(initial?: Partial<TerminalTab>) {
 
   const closePaneByLeaf = useCallback((leafId: number): void => {
     let didRemove = false;
+    let managed: string[] = [];
     setTabs((curr) => {
       const tab = curr.find(
         (t) => t.kind === "terminal" && hasLeaf(t.paneTree, leafId),
       );
       if (tab?.kind !== "terminal") return curr;
       const newTree = removeLeaf(tab.paneTree, leafId);
+      managed = removedManagedSessions(tab.paneTree, newTree);
       if (newTree === null) {
         const fallback = nextActiveInSpace(curr, tab.id);
         if (fallback === null) return curr;
@@ -1145,16 +1186,19 @@ export function useTabs(initial?: Partial<TerminalTab>) {
       );
     });
     if (didRemove) disposeSession(leafId);
+    killManagedSessions(managed);
   }, []);
 
   const closeActivePane = useCallback((tabId: number): boolean => {
     let closedTab = false;
     let removedLeaf: number | null = null;
+    let managed: string[] = [];
     setTabs((curr) => {
       const t = curr.find((x) => x.id === tabId);
       if (t?.kind !== "terminal") return curr;
       const target = t.activeLeafId;
       const newTree = removeLeaf(t.paneTree, target);
+      managed = removedManagedSessions(t.paneTree, newTree);
       if (newTree === null) {
         const fallback = nextActiveInSpace(curr, tabId);
         if (fallback === null) return curr;
@@ -1175,6 +1219,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
       );
     });
     if (removedLeaf !== null) disposeSession(removedLeaf);
+    killManagedSessions(managed);
     return closedTab;
   }, []);
 
