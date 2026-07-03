@@ -11,12 +11,14 @@ enum Delivery {
     Osc,
 }
 
+// Each event is (hook name, our marker, needs_matcher). `needs_matcher` is
+// per-event because Claude's tool hooks require a `"matcher"` while its
+// prompt/lifecycle hooks reject one; the others are uniform per agent.
 struct AgentSpec {
     agent: &'static str,
     dir: &'static str,
     file: &'static str,
-    events: &'static [(&'static str, &'static str)],
-    matcher: bool,
+    events: &'static [(&'static str, &'static str, bool)],
     delivery: Delivery,
 }
 
@@ -25,12 +27,17 @@ const AGENTS: &[AgentSpec] = &[
         agent: "claude",
         dir: ".claude",
         file: "settings.json",
+        // PreToolUse/PostToolUse re-mark "working" on any tool activity so an
+        // autonomous run (no UserPromptSubmit between turns) is not left stuck
+        // on the Stop->finished marker. They need `matcher:"*"`; the others
+        // must stay matcher-free.
         events: &[
-            ("UserPromptSubmit", "working"),
-            ("Notification", "attention"),
-            ("Stop", "finished"),
+            ("UserPromptSubmit", "working", false),
+            ("Notification", "attention", false),
+            ("Stop", "finished", false),
+            ("PreToolUse", "working", true),
+            ("PostToolUse", "working", true),
         ],
-        matcher: false,
         delivery: Delivery::TerminalSequence,
     },
     AgentSpec {
@@ -38,11 +45,10 @@ const AGENTS: &[AgentSpec] = &[
         dir: ".codex",
         file: "hooks.json",
         events: &[
-            ("UserPromptSubmit", "working"),
-            ("PermissionRequest", "attention"),
-            ("Stop", "finished"),
+            ("UserPromptSubmit", "working", false),
+            ("PermissionRequest", "attention", false),
+            ("Stop", "finished", false),
         ],
-        matcher: false,
         delivery: Delivery::Osc,
     },
     AgentSpec {
@@ -50,11 +56,10 @@ const AGENTS: &[AgentSpec] = &[
         dir: ".gemini",
         file: "settings.json",
         events: &[
-            ("BeforeAgent", "working"),
-            ("Notification", "attention"),
-            ("AfterAgent", "finished"),
+            ("BeforeAgent", "working", true),
+            ("Notification", "attention", true),
+            ("AfterAgent", "finished", true),
         ],
-        matcher: true,
         delivery: Delivery::Osc,
     },
 ];
@@ -148,7 +153,7 @@ fn merge_hooks(mut root: Value, spec: &AgentSpec) -> Value {
     }
     let hooks = hooks.as_object_mut().unwrap();
 
-    for (event, marker) in spec.events {
+    for (event, marker, needs_matcher) in spec.events {
         let arr = hooks.entry(*event).or_insert_with(|| json!([]));
         if !arr.is_array() {
             *arr = json!([]);
@@ -158,7 +163,7 @@ fn merge_hooks(mut root: Value, spec: &AgentSpec) -> Value {
         let mut group = json!({
             "hooks": [ { "type": "command", "command": hook_command(spec, marker) } ]
         });
-        if spec.matcher {
+        if *needs_matcher {
             group["matcher"] = json!("*");
         }
         arr.push(group);
@@ -257,9 +262,12 @@ pub fn agent_hooks_status(agent: String) -> bool {
     else {
         return false;
     };
+    // Keyed on the marker: PreToolUse/PostToolUse reuse "working", so an install
+    // predating them still reports enabled (its UserPromptSubmit already carries
+    // that needle) and is not force-nagged to re-enable.
     spec.events
         .iter()
-        .all(|(_, m)| content.contains(&status_needle(spec, m)))
+        .all(|(_, m, _)| content.contains(&status_needle(spec, m)))
 }
 
 #[cfg(test)]
@@ -335,6 +343,45 @@ mod tests {
         assert_eq!(out["hooks"]["BeforeAgent"][0]["matcher"], "*");
         assert!(command(&out, "AfterAgent", 0).contains("notify;Terax;gemini;finished"));
         assert!(command(&out, "Notification", 0).contains("notify;Terax;gemini;attention"));
+    }
+
+    #[test]
+    fn claude_tool_events_carry_matcher_prompt_events_do_not() {
+        let out = merge_hooks(json!({}), spec("claude"));
+        // Tool hooks re-mark "working" during autonomous runs and require a matcher.
+        assert_eq!(hook_count(&out, "PreToolUse"), 1);
+        assert_eq!(hook_count(&out, "PostToolUse"), 1);
+        assert_eq!(out["hooks"]["PreToolUse"][0]["matcher"], "*");
+        assert_eq!(out["hooks"]["PostToolUse"][0]["matcher"], "*");
+        assert!(command(&out, "PreToolUse", 0).contains("notify;Terax;working"));
+        assert!(command(&out, "PostToolUse", 0).contains("notify;Terax;working"));
+        // Claude rejects a matcher on prompt/lifecycle hooks.
+        assert!(out["hooks"]["UserPromptSubmit"][0].get("matcher").is_none());
+        assert!(out["hooks"]["Notification"][0].get("matcher").is_none());
+        assert!(out["hooks"]["Stop"][0].get("matcher").is_none());
+    }
+
+    #[test]
+    fn claude_status_stays_enabled_without_tool_events() {
+        // A settings.json written before PreToolUse/PostToolUse existed must
+        // still report enabled: status keys on markers, and "working" is already
+        // present via UserPromptSubmit.
+        let legacy = json!({
+            "hooks": {
+                "UserPromptSubmit": [ { "hooks": [ { "type": "command",
+                    "command": hook_command(spec("claude"), "working") } ] } ],
+                "Notification": [ { "hooks": [ { "type": "command",
+                    "command": hook_command(spec("claude"), "attention") } ] } ],
+                "Stop": [ { "hooks": [ { "type": "command",
+                    "command": hook_command(spec("claude"), "finished") } ] } ],
+            }
+        });
+        let content = serde_json::to_string(&legacy).unwrap();
+        let s = spec("claude");
+        assert!(s
+            .events
+            .iter()
+            .all(|(_, m, _)| content.contains(&status_needle(s, m))));
     }
 
     #[test]
