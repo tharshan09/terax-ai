@@ -120,16 +120,3 @@ export const useAgentStore = create<AgentStoreState>((set) => ({
         : { notifications: next };
     }),
 }));
-
-/** The tab/leaf of the agent that most recently entered the waiting state, for
- *  the keyboard jump-to-attention shortcut. Null when none is waiting. */
-export function nextAttentionTarget(): {
-  tabId: number;
-  leafId: number;
-} | null {
-  const waiting = Object.values(useAgentStore.getState().sessions)
-    .filter((s) => s.status === "waiting")
-    .sort((a, b) => (b.attentionSince ?? 0) - (a.attentionSince ?? 0));
-  const t = waiting[0];
-  return t ? { tabId: t.tabId, leafId: t.leafId } : null;
-}

@@ -39,6 +39,7 @@ export type ShortcutId =
   | "ai.toggle"
   | "ai.askSelection"
   | "agent.focusAttention"
+  | "agent.overview"
   | "settings.open"
   | "sidebar.toggle"
   | "editor.undo"
@@ -150,7 +151,7 @@ export const SHORTCUTS: Shortcut[] = [
     label: "Focus previous pane",
     group: "Panes",
     defaultBindings: [{ [MOD_PROP]: true, key: "[" }],
-  },  
+  },
   {
     id: "pane.source",
     label: "Toggle source panel",
@@ -261,6 +262,12 @@ export const SHORTCUTS: Shortcut[] = [
     defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "a" }],
   },
   {
+    id: "agent.overview",
+    label: "Agent mission control",
+    group: "AI",
+    defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "g" }],
+  },
+  {
     id: "sidebar.toggle",
     label: "Toggle file explorer",
     group: "View",
@@ -346,7 +353,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
 export function matchBinding(
   e: KeyboardEvent,
   binding: KeyBinding,
-  id?: ShortcutId
+  id?: ShortcutId,
 ): boolean {
   const eventKey = e.key.toLowerCase();
   const bindingKey = binding.key.toLowerCase();

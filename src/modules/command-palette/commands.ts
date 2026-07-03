@@ -54,6 +54,7 @@ export type CommandPaletteActionContext = {
   toggleSidebar: () => void;
   toggleAi: () => void;
   askAiSelection: () => void;
+  openAgentOverview: () => void;
   openSettings: () => void;
   openKeyboardShortcuts: () => void;
   spaces: { id: string; name: string }[];
@@ -113,7 +114,14 @@ export function createCommandItems(
       id: "spaces.overview",
       title: "Spaces: Overview",
       group: "Spaces",
-      keywords: ["spaces", "sessions", "overview", "organize", "manage", "move"],
+      keywords: [
+        "spaces",
+        "sessions",
+        "overview",
+        "organize",
+        "manage",
+        "move",
+      ],
       icon: DashboardSquare01Icon,
       run: ctx.openSpacesOverview,
     },
@@ -131,8 +139,7 @@ export function createCommandItems(
       group: "Spaces" as const,
       keywords: ["space", "switch", "session", sp.name],
       icon: DashboardSquare01Icon,
-      disabledReason:
-        sp.id === ctx.activeSpaceId ? "Current space" : undefined,
+      disabledReason: sp.id === ctx.activeSpaceId ? "Current space" : undefined,
       run: () => ctx.switchSpace(sp.id),
     })),
     {
@@ -165,7 +172,14 @@ export function createCommandItems(
       id: "terminal.tmux_sessions",
       title: "Tmux: Switch session",
       group: "Tabs",
-      keywords: ["tmux", "session", "switch", "attach", "terminal", "multiplex"],
+      keywords: [
+        "tmux",
+        "session",
+        "switch",
+        "attach",
+        "terminal",
+        "multiplex",
+      ],
       icon: TerminalIcon,
       shortcutId: "terminal.tmux_sessions",
       run: ctx.openTmuxSwitcher,
@@ -300,6 +314,23 @@ export function createCommandItems(
       icon: SparklesIcon,
       shortcutId: "ai.askSelection",
       run: ctx.askAiSelection,
+    },
+    {
+      id: "agent.overview",
+      title: "Agent mission control",
+      group: "AI",
+      keywords: [
+        "agents",
+        "overview",
+        "mission control",
+        "sessions",
+        "jump",
+        "claude",
+        "running",
+      ],
+      icon: DashboardSquare01Icon,
+      shortcutId: "agent.overview",
+      run: ctx.openAgentOverview,
     },
   ];
 }

@@ -174,7 +174,7 @@ const EDGE_DIR: Record<DropEdge, SplitDir> = {
   bottom: "col",
 };
 
-function findLeafNode(
+export function findLeafNode(
   tree: PaneNode,
   id: PaneId,
 ): Extract<PaneNode, { kind: "leaf" }> | null {
