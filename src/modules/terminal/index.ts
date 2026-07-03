@@ -22,6 +22,7 @@ export {
 export { useTerminalFileDrop } from "./lib/useTerminalFileDrop";
 export {
   findLeafCwd,
+  findLeafNode,
   hasLeaf,
   isLeaf,
   leafIds,

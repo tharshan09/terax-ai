@@ -1,3 +1,4 @@
+export { AgentMissionControl } from "./components/AgentMissionControl";
 export { AgentNotificationsBridge } from "./components/AgentNotificationsBridge";
 export { NotificationBell } from "./components/NotificationBell";
-export { nextAttentionTarget } from "./store/agentStore";
+export { cycleWaitingTarget } from "./lib/missionControl";

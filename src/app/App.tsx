@@ -12,9 +12,11 @@ import { useUiFonts } from "@/lib/useUiFonts";
 import { useZoom } from "@/lib/useZoom";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
+  AgentMissionControl,
   AgentNotificationsBridge,
-  nextAttentionTarget,
+  cycleWaitingTarget,
 } from "@/modules/agents";
+import { useAgentStore } from "@/modules/agents/store/agentStore";
 import {
   AgentRunBridge,
   AiMiniWindow,
@@ -332,6 +334,7 @@ export default function App() {
   } = useSidebarPanel(explorerRef);
 
   const [newEditorOpen, setNewEditorOpen] = useState(false);
+  const [missionControlOpen, setMissionControlOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [paletteInitialMode, setPaletteInitialMode] = useState<
     "commands" | "content"
@@ -933,9 +936,11 @@ export default function App() {
       "ai.toggle": togglePanelAndFocus,
       "ai.askSelection": askFromSelection,
       "agent.focusAttention": () => {
-        const t = nextAttentionTarget();
+        const from = activeTerminalTabRef.current?.activeLeafId ?? null;
+        const t = cycleWaitingTarget(useAgentStore.getState().sessions, from);
         if (t) activateAgentTarget(t.tabId, t.leafId);
       },
+      "agent.overview": () => setMissionControlOpen((v) => !v),
       "settings.open": () => void openSettingsWindow(),
       "sidebar.toggle": toggleSidebar,
       "explorer.focus": toggleExplorerFocus,
@@ -1305,6 +1310,7 @@ export default function App() {
             toggleSidebar,
             toggleAi: togglePanelAndFocus,
             askAiSelection: askFromSelection,
+            openAgentOverview: () => setMissionControlOpen(true),
             openSettings: () => void openSettingsWindow(),
             openKeyboardShortcuts: () => void openSettingsWindow("shortcuts"),
             spaces: useSpaces.getState().spaces,
@@ -1371,7 +1377,9 @@ export default function App() {
           try {
             await invoke("fs_check_readable", { path: resolved, workspace });
           } catch {
-            toast.warning("Won't open this path - it looks like a secret file.");
+            toast.warning(
+              "Won't open this path - it looks like a secret file.",
+            );
             return;
           }
           if (line != null) openContentHit(resolved, line);
@@ -1606,6 +1614,14 @@ export default function App() {
             workspaceRoot={explorerRoot}
             onOpenContentHit={openContentHit}
             insertCommand={insertHistoryCommand}
+          />
+
+          <AgentMissionControl
+            open={missionControlOpen}
+            onOpenChange={setMissionControlOpen}
+            tabs={tabs}
+            onActivate={onActivateAgent}
+            onActivateLocal={onActivateLocalAgent}
           />
 
           <TmuxSessionSwitcher
