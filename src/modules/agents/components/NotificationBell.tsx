@@ -45,6 +45,8 @@ function StatusRow({
   onClick: () => void;
 }) {
   const waiting = status === "waiting";
+  const label =
+    status === "waiting" ? "waiting" : status === "working" ? "working" : "idle";
   return (
     <button
       type="button"
@@ -66,7 +68,7 @@ function StatusRow({
         )}
       >
         {waiting ? <span className="size-1.5 rounded-full bg-primary" /> : null}
-        {waiting ? "waiting" : "working"}
+        {label}
       </span>
     </button>
   );

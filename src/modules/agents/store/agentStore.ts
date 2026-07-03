@@ -39,7 +39,10 @@ export const useAgentStore = create<AgentStoreState>((set) => ({
             leafId,
             tabId,
             agent,
-            status: "working",
+            // An agent that just launched sits at its trust/welcome prompt
+            // waiting on the user; it is not doing work yet. Stay "idle" until
+            // the first real hook signal so the tab shows no false activity.
+            status: "idle",
             startedAt: now,
             lastActivityAt: now,
             attentionSince: null,
