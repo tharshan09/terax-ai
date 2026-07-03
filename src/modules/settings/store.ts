@@ -181,6 +181,9 @@ export type Preferences = {
   uiFontFamily: string;
   uiMonoFontFamily: string;
   terminalShell: string;
+  /** Opt-in: launch new local terminals inside a Terax-managed tmux session so
+   *  they survive an app restart/update (reattach instead of dying). */
+  restartSafeSessions: boolean;
   terminalLetterSpacing: number;
   terminalFontSize: number;
   terminalScrollback: number;
@@ -245,6 +248,7 @@ const KEY_TERMINAL_CLIPBOARD_WRITE = "terminalClipboardWrite";
 const KEY_UI_FONT_FAMILY = "uiFontFamily";
 const KEY_UI_MONO_FONT_FAMILY = "uiMonoFontFamily";
 const KEY_TERMINAL_SHELL = "terminalShell";
+const KEY_RESTART_SAFE_SESSIONS = "restartSafeSessions";
 const KEY_TERMINAL_LETTER_SPACING = "terminalLetterSpacing";
 const KEY_TERMINAL_FONT_SIZE = "terminalFontSize";
 const KEY_TERMINAL_SCROLLBACK = "terminalScrollback";
@@ -318,6 +322,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   uiFontFamily: "",
   uiMonoFontFamily: "",
   terminalShell: "",
+  restartSafeSessions: false,
   terminalLetterSpacing: 0,
   terminalFontSize: TERMINAL_FONT_SIZE_DEFAULT,
   terminalScrollback: TERMINAL_SCROLLBACK_DEFAULT,
@@ -483,6 +488,9 @@ export async function loadPreferences(): Promise<Preferences> {
       DEFAULT_PREFERENCES.uiMonoFontFamily,
     terminalShell:
       get<string>(KEY_TERMINAL_SHELL) ?? DEFAULT_PREFERENCES.terminalShell,
+    restartSafeSessions:
+      get<boolean>(KEY_RESTART_SAFE_SESSIONS) ??
+      DEFAULT_PREFERENCES.restartSafeSessions,
     terminalLetterSpacing:
       get<number>(KEY_TERMINAL_LETTER_SPACING) ??
       DEFAULT_PREFERENCES.terminalLetterSpacing,
@@ -785,6 +793,10 @@ export async function setTerminalShell(value: string): Promise<void> {
   await writePref(KEY_TERMINAL_SHELL, value.trim());
 }
 
+export async function setRestartSafeSessions(value: boolean): Promise<void> {
+  await writePref(KEY_RESTART_SAFE_SESSIONS, value);
+}
+
 export async function setTerminalLetterSpacing(value: number): Promise<void> {
   const clamped = Number.isFinite(value) ? Math.max(-10, Math.min(10, Math.round(value))) : 0;
   await writePref(KEY_TERMINAL_LETTER_SPACING, clamped);
@@ -913,6 +925,7 @@ export async function onPreferencesChange(
     [KEY_UI_FONT_FAMILY]: "uiFontFamily",
     [KEY_UI_MONO_FONT_FAMILY]: "uiMonoFontFamily",
     [KEY_TERMINAL_SHELL]: "terminalShell",
+    [KEY_RESTART_SAFE_SESSIONS]: "restartSafeSessions",
     [KEY_TERMINAL_LETTER_SPACING]: "terminalLetterSpacing",
     [KEY_TERMINAL_FONT_SIZE]: "terminalFontSize",
     [KEY_TERMINAL_SCROLLBACK]: "terminalScrollback",
