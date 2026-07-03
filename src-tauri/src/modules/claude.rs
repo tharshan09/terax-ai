@@ -380,10 +380,10 @@ fn status_local(pty_id: u32) -> Option<ClaudeStatus> {
     status_from_value(&v)
 }
 
-/// Build a [`ClaudeStatus`] from the wrapper's JSON, treating an all-empty
-/// record as absent.
-fn status_from_value(v: &Value) -> Option<ClaudeStatus> {
-    let status = ClaudeStatus {
+/// Deserialize the wrapper's JSON into a [`ClaudeStatus`] with no emptiness
+/// filtering. Callers decide which fields make a record worth keeping.
+fn build_status(v: &Value) -> ClaudeStatus {
+    ClaudeStatus {
         model: v.get("model").and_then(Value::as_str).map(str::to_string),
         model_id: v.get("modelId").and_then(Value::as_str).map(str::to_string),
         context_pct: v.get("contextPct").and_then(Value::as_f64),
@@ -393,7 +393,13 @@ fn status_from_value(v: &Value) -> Option<ClaudeStatus> {
         lines_added: v.get("linesAdded").and_then(Value::as_u64),
         lines_removed: v.get("linesRemoved").and_then(Value::as_u64),
         ts: v.get("ts").and_then(Value::as_f64),
-    };
+    }
+}
+
+/// Build a [`ClaudeStatus`] for the stats widget, treating a record with no
+/// model/context/cost as absent (ts alone is not worth a widget row).
+fn status_from_value(v: &Value) -> Option<ClaudeStatus> {
+    let status = build_status(v);
     if status.model.is_none() && status.context_pct.is_none() && status.cost_usd.is_none() {
         return None;
     }
@@ -506,15 +512,14 @@ const BATCH_SEP: char = '\u{1e}';
 /// One remote command that prints every session's stats file, each followed by
 /// a record separator. Invalid session names print nothing but still emit the
 /// separator, so the output stays positionally aligned with the input list.
-/// The allowlist (`is_valid_session_name`) makes the single-quote splice
-/// injection-safe.
+/// Reuses `ssh_read_command` so the path shape and single-quote quoting stay in
+/// lockstep with the single-session read (and keep its injection-safe splice).
 fn batch_read_command(sessions: &[String]) -> String {
     let mut cmd = String::new();
     for session in sessions {
         if tmux::is_valid_session_name(session) {
-            cmd.push_str(&format!(
-                "cat ~/.claude/.terax/'status-tmux-{session}.json' 2>/dev/null;"
-            ));
+            cmd.push_str(&ssh_read_command(&format!(".terax/status-tmux-{session}.json")));
+            cmd.push(';');
         }
         cmd.push_str("printf '\\036';");
     }
@@ -522,14 +527,26 @@ fn batch_read_command(sessions: &[String]) -> String {
 }
 
 /// Split the batch output back into one record per requested session. Missing
-/// files produce empty records; anything unparseable maps to `None`.
+/// files produce empty records; anything unparseable maps to `None`. Unlike the
+/// widget path, a record is kept whenever it carries a `ts` even if the richer
+/// stats fields are absent (a malformed statusLine input still stamps a `ts`),
+/// because the activity poller consumes only `ts`.
 fn parse_batch_output(stdout: &str, n: usize) -> Vec<Option<ClaudeStatus>> {
     let mut records = stdout.split(BATCH_SEP);
     (0..n)
         .map(|_| {
             let record = records.next()?;
             let v: Value = serde_json::from_str(record.trim()).ok()?;
-            status_from_value(&v)
+            let s = build_status(&v);
+            if s.ts.is_none()
+                && s.model.is_none()
+                && s.context_pct.is_none()
+                && s.cost_usd.is_none()
+            {
+                None
+            } else {
+                Some(s)
+            }
         })
         .collect()
 }
@@ -687,9 +704,9 @@ mod tests {
         assert_eq!(cmd.matches("printf '\\036';").count(), 3);
         assert_eq!(
             cmd,
-            "cat ~/.claude/.terax/'status-tmux-main.json' 2>/dev/null;printf '\\036';\
+            "cat ~/.claude/'.terax/status-tmux-main.json' 2>/dev/null;printf '\\036';\
              printf '\\036';\
-             cat ~/.claude/.terax/'status-tmux-wt-obs-801.json' 2>/dev/null;printf '\\036';"
+             cat ~/.claude/'.terax/status-tmux-wt-obs-801.json' 2>/dev/null;printf '\\036';"
         );
     }
 
@@ -713,8 +730,13 @@ mod tests {
         let out = parse_batch_output(stdout, 3);
         assert_eq!(out.len(), 3);
         assert!(out.iter().all(Option::is_none));
-        // The all-empty record guard applies per record.
-        assert!(parse_batch_output("{\"ts\":5.0}\u{1e}", 1)[0].is_none());
+        // A ts-only record is KEPT here (the activity poller needs only ts),
+        // unlike the widget path which drops it.
+        let ts_only = parse_batch_output("{\"ts\":5.0}\u{1e}", 1);
+        assert_eq!(ts_only[0].as_ref().unwrap().ts, Some(5.0));
+        assert!(status_from_value(&json!({ "ts": 5.0 })).is_none());
+        // A truly empty record is still absent.
+        assert!(parse_batch_output("{}\u{1e}", 1)[0].is_none());
     }
 
     #[test]

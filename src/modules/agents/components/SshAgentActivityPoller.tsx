@@ -4,8 +4,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef } from "react";
 import {
   collectSshAgentLeaves,
+  groupLeavesByHost,
   type LeafAgentState,
-  planSshAgentUpdates,
+  planDepartedLeaves,
+  planHostAgentUpdates,
   SSH_AGENT_POLL_MS,
   type SshAgentAction,
   type SshAgentLeaf,
@@ -13,55 +15,95 @@ import {
 import { useAgentStore } from "../store/agentStore";
 
 /**
- * Drives the per-tab activity indicator for SSH agents. Polls the Claude
- * stats files (one batched remote exec per host per tick, riding the shared
- * ControlMaster) and feeds working/idle into agentStore keyed by leafId.
+ * Drives the per-tab activity indicator for SSH agents. Polls the Claude stats
+ * files (one batched remote exec per host per tick, riding the shared
+ * ControlMaster) and feeds working/finish into agentStore keyed by leafId.
  * Gated on the Claude stats opt-in, which is what installs the statusLine
  * wrapper on connected hosts in the first place. Renders nothing.
+ *
+ * Hosts are polled independently: a wedged host (socket alive but the command
+ * hangs) only stalls its own leaves, never the others, and its own in-flight
+ * guard stops a second exec from piling up behind it.
  */
 export function SshAgentActivityPoller({ tabs }: { tabs: Tab[] }) {
   const enabled = useClaudeStatsStore((s) => s.enabled) === true;
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   const stateRef = useRef<Map<number, LeafAgentState>>(new Map());
+  const inFlightHostsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
-    let inFlight = false;
+    const state = stateRef.current;
+    const inFlight = inFlightHostsRef.current;
 
-    const tick = async () => {
-      if (cancelled || inFlight || document.hidden) return;
-      inFlight = true;
+    const pollHost = async (host: string, hostLeaves: SshAgentLeaf[]) => {
+      if (inFlight.has(host)) return;
+      inFlight.add(host);
       try {
-        const leaves = collectSshAgentLeaves(tabsRef.current);
-        const tsByLeaf = await pollHosts(leaves);
+        const sessions = [...new Set(hostLeaves.map((l) => l.session))];
+        let statuses: BatchStatus[] = [];
+        try {
+          statuses = await invoke<BatchStatus[]>("claude_status_batch", {
+            host,
+            tmuxSessions: sessions,
+          });
+        } catch {
+          statuses = [];
+        }
         if (cancelled) return;
-        const { actions, state } = planSshAgentUpdates(
-          leaves,
-          tsByLeaf,
-          stateRef.current,
-          Date.now(),
+        const tsBySession = new Map(
+          sessions.map((s, i) => [s, statuses[i]?.ts ?? null] as const),
         );
-        stateRef.current = state;
+        const tsByLeaf = new Map(
+          hostLeaves.map((l) => [l.leafId, tsBySession.get(l.session) ?? null]),
+        );
+        const { actions, state: next } = planHostAgentUpdates(
+          hostLeaves,
+          tsByLeaf,
+          state,
+          Date.now(),
+          oscOwnedLeaves(),
+        );
+        // Replace this host's slice of the tracking map: leaves the plan
+        // dropped (released or relinquished to OSC) fall out.
+        for (const l of hostLeaves) state.delete(l.leafId);
+        for (const [leafId, s] of next) state.set(leafId, s);
         applyActions(actions);
       } finally {
-        inFlight = false;
+        inFlight.delete(host);
       }
     };
 
-    void tick();
-    const timer = window.setInterval(() => void tick(), SSH_AGENT_POLL_MS);
+    const tick = () => {
+      if (cancelled || document.hidden) return;
+      const leaves = collectSshAgentLeaves(tabsRef.current);
+      const present = new Set(leaves.map((l) => l.leafId));
+      applyActions(planDepartedLeaves(present, state));
+      for (const leafId of [...state.keys()]) {
+        if (!present.has(leafId)) state.delete(leafId);
+      }
+      for (const [host, hostLeaves] of groupLeavesByHost(leaves)) {
+        void pollHost(host, hostLeaves);
+      }
+    };
+
+    tick();
+    const timer = window.setInterval(tick, SSH_AGENT_POLL_MS);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
-      // Toggle-off / unmount: release the sessions this poller owns so no
-      // tab keeps a frozen spinner.
+      // Toggle-off / unmount: release only the sessions this poller owns so no
+      // tab keeps a frozen spinner and no OSC-owned session is disturbed.
       const store = useAgentStore.getState();
-      for (const [leafId, s] of stateRef.current) {
-        if (s.inStore) store.finish(leafId);
+      for (const [leafId, s] of state) {
+        if (s.inStore && store.sessions[leafId]?.origin === "ssh") {
+          store.finish(leafId);
+        }
       }
-      stateRef.current = new Map();
+      state.clear();
+      inFlight.clear();
     };
   }, [enabled]);
 
@@ -70,40 +112,13 @@ export function SshAgentActivityPoller({ tabs }: { tabs: Tab[] }) {
 
 type BatchStatus = { ts: number | null } | null;
 
-/** One `claude_status_batch` per host, in parallel; a failed host reads as
- *  all-absent so the plan degrades to idle instead of throwing. */
-async function pollHosts(
-  leaves: SshAgentLeaf[],
-): Promise<Map<number, number | null>> {
-  const byHost = new Map<string, SshAgentLeaf[]>();
-  for (const leaf of leaves) {
-    const group = byHost.get(leaf.host);
-    if (group) group.push(leaf);
-    else byHost.set(leaf.host, [leaf]);
+/** Leaves the local OSC detector currently drives; the poller defers to them. */
+function oscOwnedLeaves(): Set<number> {
+  const owned = new Set<number>();
+  for (const s of Object.values(useAgentStore.getState().sessions)) {
+    if (s.origin !== "ssh") owned.add(s.leafId);
   }
-
-  const tsByLeaf = new Map<number, number | null>();
-  await Promise.all(
-    [...byHost].map(async ([host, hostLeaves]) => {
-      const sessions = [...new Set(hostLeaves.map((l) => l.session))];
-      let statuses: BatchStatus[] = [];
-      try {
-        statuses = await invoke<BatchStatus[]>("claude_status_batch", {
-          host,
-          tmuxSessions: sessions,
-        });
-      } catch {
-        statuses = [];
-      }
-      const tsBySession = new Map(
-        sessions.map((s, i) => [s, statuses[i]?.ts ?? null] as const),
-      );
-      for (const leaf of hostLeaves) {
-        tsByLeaf.set(leaf.leafId, tsBySession.get(leaf.session) ?? null);
-      }
-    }),
-  );
-  return tsByLeaf;
+  return owned;
 }
 
 function applyActions(actions: SshAgentAction[]): void {
@@ -112,13 +127,16 @@ function applyActions(actions: SshAgentAction[]): void {
   for (const action of actions) {
     switch (action.kind) {
       case "start":
-        store.start(action.leafId, action.tabId, "claude");
+        store.start(action.leafId, action.tabId, "claude", "ssh");
         break;
-      case "status":
-        store.setStatus(action.leafId, action.status);
+      case "working":
+        store.setStatus(action.leafId, "working");
         break;
       case "finish":
-        store.finish(action.leafId);
+        // Never delete a session the OSC detector has since taken over.
+        if (store.sessions[action.leafId]?.origin === "ssh") {
+          store.finish(action.leafId);
+        }
         break;
     }
   }

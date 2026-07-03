@@ -2,10 +2,11 @@ import type { Tab } from "@/modules/tabs";
 import { describe, expect, it } from "vitest";
 import {
   collectSshAgentLeaves,
-  FORGET_AFTER_MS,
-  planSshAgentUpdates,
+  groupLeavesByHost,
+  type LeafAgentState,
+  planDepartedLeaves,
+  planHostAgentUpdates,
   type SshAgentLeaf,
-  WORKING_FRESH_SECONDS,
   WORKING_HOLD_MS,
 } from "./sshAgentPoll";
 
@@ -73,8 +74,23 @@ describe("collectSshAgentLeaves", () => {
   });
 });
 
+describe("groupLeavesByHost", () => {
+  it("buckets leaves by host preserving order", () => {
+    const leaves: SshAgentLeaf[] = [
+      { leafId: 1, tabId: 1, host: "a", session: "s1" },
+      { leafId: 2, tabId: 2, host: "b", session: "s2" },
+      { leafId: 3, tabId: 3, host: "a", session: "s3" },
+    ];
+    const grouped = groupLeavesByHost(leaves);
+    expect([...grouped.keys()]).toEqual(["a", "b"]);
+    expect(grouped.get("a")?.map((l) => l.leafId)).toEqual([1, 3]);
+    expect(grouped.get("b")?.map((l) => l.leafId)).toEqual([2]);
+  });
+});
+
 const NOW = 1_000_000_000_000;
 const NOW_SEC = NOW / 1000;
+const NONE: ReadonlySet<number> = new Set();
 
 const leaf = (leafId: number, tabId = 1): SshAgentLeaf => ({
   leafId,
@@ -85,168 +101,176 @@ const leaf = (leafId: number, tabId = 1): SshAgentLeaf => ({
 
 const tsMap = (entries: [number, number | null][]) => new Map(entries);
 
-describe("planSshAgentUpdates", () => {
-  it("starts and marks working on a first wall-clock-fresh observation", () => {
-    const plan = planSshAgentUpdates(
+describe("planHostAgentUpdates", () => {
+  it("does not mark working on a first observation (needs a change)", () => {
+    const plan = planHostAgentUpdates(
       [leaf(10)],
-      tsMap([[10, NOW_SEC - 1]]),
+      tsMap([[10, NOW_SEC]]),
       new Map(),
       NOW,
-    );
-    expect(plan.actions).toEqual([
-      { kind: "start", leafId: 10, tabId: 1 },
-      { kind: "status", leafId: 10, status: "working" },
-    ]);
-    expect(plan.state.get(10)?.inStore).toBe(true);
-  });
-
-  it("does not start on a first stale observation", () => {
-    const plan = planSshAgentUpdates(
-      [leaf(10)],
-      tsMap([[10, NOW_SEC - WORKING_FRESH_SECONDS - 1]]),
-      new Map(),
-      NOW,
+      NONE,
     );
     expect(plan.actions).toEqual([]);
-    expect(plan.state.get(10)?.inStore).toBe(false);
-  });
-
-  it("detects working via a changed ts even under heavy clock skew", () => {
-    const skewedTs = NOW_SEC - 3600;
-    const first = planSshAgentUpdates(
-      [leaf(10)],
-      tsMap([[10, skewedTs]]),
-      new Map(),
-      NOW,
-    );
-    expect(first.actions).toEqual([]);
-    const second = planSshAgentUpdates(
-      [leaf(10)],
-      tsMap([[10, skewedTs + 0.3]]),
-      first.state,
-      NOW + 3000,
-    );
-    expect(second.actions).toEqual([
-      { kind: "start", leafId: 10, tabId: 1 },
-      { kind: "status", leafId: 10, status: "working" },
-    ]);
-  });
-
-  it("holds working through a short evidence gap, then drops to idle", () => {
-    const start = planSshAgentUpdates(
-      [leaf(10)],
-      tsMap([[10, NOW_SEC]]),
-      new Map(),
-      NOW,
-    );
-    const heldAt = NOW + WORKING_HOLD_MS - 1;
-    const held = planSshAgentUpdates(
-      [leaf(10)],
-      tsMap([[10, NOW_SEC]]),
-      start.state,
-      heldAt,
-    );
-    expect(held.actions).toEqual([
-      { kind: "status", leafId: 10, status: "working" },
-    ]);
-    const idleAt = NOW + WORKING_HOLD_MS + 1;
-    const idle = planSshAgentUpdates(
-      [leaf(10)],
-      tsMap([[10, NOW_SEC]]),
-      held.state,
-      idleAt,
-    );
-    expect(idle.actions).toEqual([
-      { kind: "status", leafId: 10, status: "idle" },
-    ]);
-  });
-
-  it("registers a vanished-then-rewritten stats file as a change", () => {
-    const start = planSshAgentUpdates(
-      [leaf(10)],
-      tsMap([[10, NOW_SEC]]),
-      new Map(),
-      NOW,
-    );
-    const gone = planSshAgentUpdates(
-      [leaf(10)],
-      tsMap([[10, null]]),
-      start.state,
-      NOW + 3000,
-    );
-    expect(gone.state.get(10)?.lastTs).toBe(NOW_SEC);
-    const back = planSshAgentUpdates(
-      [leaf(10)],
-      tsMap([[10, NOW_SEC + 100]]),
-      gone.state,
-      NOW + 6000,
-    );
-    expect(back.actions).toContainEqual({
-      kind: "status",
-      leafId: 10,
-      status: "working",
+    expect(plan.state.get(10)).toEqual({
+      lastTs: NOW_SEC,
+      workingUntilMs: 0,
+      inStore: false,
     });
   });
 
-  it("forgets a long-stale session instead of keeping it idle forever", () => {
-    const start = planSshAgentUpdates(
+  it("starts + marks working when ts changes between polls", () => {
+    const first = planHostAgentUpdates(
       [leaf(10)],
       tsMap([[10, NOW_SEC]]),
       new Map(),
       NOW,
+      NONE,
     );
-    const later = NOW + FORGET_AFTER_MS + 1;
-    const plan = planSshAgentUpdates(
+    const second = planHostAgentUpdates(
       [leaf(10)],
-      tsMap([[10, NOW_SEC]]),
-      start.state,
-      later,
+      tsMap([[10, NOW_SEC + 0.3]]),
+      first.state,
+      NOW + 3000,
+      NONE,
     );
-    expect(plan.actions).toEqual([{ kind: "finish", leafId: 10 }]);
-    expect(plan.state.has(10)).toBe(false);
-    // A forgotten leaf with an unchanged stale file never restarts.
-    const after = planSshAgentUpdates(
-      [leaf(10)],
-      tsMap([[10, NOW_SEC]]),
-      plan.state,
-      later + 3000,
-    );
-    expect(after.actions).toEqual([]);
+    expect(second.actions).toEqual([
+      { kind: "start", leafId: 10, tabId: 1 },
+      { kind: "working", leafId: 10 },
+    ]);
+    expect(second.state.get(10)?.inStore).toBe(true);
   });
 
-  it("finishes owned sessions whose leaf left the tab tree", () => {
-    const start = planSshAgentUpdates(
-      [leaf(10), leaf(11, 2)],
-      tsMap([
-        [10, NOW_SEC],
-        [11, NOW_SEC - FORGET_AFTER_MS],
-      ]),
+  it("detects working under heavy host clock skew (no wall-clock compare)", () => {
+    const skewed = NOW_SEC - 3600;
+    const first = planHostAgentUpdates(
+      [leaf(10)],
+      tsMap([[10, skewed]]),
       new Map(),
       NOW,
+      NONE,
     );
-    expect(start.state.get(11)?.inStore).toBe(false);
-    const plan = planSshAgentUpdates([], new Map(), start.state, NOW + 3000);
-    // Only the store-owned leaf produces a finish; the plain observation is
-    // silently dropped.
-    expect(plan.actions).toEqual([{ kind: "finish", leafId: 10 }]);
-    expect(plan.state.size).toBe(0);
+    const second = planHostAgentUpdates(
+      [leaf(10)],
+      tsMap([[10, skewed + 0.2]]),
+      first.state,
+      NOW + 3000,
+      NONE,
+    );
+    expect(second.actions).toContainEqual({ kind: "working", leafId: 10 });
   });
 
-  it("treats an absent status while owned as idle within the forget window", () => {
-    const start = planSshAgentUpdates(
+  it("does NOT flash working for a just-finished agent on first sight", () => {
+    // A session whose file was written 2s ago but never changes again: no
+    // wall-clock heuristic, so no false spinner.
+    const first = planHostAgentUpdates(
+      [leaf(10)],
+      tsMap([[10, NOW_SEC - 2]]),
+      new Map(),
+      NOW,
+      NONE,
+    );
+    const second = planHostAgentUpdates(
+      [leaf(10)],
+      tsMap([[10, NOW_SEC - 2]]),
+      first.state,
+      NOW + 3000,
+      NONE,
+    );
+    expect(first.actions).toEqual([]);
+    expect(second.actions).toEqual([]);
+  });
+
+  it("holds working through a short gap, then finishes (no idle state)", () => {
+    const s0 = planHostAgentUpdates(
       [leaf(10)],
       tsMap([[10, NOW_SEC]]),
       new Map(),
       NOW,
+      NONE,
     );
-    const plan = planSshAgentUpdates(
+    const s1 = planHostAgentUpdates(
+      [leaf(10)],
+      tsMap([[10, NOW_SEC + 1]]),
+      s0.state,
+      NOW + 3000,
+      NONE,
+    );
+    expect(s1.actions).toContainEqual({ kind: "working", leafId: 10 });
+    // Within the hold window, unchanged ts still holds working.
+    const held = planHostAgentUpdates(
+      [leaf(10)],
+      tsMap([[10, NOW_SEC + 1]]),
+      s1.state,
+      NOW + 3000 + WORKING_HOLD_MS - 1,
+      NONE,
+    );
+    expect(held.actions).toEqual([{ kind: "working", leafId: 10 }]);
+    // Past the hold window with no change: finish, drop ownership, no idle.
+    const done = planHostAgentUpdates(
+      [leaf(10)],
+      tsMap([[10, NOW_SEC + 1]]),
+      held.state,
+      NOW + 3000 + WORKING_HOLD_MS + 1,
+      NONE,
+    );
+    expect(done.actions).toEqual([{ kind: "finish", leafId: 10 }]);
+    expect(done.state.get(10)?.inStore).toBe(false);
+  });
+
+  it("retains lastTs across a vanished file so a rewrite still counts", () => {
+    const s0 = planHostAgentUpdates(
+      [leaf(10)],
+      tsMap([[10, NOW_SEC]]),
+      new Map(),
+      NOW,
+      NONE,
+    );
+    const gone = planHostAgentUpdates(
       [leaf(10)],
       tsMap([[10, null]]),
-      start.state,
-      NOW + WORKING_HOLD_MS + 1,
+      s0.state,
+      NOW + 3000,
+      NONE,
     );
-    expect(plan.actions).toEqual([
-      { kind: "status", leafId: 10, status: "idle" },
+    expect(gone.state.get(10)?.lastTs).toBe(NOW_SEC);
+    const back = planHostAgentUpdates(
+      [leaf(10)],
+      tsMap([[10, NOW_SEC + 5]]),
+      gone.state,
+      NOW + 6000,
+      NONE,
+    );
+    expect(back.actions).toContainEqual({ kind: "working", leafId: 10 });
+  });
+
+  it("defers entirely to an OSC-owned leaf: no actions, no tracking", () => {
+    const owned = new Set([10]);
+    // Even with a would-be change, the OSC path owns it.
+    const plan = planHostAgentUpdates(
+      [leaf(10)],
+      tsMap([[10, NOW_SEC]]),
+      new Map([
+        [10, { lastTs: NOW_SEC - 1, workingUntilMs: 0, inStore: true }],
+      ]),
+      NOW,
+      owned,
+    );
+    expect(plan.actions).toEqual([]);
+    expect(plan.state.has(10)).toBe(false);
+  });
+});
+
+describe("planDepartedLeaves", () => {
+  it("finishes owned sessions whose leaf left the tree, ignores unowned", () => {
+    const prev = new Map<number, LeafAgentState>([
+      [10, { lastTs: NOW_SEC, workingUntilMs: NOW + 1000, inStore: true }],
+      [11, { lastTs: NOW_SEC, workingUntilMs: 0, inStore: false }],
     ]);
+    // Leaf 10 and 11 both gone; only the owned one produces a finish.
+    expect(planDepartedLeaves(new Set(), prev)).toEqual([
+      { kind: "finish", leafId: 10 },
+    ]);
+    // Still present: nothing.
+    expect(planDepartedLeaves(new Set([10, 11]), prev)).toEqual([]);
   });
 });
