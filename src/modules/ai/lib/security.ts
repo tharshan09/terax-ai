@@ -126,6 +126,49 @@ const WRITE_DENY_PREFIXES = [
   "/programdata/",
 ];
 
+/**
+ * Write-only deny directories for coding-agent + shell config. Writing here is
+ * a persistence/code-execution vector (a hook or rc line runs on the next
+ * session), so the auto-approving write path refuses even though a human
+ * approval also gates it. Matched as a path segment, like PROTECTED_DIRS.
+ * Reading these is allowed (inspecting your own config is fine).
+ */
+const WRITE_DENY_DIRS = [
+  "/.claude",
+  "/.codex",
+  "/.gemini",
+  "/.config/fish",
+];
+
+/**
+ * Write-only deny basenames: shell startup files whose contents execute on the
+ * next interactive/login shell. Writing one is arbitrary code execution at next
+ * shell start. Comparison-form basenames (lowercased).
+ */
+const WRITE_DENY_BASENAMES = new Set([
+  ".zshrc",
+  ".zshenv",
+  ".zprofile",
+  ".zlogin",
+  ".zlogout",
+  ".bashrc",
+  ".bash_profile",
+  ".bash_login",
+  ".bash_logout",
+  ".profile",
+  ".cshrc",
+  ".tcshrc",
+  ".kshrc",
+  ".inputrc",
+  "config.fish",
+  // MCP config files: not under a `/.claude/` segment (`.claude.json` sits at
+  // the home root and `isUnderProtected` won't match it), yet they hold
+  // `mcpServers` stdio commands that run on the next Claude Code start — so an
+  // AI write here is code execution.
+  ".claude.json",
+  ".mcp.json",
+]);
+
 export type SafetyResult = { ok: true } | { ok: false; reason: string };
 
 function basename(p: string): string {
@@ -243,6 +286,22 @@ export function checkWritable(path: string): SafetyResult {
         reason: `Refused: writes under "${prefix.replace(/\/$/, "")}" are not allowed.`,
       };
     }
+  }
+
+  for (const dir of WRITE_DENY_DIRS) {
+    if (isUnderProtected(cmp, dir)) {
+      return {
+        ok: false,
+        reason: `Refused: writes into "${describeProtected(dir)}" (agent/shell config) are not allowed.`,
+      };
+    }
+  }
+
+  if (WRITE_DENY_BASENAMES.has(comparisonForm(basename(path)))) {
+    return {
+      ok: false,
+      reason: `Refused: "${basename(path)}" is a shell startup file; writing it runs code at next shell start.`,
+    };
   }
   return { ok: true };
 }
