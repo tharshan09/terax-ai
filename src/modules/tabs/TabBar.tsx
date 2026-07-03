@@ -473,22 +473,16 @@ export function TabBar({
                       {labelFor(t)}
                     </span>
                   </span>
-                  {/* One rightmost slot: on hover the close button takes over
-                      (priority); otherwise it shows the activity indicator /
-                      editor dirty-dot if any, else nothing. No space is reserved
-                      when empty, so the tab may widen on hover. */}
-                  <span className="flex shrink-0 items-center">
-                    {indicator ? (
-                      <span
-                        className={cn(
-                          "flex items-center",
-                          hasClose && "group-hover:hidden",
-                        )}
-                      >
+                  {/* Fixed-size rightmost slot. When the tab is closable the
+                      indicator and the close button overlay each other in one
+                      cell, so hovering swaps them with no reflow: the tab never
+                      changes width. A lone tab has no close button, so its
+                      indicator can size naturally. */}
+                  {hasClose ? (
+                    <span className="relative flex size-4 shrink-0 items-center justify-center">
+                      <span className="absolute inset-0 flex items-center justify-center transition-opacity group-hover:opacity-0">
                         {indicator}
                       </span>
-                    ) : null}
-                    {hasClose && (
                       <span
                         role="button"
                         aria-label="Close tab"
@@ -497,7 +491,7 @@ export function TabBar({
                           e.stopPropagation();
                           onClose(t.id);
                         }}
-                        className="hidden rounded p-0.5 transition-colors hover:bg-accent group-hover:flex"
+                        className="absolute inset-0 hidden items-center justify-center rounded transition-colors hover:bg-accent group-hover:flex"
                       >
                         <HugeiconsIcon
                           icon={Cancel01Icon}
@@ -505,8 +499,10 @@ export function TabBar({
                           strokeWidth={2}
                         />
                       </span>
-                    )}
-                  </span>
+                    </span>
+                  ) : indicator ? (
+                    <span className="flex shrink-0 items-center">{indicator}</span>
+                  ) : null}
                 </TabsTrigger>
               );
 
