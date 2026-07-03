@@ -21,12 +21,6 @@ export {
 } from "./lib/useTerminalSession";
 export { useTerminalFileDrop } from "./lib/useTerminalFileDrop";
 export {
-  collectManagedSessions,
-  isManagedSession,
-  newManagedSession,
-  removedManagedSessions,
-} from "./lib/managedTmux";
-export {
   findLeafCwd,
   hasLeaf,
   isLeaf,

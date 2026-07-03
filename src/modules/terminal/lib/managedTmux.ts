@@ -29,7 +29,16 @@ export function newManagedSession(rand: () => string = defaultRand): string {
 
 function defaultRand(): string {
   // tmux session names allow [A-Za-z0-9_-]; a hex slice stays valid and unique.
-  return crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+  const c = globalThis.crypto;
+  if (c && typeof c.randomUUID === "function") {
+    return c.randomUUID().replace(/-/g, "").slice(0, 12);
+  }
+  // Fallback for a context without crypto.randomUUID: uniqueness (not secrecy)
+  // is all we need, and the output stays within the tmux-name charset.
+  return (Date.now().toString(36) + Math.random().toString(36).slice(2)).slice(
+    0,
+    12,
+  );
 }
 
 /** Managed session names anywhere in a pane subtree, for leak-safe cleanup when
