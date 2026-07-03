@@ -1,6 +1,15 @@
 import type { Tab } from "@/modules/tabs";
-import { findLeafNode, hasLeaf } from "@/modules/terminal";
+import { findLeafNode, type PaneNode } from "@/modules/terminal";
+import { displayAgent } from "./format";
 import type { AgentSession, AgentStatus, LocalAgentState } from "./types";
+
+/** Status wording shown per row and matched by the filter. Shared so the two
+ *  can never drift (typing what you see always finds the row). */
+export const STATUS_LABEL: Record<AgentStatus, string> = {
+  waiting: "needs input",
+  working: "working",
+  idle: "idle",
+};
 
 /**
  * One row in the agent mission-control overview: a live agent enriched from its
@@ -34,43 +43,41 @@ const STATUS_RANK: Record<AgentStatus, number> = {
   idle: 2,
 };
 
-function terminalTabForLeaf(tabs: Tab[], leafId: number): Tab | null {
+type FoundLeaf = {
+  tab: Extract<Tab, { kind: "terminal" }>;
+  leaf: Extract<PaneNode, { kind: "leaf" }>;
+};
+
+/** Locate the terminal tab and leaf node that actually contain `leafId`, in a
+ *  single pass (findLeafNode returns null when absent). */
+function findTabAndLeaf(tabs: Tab[], leafId: number): FoundLeaf | null {
   for (const t of tabs) {
-    if (t.kind === "terminal" && hasLeaf(t.paneTree, leafId)) return t;
+    if (t.kind !== "terminal") continue;
+    const leaf = findLeafNode(t.paneTree, leafId);
+    if (leaf) return { tab: t, leaf };
   }
   return null;
 }
 
 function rowFromSession(session: AgentSession, tabs: Tab[]): AgentRow {
-  const tab = terminalTabForLeaf(tabs, session.leafId);
-  const leaf =
-    tab && tab.kind === "terminal"
-      ? findLeafNode(tab.paneTree, session.leafId)
-      : null;
-  const host =
-    tab?.kind === "terminal" && tab.workspace?.kind === "ssh"
-      ? tab.workspace.host
-      : null;
-  const title =
-    (tab?.kind === "terminal" && (tab.customTitle || tab.title)) || "Agent";
-  const cwd =
-    (tab?.kind === "terminal" ? (leaf?.cwd ?? tab.cwd) : undefined) ?? null;
-  const session_ =
-    (tab?.kind === "terminal"
-      ? (leaf?.tmuxSession ?? tab.tmuxSession)
-      : null) ?? null;
+  const found = findTabAndLeaf(tabs, session.leafId);
+  const tab = found?.tab ?? null;
+  const leaf = found?.leaf ?? null;
 
   return {
     key: `t${session.leafId}`,
     kind: "terminal",
-    tabId: session.tabId,
+    // The jump target is the tab that CURRENTLY holds the leaf, not the tab it
+    // launched in (a pane can move); null when the tab is gone, which makes the
+    // row non-actionable instead of jumping to a dead tab id.
+    tabId: tab?.id ?? null,
     leafId: session.leafId,
     agent: session.agent,
     status: session.status,
-    title,
-    host,
-    cwd,
-    session: session_,
+    title: (tab && (tab.customTitle || tab.title)) || "Agent",
+    host: tab?.workspace?.kind === "ssh" ? tab.workspace.host : null,
+    cwd: leaf?.cwd ?? tab?.cwd ?? null,
+    session: leaf?.tmuxSession ?? tab?.tmuxSession ?? null,
     startedAt: session.startedAt,
     attentionSince: session.attentionSince,
   };
@@ -115,13 +122,23 @@ export function buildAgentRows(
   });
 }
 
-/** Case-insensitive substring filter over the fields the user can see. Empty
- *  query returns every row unchanged (already sorted). */
+/** Case-insensitive substring filter over the fields the user can see,
+ *  including the humanized agent name and status label the row displays (so
+ *  typing "Claude Code" or "needs input" finds the row). Empty query returns
+ *  every row unchanged (already sorted). */
 export function filterAgentRows(rows: AgentRow[], query: string): AgentRow[] {
   const q = query.trim().toLowerCase();
   if (!q) return rows;
   return rows.filter((r) =>
-    [r.agent, r.title, r.host, r.cwd, r.session, r.status]
+    [
+      r.agent,
+      displayAgent(r.agent),
+      r.title,
+      r.host,
+      r.cwd,
+      r.session,
+      STATUS_LABEL[r.status],
+    ]
       .filter((v): v is string => !!v)
       .some((v) => v.toLowerCase().includes(q)),
   );

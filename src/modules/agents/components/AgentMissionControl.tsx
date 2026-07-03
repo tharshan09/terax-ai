@@ -17,8 +17,9 @@ import {
   type AgentRow,
   buildAgentRows,
   filterAgentRows,
+  STATUS_LABEL,
 } from "../lib/missionControl";
-import type { AgentStatus } from "../lib/types";
+import type { AgentSession, AgentStatus } from "../lib/types";
 import { useAgentStore } from "../store/agentStore";
 
 type Props = {
@@ -33,6 +34,11 @@ type Props = {
 // when open, so it costs nothing otherwise.
 const TICK_MS = 1000;
 
+// Empty-session sentinel returned by the store selector while the modal is
+// closed: a stable reference so zustand skips the re-render (and the row
+// rebuild) that constant agent status churn would otherwise trigger off-screen.
+const NO_SESSIONS: Record<number, AgentSession> = {};
+
 function elapsed(fromMs: number, nowMs: number): string {
   const s = Math.max(0, Math.floor((nowMs - fromMs) / 1000));
   if (s < 60) return `${s}s`;
@@ -41,12 +47,6 @@ function elapsed(fromMs: number, nowMs: number): string {
   const h = Math.floor(m / 60);
   return h < 24 ? `${h}h` : `${Math.floor(h / 24)}d`;
 }
-
-const STATUS_LABEL: Record<AgentStatus, string> = {
-  waiting: "needs input",
-  working: "working",
-  idle: "idle",
-};
 
 function StatusBadge({ status }: { status: AgentStatus }) {
   if (status === "working") {
@@ -77,7 +77,7 @@ function StatusBadge({ status }: { status: AgentStatus }) {
 }
 
 function subtitle(row: AgentRow): string {
-  // host · session · cwd basename — the "where does this agent live" context.
+  // "where does this agent live": host, tmux session, cwd basename.
   const parts: string[] = [];
   if (row.host) parts.push(row.host);
   if (row.session) parts.push(row.session);
@@ -137,8 +137,10 @@ export function AgentMissionControl({
 }: Props) {
   const [query, setQuery] = useState("");
   const [now, setNow] = useState(() => Date.now());
-  const sessions = useAgentStore((s) => s.sessions);
-  const localAgent = useAgentStore((s) => s.localAgent);
+  // Only track the store while open: closed, the selectors return stable
+  // constants so agent status churn does not re-render or rebuild rows.
+  const sessions = useAgentStore((s) => (open ? s.sessions : NO_SESSIONS));
+  const localAgent = useAgentStore((s) => (open ? s.localAgent : null));
 
   useEffect(() => {
     if (!open) {
@@ -158,11 +160,16 @@ export function AgentMissionControl({
   const waitingCount = rows.filter((r) => r.status === "waiting").length;
 
   const run = (row: AgentRow) => {
+    // Close first, then jump on the next tick: activating synchronously fights
+    // the dialog's close-time focus restore and the jump target loses focus.
     onOpenChange(false);
-    if (row.kind === "local") onActivateLocal();
-    else if (row.tabId !== null && row.leafId !== null) {
-      onActivate(row.tabId, row.leafId);
-    }
+    const jump =
+      row.kind === "local"
+        ? onActivateLocal
+        : row.tabId !== null && row.leafId !== null
+          ? () => onActivate(row.tabId as number, row.leafId as number)
+          : null;
+    if (jump) window.setTimeout(jump, 0);
   };
 
   return (

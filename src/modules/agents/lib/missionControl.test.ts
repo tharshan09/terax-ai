@@ -92,7 +92,7 @@ describe("buildAgentRows", () => {
     });
   });
 
-  it("falls back gracefully when the tab is gone (closed mid-run)", () => {
+  it("falls back gracefully and is non-actionable when the tab is gone", () => {
     const rows = buildAgentRows(
       sessionMap([session({ leafId: 9, tabId: 9 })]),
       null,
@@ -103,7 +103,20 @@ describe("buildAgentRows", () => {
       host: null,
       cwd: null,
       session: null,
+      // No live tab holds the leaf, so there is nothing to jump to.
+      tabId: null,
     });
+  });
+
+  it("targets the tab that currently holds the leaf, not the launch tab", () => {
+    // Session launched in tab 7 but the leaf now lives in tab 8 (pane moved).
+    const movedTab = sshTab(8, 70, { tmuxSession: "main" });
+    const rows = buildAgentRows(
+      sessionMap([session({ leafId: 70, tabId: 7 })]),
+      null,
+      [movedTab],
+    );
+    expect(rows[0].tabId).toBe(8);
   });
 });
 
@@ -143,7 +156,16 @@ describe("filterAgentRows", () => {
     expect(filterAgentRows(rows, "CODEX").map((r) => r.leafId)).toEqual([2]);
     expect(filterAgentRows(rows, "api").map((r) => r.leafId)).toEqual([1]);
     expect(filterAgentRows(rows, "wt-web").map((r) => r.leafId)).toEqual([2]);
-    expect(filterAgentRows(rows, "waiting").map((r) => r.leafId)).toEqual([2]);
+  });
+
+  it("matches the humanized agent name and status label the row shows", () => {
+    // "claude" displays as "Claude Code"; "waiting" displays as "needs input".
+    expect(filterAgentRows(rows, "Claude Code").map((r) => r.leafId)).toEqual([
+      1,
+    ]);
+    expect(filterAgentRows(rows, "needs input").map((r) => r.leafId)).toEqual([
+      2,
+    ]);
   });
 
   it("returns everything for an empty query", () => {
