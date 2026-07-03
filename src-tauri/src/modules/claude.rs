@@ -498,6 +498,59 @@ fn status_ssh(host: &str, tmux_session: Option<&str>) -> Option<ClaudeStatus> {
     status_from_value(&v)
 }
 
+/// Record separator between per-session stats in the batch read. 0x1e cannot
+/// appear in the wrapper's single-line JSON payloads, so splitting on it is
+/// unambiguous.
+const BATCH_SEP: char = '\u{1e}';
+
+/// One remote command that prints every session's stats file, each followed by
+/// a record separator. Invalid session names print nothing but still emit the
+/// separator, so the output stays positionally aligned with the input list.
+/// The allowlist (`is_valid_session_name`) makes the single-quote splice
+/// injection-safe.
+fn batch_read_command(sessions: &[String]) -> String {
+    let mut cmd = String::new();
+    for session in sessions {
+        if tmux::is_valid_session_name(session) {
+            cmd.push_str(&format!(
+                "cat ~/.claude/.terax/'status-tmux-{session}.json' 2>/dev/null;"
+            ));
+        }
+        cmd.push_str("printf '\\036';");
+    }
+    cmd
+}
+
+/// Split the batch output back into one record per requested session. Missing
+/// files produce empty records; anything unparseable maps to `None`.
+fn parse_batch_output(stdout: &str, n: usize) -> Vec<Option<ClaudeStatus>> {
+    let mut records = stdout.split(BATCH_SEP);
+    (0..n)
+        .map(|_| {
+            let record = records.next()?;
+            let v: Value = serde_json::from_str(record.trim()).ok()?;
+            status_from_value(&v)
+        })
+        .collect()
+}
+
+/// Batched [`claude_status`] for many tmux sessions on one SSH host: one remote
+/// exec per poll tick instead of one per session. Returns statuses aligned
+/// with `tmux_sessions`; a down master, an invalid name, or a missing file all
+/// map to `None` in that slot.
+#[tauri::command]
+pub fn claude_status_batch(host: String, tmux_sessions: Vec<String>) -> Vec<Option<ClaudeStatus>> {
+    let n = tmux_sessions.len();
+    let absent = || (0..n).map(|_| None).collect::<Vec<_>>();
+    if n == 0 || ssh::validate_ssh_host(&host).is_err() || !ssh::master_alive(&host) {
+        return absent();
+    }
+    match ssh::run_remote_capture(&host, &batch_read_command(&tmux_sessions)) {
+        Ok(cap) => parse_batch_output(&cap.stdout, n),
+        Err(_) => absent(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,6 +671,50 @@ mod tests {
             ssh_read_command(".terax/status-tmux-main.json"),
             "cat ~/.claude/'.terax/status-tmux-main.json' 2>/dev/null"
         );
+    }
+
+    #[test]
+    fn batch_read_command_keeps_alignment_and_rejects_hostile_names() {
+        let sessions = vec![
+            "main".to_string(),
+            "x'; rm -rf ~; '".to_string(),
+            "wt-obs-801".to_string(),
+        ];
+        let cmd = batch_read_command(&sessions);
+        // A hostile name contributes no cat at all, only its separator, so the
+        // output still has one record per requested session.
+        assert!(!cmd.contains("rm -rf"));
+        assert_eq!(cmd.matches("printf '\\036';").count(), 3);
+        assert_eq!(
+            cmd,
+            "cat ~/.claude/.terax/'status-tmux-main.json' 2>/dev/null;printf '\\036';\
+             printf '\\036';\
+             cat ~/.claude/.terax/'status-tmux-wt-obs-801.json' 2>/dev/null;printf '\\036';"
+        );
+    }
+
+    #[test]
+    fn parse_batch_output_aligns_records_with_sessions() {
+        let a = r#"{"model":"Opus","contextPct":10.0,"ts":1.0}"#;
+        let c = r#"{"model":"Sonnet","contextPct":50.0,"ts":2.0}"#;
+        let stdout = format!("{a}\u{1e}\u{1e}{c}\u{1e}");
+        let out = parse_batch_output(&stdout, 3);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].as_ref().unwrap().model.as_deref(), Some("Opus"));
+        assert!(out[1].is_none());
+        assert_eq!(out[2].as_ref().unwrap().model.as_deref(), Some("Sonnet"));
+    }
+
+    #[test]
+    fn parse_batch_output_tolerates_garbage_and_truncation() {
+        // Truncated output (fewer records than requested) fills with None
+        // instead of panicking; garbage records map to None.
+        let stdout = "not json\u{1e}";
+        let out = parse_batch_output(stdout, 3);
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().all(Option::is_none));
+        // The all-empty record guard applies per record.
+        assert!(parse_batch_output("{\"ts\":5.0}\u{1e}", 1)[0].is_none());
     }
 
     #[test]

@@ -14,6 +14,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   AgentNotificationsBridge,
   nextAttentionTarget,
+  SshAgentActivityPoller,
 } from "@/modules/agents";
 import {
   AgentRunBridge,
@@ -1569,6 +1570,7 @@ export default function App() {
             activeId={activeId}
             onActivate={onActivateAgent}
           />
+          <SshAgentActivityPoller tabs={tabs} />
           <Toaster position="bottom-right" />
 
           {hasComposer ? (
