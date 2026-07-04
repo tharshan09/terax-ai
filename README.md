@@ -22,7 +22,7 @@ I run my dev environment on remote servers over SSH, inside tmux, and I drive al
 
 Stock Terax already speaks SSH — you can open a remote terminal and browse and edit remote files. But everything *around* the terminal stayed local: source control, the status bar's Claude Code stats, tmux session handling. A remote host was, in effect, just another terminal tab.
 
-This fork closes that gap. Source control, Claude Code's live stats, tmux session switching and cwd-follow all work **over SSH**, exactly like they do locally — so the remote box I actually work on behaves like a real workspace, not a tab. If you also live on a remote server in tmux and run Claude Code in the terminal, this fork is built for your setup.
+This fork closes that gap. Source control, Claude Code's live stats, tmux session switching and cwd-follow all work **over SSH**, exactly like they do locally — so the remote box I actually work on behaves like a real workspace, not a tab. And because most of my terminals just run coding agents these days, the fork also keeps track of them: every Claude Code session across local tabs and SSH hosts shows up in one Mission Control overview, and local terminals can opt into tmux-backed sessions that survive app restarts. If you also live on a remote server in tmux and run Claude Code in the terminal, this fork is built for your setup.
 
 ## What's different from upstream
 
@@ -30,6 +30,9 @@ This fork closes that gap. Source control, Claude Code's live stats, tmux sessio
 | --- | --- |
 | **Source control over SSH** | The full git panel — status, side-by-side diffs, commit graph, branches, checkout, stage/commit/push — runs on the remote host over a shared SSH connection. Review and commit remote repos without leaving the app. |
 | **Claude Code stats over SSH** | Model, context %, cost and +/− line counts appear in the status bar even when Claude runs in a remote tmux session, not just locally. |
+| **Agent Mission Control** | One overview (`Mod+Shift+G`) of every running coding agent across all tabs and hosts — grouped by *needs input / working / idle*, filterable, Enter jumps to the agent's tab. `Mod+Shift+A` cycles through agents waiting for input. |
+| **Agent activity in tmux — local & SSH** | tmux swallows the terminal markers agent detection relies on, so agents inside tmux used to be invisible. A per-host batched poll (Claude's statusLine stats + the pane's foreground command) restores the tab spinner and keeps even an *idle* Claude listed — in local tmux tabs and on remote hosts alike. |
+| **Restart-safe sessions** | Opt-in: new local terminals run inside a Terax-managed tmux session, so whatever runs there (say, a long-running agent) survives quitting or updating the app — tabs reattach on the next launch, marked by a status-bar badge. A boot-time reaper kills leaked sessions; your own tmux sessions are never touched. |
 | **tmux session switcher** | A command-palette picker pops up on SSH connect — attach, open-in-new-tab, create, rename or kill tmux sessions on the host. |
 | **cwd-follow under tmux** | The file explorer and source-control panels follow `cd` even on hosts where tmux swallows the shell's `OSC 7` cwd signal. |
 | **Customizable status bar** | Reorderable, toggleable widgets — git branch & ahead/behind, working-tree line changes, workspace env (incl. the SSH host), and opt-in Claude Code stats. |
