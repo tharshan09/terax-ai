@@ -372,6 +372,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         cold: true,
         title: cwd ? basename(cwd) : "shell",
         cwd,
+        tmuxSession,
         paneTree: { kind: "leaf", id: leafId, cwd, tmuxSession },
         activeLeafId: leafId,
       },
@@ -476,6 +477,10 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         spaceId: activeSpaceIdRef.current,
         title: "shell",
         cwd,
+        // The tab-level binding marks it as a real tmux tab so the session
+        // switcher / picker treat it like one (the label stays cwd-derived:
+        // labelFor skips managed names). The leaf drives the spawn.
+        tmuxSession,
         paneTree: { kind: "leaf", id: leafId, cwd, tmuxSession },
         activeLeafId: leafId,
       },
@@ -567,7 +572,10 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   // The live re-attach is driven by reattachLeafTmux; this keeps the tab's
   // binding and title in sync so the switcher and tab strip reflect the change.
   const rebindTmuxSession = useCallback((tabId: number, session: string) => {
-    let orphaned: string[] = [];
+    // Deliberately does NOT kill a managed session it switches away from: that
+    // session may hold live work (a Claude agent), and surviving detached is
+    // exactly the restart-safe promise. Managed sessions are killed only on an
+    // explicit tab/pane close, not on a view switch.
     setTabs((ts) =>
       ts.map((t) => {
         if (t.id !== tabId || t.kind !== "terminal") return t;
@@ -576,13 +584,9 @@ export function useTabs(initial?: Partial<TerminalTab>) {
           t.activeLeafId,
           session,
         );
-        // Switching a restart-safe tab to another session drops its managed
-        // name; kill the now-orphaned session so it does not leak.
-        orphaned = removedManagedSessions(t.paneTree, paneTree);
         return { ...t, tmuxSession: session, title: session, paneTree };
       }),
     );
-    killManagedSessions(orphaned);
   }, []);
 
   // Clears the one-shot "pop the tmux picker on connect" flag for an SSH tab
