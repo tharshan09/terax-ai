@@ -39,7 +39,10 @@ export const MAX_PANES_PER_TAB = 4;
  *  split pane stays a plain shell (matching the tmux-tab convention). Gated on a
  *  local ambient env: a workspace-less tab spawns on `currentWorkspaceEnv()`, so
  *  minting a managed session while an SSH/WSL env is active would create it on
- *  the remote host, where the local-targeted cleanup could never reach it. */
+ *  the remote host, where the local-targeted cleanup could never reach it.
+ *  The gate alone is not enough — the ambient env can switch between mint and
+ *  MOUNT — so every tab that gets a managed session is also pinned to
+ *  `workspace: LOCAL_WORKSPACE` (spawn-env == mint-env, always). */
 function managedSessionForNewLocalTab(): string | undefined {
   if (currentWorkspaceEnv().kind !== "local") return undefined;
   return usePreferencesStore.getState().restartSafeSessions
@@ -373,6 +376,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         title: cwd ? basename(cwd) : "shell",
         cwd,
         tmuxSession,
+        ...(tmuxSession && { workspace: LOCAL_WORKSPACE }),
         paneTree: { kind: "leaf", id: leafId, cwd, tmuxSession },
         activeLeafId: leafId,
       },
@@ -479,8 +483,11 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         cwd,
         // The tab-level binding marks it as a real tmux tab so the session
         // switcher / picker treat it like one (the label stays cwd-derived:
-        // labelFor skips managed names). The leaf drives the spawn.
+        // labelFor skips managed names). The leaf drives the spawn. The pinned
+        // local workspace keeps a later ambient-env switch from spawning the
+        // managed session on a remote host.
         tmuxSession,
+        ...(tmuxSession && { workspace: LOCAL_WORKSPACE }),
         paneTree: { kind: "leaf", id: leafId, cwd, tmuxSession },
         activeLeafId: leafId,
       },

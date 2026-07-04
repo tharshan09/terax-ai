@@ -2,6 +2,11 @@ import { useEffect, useRef } from "react";
 import { native } from "@/modules/ai/lib/native";
 import type { Tab } from "@/modules/tabs";
 import { DEFAULT_SPACE_ID } from "@/modules/tabs/lib/useTabs";
+import {
+  collectManagedSessions,
+  isManagedSession,
+  reapOrphanedManagedSessions,
+} from "@/modules/terminal/lib/managedTmux";
 import { isLeaf, type PaneNode } from "@/modules/terminal/lib/panes";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import { activeSpaceEnv, freshTabCwd } from "./activeSpace";
@@ -19,6 +24,19 @@ type Params = {
   setActiveSpaceForNewTabs: (id: string) => void;
   adoptWorkspaceEnv: (env: WorkspaceEnv) => Promise<string | null>;
 };
+
+/** Every managed session name the restored tabs still reference (leaf-level
+ *  bindings plus the tab-level marker), i.e. the set the boot reaper must NOT
+ *  kill. */
+function referencedManagedSessions(tabs: Tab[]): Set<string> {
+  const referenced = new Set<string>();
+  for (const t of tabs) {
+    if (t.kind !== "terminal") continue;
+    for (const s of collectManagedSessions(t.paneTree)) referenced.add(s);
+    if (isManagedSession(t.tmuxSession)) referenced.add(t.tmuxSession);
+  }
+  return referenced;
+}
 
 function uniqueCwds(tabs: Tab[]): string[] {
   const set = new Set<string>();
@@ -67,6 +85,9 @@ export function useSpacesBoot({
           await saveActiveId(DEFAULT_SPACE_ID);
           setActiveSpaceForNewTabs(DEFAULT_SPACE_ID);
           useSpaces.getState().hydrate([meta], DEFAULT_SPACE_ID);
+          // No persisted state means nothing legitimately references a
+          // managed session: whatever carries our prefix is a leak.
+          void reapOrphanedManagedSessions(new Set());
           return;
         }
 
@@ -76,6 +97,12 @@ export function useSpacesBoot({
           if (!st) continue;
           restored.push(...hydrateTabs(st.tabs, space.id, allocId));
         }
+
+        // Reap leaked managed tmux sessions (picker switch-away, workspace
+        // switch, in-pane detach) now that we know, across ALL spaces, which
+        // sessions the restored tabs still reference. Fire-and-forget: the
+        // restore path never waits on tmux.
+        void reapOrphanedManagedSessions(referencedManagedSessions(restored));
 
         const active =
           activeId && spaces.some((s) => s.id === activeId)
