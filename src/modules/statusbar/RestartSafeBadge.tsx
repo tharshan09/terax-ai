@@ -8,11 +8,12 @@ import { HugeiconsIcon } from "@hugeicons/react";
 
 /**
  * Shown in the status bar when the active terminal tab runs inside a Terax
- * managed (restart-safe) tmux session. Surfaces the state Terax hides tmux's own
- * status line for, so it does not waste a terminal row. `session` is the managed
- * session name (shown only in the tooltip; the pill stays clean).
+ * managed (restart-safe) tmux session. Surfaces the state Terax hides tmux's
+ * own status line for, so it does not waste a terminal row. The tooltip says
+ * what the state MEANS for the user (survives quits, how to end it) — the
+ * internal session name is plumbing and stays out of the UI everywhere.
  */
-export function RestartSafeBadge({ session }: { session: string }) {
+export function RestartSafeBadge() {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -25,10 +26,12 @@ export function RestartSafeBadge({ session }: { session: string }) {
           restart-safe
         </span>
       </TooltipTrigger>
-      <TooltipContent side="top" className="text-xs">
-        <div className="font-medium">Restart-safe session</div>
+      <TooltipContent side="top" className="max-w-[260px] text-xs">
+        <div className="font-medium">Restart-safe terminal</div>
         <div className="text-muted-foreground">
-          Survives an app restart · {session}
+          Whatever runs here keeps running when Terax quits or updates — the tab
+          reconnects on the next launch. Closing the tab ends the session for
+          good.
         </div>
       </TooltipContent>
     </Tooltip>

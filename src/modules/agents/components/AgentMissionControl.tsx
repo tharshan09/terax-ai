@@ -48,42 +48,56 @@ function elapsed(fromMs: number, nowMs: number): string {
   return h < 24 ? `${h}h` : `${Math.floor(h / 24)}d`;
 }
 
-function StatusBadge({ status }: { status: AgentStatus }) {
+function StatusBadge({
+  status,
+  elapsed,
+}: {
+  status: AgentStatus;
+  /** Time in the current state, rendered inline ("working · 45s") so the
+   *  number is never a floating, unlabeled figure. */
+  elapsed: string | null;
+}) {
+  const suffix = elapsed ? ` · ${elapsed}` : "";
   if (status === "working") {
     return (
-      <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+      <span className="flex items-center gap-1.5 text-[11px] tabular-nums text-muted-foreground">
         <HugeiconsIcon
           icon={Loading03Icon}
           size={12}
           className="animate-spin text-primary"
         />
         {STATUS_LABEL.working}
+        {suffix}
       </span>
     );
   }
   if (status === "waiting") {
     return (
-      <span className="flex items-center gap-1.5 text-[11px] font-medium text-primary">
+      <span className="flex items-center gap-1.5 text-[11px] font-medium tabular-nums text-primary">
         <span className="size-1.5 animate-pulse rounded-full bg-primary" />
         {STATUS_LABEL.waiting}
+        {suffix}
       </span>
     );
   }
   return (
-    <span className="text-[11px] text-muted-foreground/70">
+    <span className="text-[11px] tabular-nums text-muted-foreground/70">
       {STATUS_LABEL.idle}
+      {suffix}
     </span>
   );
 }
 
 function subtitle(row: AgentRow): string {
-  // "where does this agent live": host, tmux session, cwd basename.
+  // "where does this agent live": host, tmux session, cwd basename — but
+  // never repeat what the title already says, so a local tab titled by its
+  // cwd doesn't render "trade-insight / trade-insight".
   const parts: string[] = [];
   if (row.host) parts.push(row.host);
-  if (row.session) parts.push(row.session);
+  if (row.session && row.session !== row.title) parts.push(row.session);
   if (row.cwd) {
     const base = row.cwd.split(/[\\/]/).filter(Boolean).pop();
-    if (base && base !== row.session) parts.push(base);
+    if (base && base !== row.session && base !== row.title) parts.push(base);
   }
   return parts.join("  ·  ");
 }
@@ -116,13 +130,15 @@ function AgentRowItem({
           </span>
         ) : null}
       </div>
-      <div className="flex shrink-0 flex-col items-end gap-0.5">
-        <StatusBadge status={row.status} />
-        {row.startedAt > 0 ? (
-          <span className="text-[10px] tabular-nums text-muted-foreground/60">
-            {elapsed(row.attentionSince ?? row.startedAt, now)}
-          </span>
-        ) : null}
+      <div className="flex shrink-0 items-center">
+        <StatusBadge
+          status={row.status}
+          elapsed={
+            row.startedAt > 0
+              ? elapsed(row.attentionSince ?? row.startedAt, now)
+              : null
+          }
+        />
       </div>
     </CommandItem>
   );

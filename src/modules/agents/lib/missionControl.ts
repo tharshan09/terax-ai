@@ -1,4 +1,5 @@
 import type { Tab } from "@/modules/tabs";
+import { labelFor } from "@/modules/tabs/lib/tabLabel";
 import { findLeafNode, type PaneNode } from "@/modules/terminal";
 import { isManagedSession } from "@/modules/terminal/lib/managedTmux";
 import { displayAgent } from "./format";
@@ -78,7 +79,9 @@ function rowFromSession(session: AgentSession, tabs: Tab[]): AgentRow {
     leafId: session.leafId,
     agent: session.agent,
     status: session.status,
-    title: (tab && (tab.customTitle || tab.title)) || "Agent",
+    // Same label the tab bar shows (labelFor), so the user recognizes the row
+    // by the name they already see — never the raw internal tab.title.
+    title: tab ? labelFor(tab) : "Agent",
     host: tab?.workspace?.kind === "ssh" ? tab.workspace.host : null,
     cwd: leaf?.cwd ?? tab?.cwd ?? null,
     session: isManagedSession(tmuxSession) ? null : tmuxSession,

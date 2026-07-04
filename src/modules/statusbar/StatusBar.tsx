@@ -86,9 +86,7 @@ export function StatusBar({
         })}
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
-        {restartSafeSession ? (
-          <RestartSafeBadge session={restartSafeSession} />
-        ) : null}
+        {restartSafeSession ? <RestartSafeBadge /> : null}
         <StatusbarConfig />
         <AgentStatusPill onClick={onOpenMini} />
         {showAi &&
