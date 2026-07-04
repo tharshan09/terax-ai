@@ -1,5 +1,5 @@
 import { LOCAL_WORKSPACE } from "@/modules/workspace";
-import { isLeaf, type PaneNode } from "./panes";
+import { findLeafNode, isLeaf, type PaneNode } from "./panes";
 import { killTmuxSession, listTmuxSessions } from "./tmux";
 
 /**
@@ -41,6 +41,16 @@ function defaultRand(): string {
     0,
     12,
   );
+}
+
+/** The managed session name of a tab's active leaf, or null when that leaf is a
+ *  plain shell. Drives the restart-safe badge in the status bar. */
+export function activeManagedSession(
+  tree: PaneNode,
+  activeLeafId: number,
+): string | null {
+  const leaf = findLeafNode(tree, activeLeafId);
+  return isManagedSession(leaf?.tmuxSession) ? leaf.tmuxSession : null;
 }
 
 /** Managed session names anywhere in a pane subtree, for leak-safe cleanup when

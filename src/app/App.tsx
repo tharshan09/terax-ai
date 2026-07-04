@@ -98,6 +98,7 @@ import {
   listTmuxSessions,
   tmuxPaneCwd,
 } from "@/modules/terminal/lib/tmux";
+import { activeManagedSession } from "@/modules/terminal/lib/managedTmux";
 import {
   SpaceSwitcher,
   useSpaces,
@@ -204,6 +205,16 @@ export default function App() {
     return t && t.kind === "terminal" ? t : null;
   }, [tabs, activeId]);
   const activeLeafId = activeTerminalTab?.activeLeafId ?? null;
+  const restartSafeSession = useMemo(
+    () =>
+      activeTerminalTab
+        ? activeManagedSession(
+            activeTerminalTab.paneTree,
+            activeTerminalTab.activeLeafId,
+          )
+        : null,
+    [activeTerminalTab],
+  );
   const activeTerminalTabRef = useRef(activeTerminalTab);
   activeTerminalTabRef.current = activeTerminalTab;
 
@@ -1561,6 +1572,7 @@ export default function App() {
               activeLeafId={activeLeafId}
               activeWorkspace={activeTerminalTab?.workspace}
               activeTmuxSession={activeTerminalTab?.tmuxSession}
+              restartSafeSession={restartSafeSession}
             />
           )}
 

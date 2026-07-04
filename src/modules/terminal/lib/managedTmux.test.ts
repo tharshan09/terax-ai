@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  activeManagedSession,
   collectManagedSessions,
   isManagedSession,
   newManagedSession,
@@ -60,6 +61,29 @@ describe("collectManagedSessions", () => {
     expect(
       collectManagedSessions({ kind: "leaf", id: 1, tmuxSession: "work" }),
     ).toEqual([]);
+  });
+});
+
+describe("activeManagedSession", () => {
+  const split: PaneNode = {
+    kind: "split",
+    id: 1,
+    dir: "row",
+    children: [
+      { kind: "leaf", id: 10, tmuxSession: "terax-rs-aaa" },
+      { kind: "leaf", id: 11, tmuxSession: "main" },
+      { kind: "leaf", id: 12 },
+    ],
+  };
+
+  it("returns the managed session of the active leaf", () => {
+    expect(activeManagedSession(split, 10)).toBe("terax-rs-aaa");
+  });
+
+  it("returns null when the active leaf is a user session or plain shell", () => {
+    expect(activeManagedSession(split, 11)).toBeNull();
+    expect(activeManagedSession(split, 12)).toBeNull();
+    expect(activeManagedSession(split, 999)).toBeNull();
   });
 });
 
