@@ -1,7 +1,7 @@
 pub mod modules;
 
 use modules::{
-    agent, claude, fs, git, history, net, pty, secrets, shell, ssh, tmux, workspace,
+    agent, claude, fs, git, history, net, pty, secrets, shell, ssh, test_bridge, tmux, workspace,
 };
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -290,6 +290,9 @@ pub fn run() {
             // Native two-finger trackpad swipe -> tab switch (macOS only).
             #[cfg(target_os = "macos")]
             install_tab_swipe_monitor(_app.handle());
+            // Dev-only e2e bridge; no-op unless TERAX_TEST_BRIDGE is set in a
+            // debug build.
+            test_bridge::spawn(_app.handle());
             Ok(())
         })
         .manage(pty::PtyState::default())
@@ -388,6 +391,7 @@ pub fn run() {
             claude::claude_status,
             claude::claude_status_batch,
             claude::claude_status_batch_local,
+            test_bridge::test_bridge_result,
             secrets::secrets_get,
             secrets::secrets_set,
             secrets::secrets_delete,

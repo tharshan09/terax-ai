@@ -9,5 +9,6 @@ pub mod pty;
 pub mod secrets;
 pub mod shell;
 pub mod ssh;
+pub mod test_bridge;
 pub mod tmux;
 pub mod workspace;

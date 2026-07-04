@@ -19,6 +19,13 @@ if (import.meta.env.DEV && import.meta.env.VITE_REACT_SCAN === "true") {
   scan({ enabled: true });
 }
 
+// Dev-only e2e bridge; inert unless the Rust side was armed with
+// TERAX_TEST_BRIDGE (same dynamic-import pattern: never in prod bundles).
+if (import.meta.env.DEV) {
+  const { initTestBridge } = await import("./lib/testBridge");
+  initTestBridge();
+}
+
 // Reap PTY sessions orphaned by a prior webview load before any tab spawns.
 await invoke("pty_close_all").catch(() => {});
 
