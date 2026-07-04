@@ -8,6 +8,7 @@ import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { SourceControlSummary } from "@/modules/source-control";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import { useClaudeStatus } from "./lib/useClaudeStatus";
+import { RestartSafeBadge } from "./RestartSafeBadge";
 import { StatusbarConfig } from "./StatusbarConfig";
 import type { StatusbarWidgetCtx } from "./widgets/context";
 import { STATUSBAR_WIDGET_COMPONENTS } from "./widgets/registry";
@@ -28,6 +29,8 @@ type Props = {
    *  the host (and session) Claude actually runs on over SSH. */
   activeWorkspace?: WorkspaceEnv;
   activeTmuxSession?: string;
+  /** Managed (restart-safe) tmux session of the active tab, if any. */
+  restartSafeSession?: string | null;
 };
 
 export function StatusBar({
@@ -43,6 +46,7 @@ export function StatusBar({
   activeLeafId,
   activeWorkspace,
   activeTmuxSession,
+  restartSafeSession,
 }: Props) {
   const panelOpen = useChatStore((s) => s.panelOpen);
   const openPanel = useChatStore((s) => s.openPanel);
@@ -82,6 +86,9 @@ export function StatusBar({
         })}
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
+        {restartSafeSession ? (
+          <RestartSafeBadge session={restartSafeSession} />
+        ) : null}
         <StatusbarConfig />
         <AgentStatusPill onClick={onOpenMini} />
         {showAi &&

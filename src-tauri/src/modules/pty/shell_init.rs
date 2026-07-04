@@ -153,7 +153,9 @@ fn build_ssh(
     // remote login shell), so neither script needs extra quoting.
     match tmux_session {
         Some(session) => {
-            cmd.arg(tmux_attach_command(session));
+            // Remote sessions keep their status line; only local managed ones
+            // are hidden (Terax owns their state display).
+            cmd.arg(tmux_attach_command(session, false));
         }
         None => {
             cmd.arg(REMOTE_SHELL_INIT);
@@ -163,17 +165,30 @@ fn build_ssh(
     Ok(cmd)
 }
 
+/// Prefix of a Terax-managed (restart-safe) tmux session. Mirrors
+/// `MANAGED_PREFIX` in `src/modules/terminal/lib/managedTmux.ts`. Managed
+/// sessions get tmux's own status line turned off, because Terax surfaces the
+/// restart-safe state in its own status bar and the tmux line would just waste a
+/// terminal row. A user's own tmux tab (Cmd+Shift+M) keeps its status line.
+const MANAGED_SESSION_PREFIX: &str = "terax-rs-";
+
 /// Login-shell command that attaches to, or creates, `session` in tmux. Used by
 /// both the SSH path (over the remote login shell) and the local path (through
 /// `$SHELL -l`), so `tmux` is resolved against the full interactive PATH: a
 /// GUI-launched macOS app otherwise gets a minimal PATH that misses Homebrew and
-/// a bare `tmux` fails to spawn. `session` is allowlist-validated upstream
-/// (`[A-Za-z0-9_-]`), so single-quoting is injection-safe with no escaping. The
-/// OSC 7 rc bootstrap is intentionally skipped: tmux runs its own shells and
-/// does not reliably propagate it, so cwd tracking inside tmux is best-effort
-/// and simply absent rather than wrong.
-fn tmux_attach_command(session: &str) -> String {
-    format!("exec tmux new-session -A -s '{session}'")
+/// a bare `tmux` fails to spawn. When `hide_status`, tmux's own status line is
+/// disabled for the session (`set-option status off`, chained with `\;`).
+/// `session` is allowlist-validated upstream (`[A-Za-z0-9_-]`), so single-quoting
+/// is injection-safe with no escaping. The OSC 7 rc bootstrap is intentionally
+/// skipped: tmux runs its own shells and does not reliably propagate it, so cwd
+/// tracking inside tmux is best-effort and simply absent rather than wrong.
+fn tmux_attach_command(session: &str, hide_status: bool) -> String {
+    let base = format!("exec tmux new-session -A -s '{session}'");
+    if hide_status {
+        format!("{base} \\; set-option status off")
+    } else {
+        base
+    }
 }
 
 // Honor the override only if it matches an enumerated shell, so a tampered
@@ -402,7 +417,10 @@ mod unix {
             let mut cmd = CommandBuilder::new(&shell_path);
             cmd.arg("-l");
             cmd.arg("-c");
-            cmd.arg(super::tmux_attach_command(session));
+            // A Terax-managed (restart-safe) session hides tmux's own status
+            // line; a user's own tmux tab keeps it.
+            let hide_status = session.starts_with(super::MANAGED_SESSION_PREFIX);
+            cmd.arg(super::tmux_attach_command(session, hide_status));
             super::apply_common(&mut cmd, cwd, blocks);
             return Ok(cmd);
         }
@@ -1271,12 +1289,50 @@ mod tests {
     #[test]
     fn tmux_attach_command_single_quotes_the_name() {
         assert_eq!(
-            tmux_attach_command("main"),
+            tmux_attach_command("main", false),
             "exec tmux new-session -A -s 'main'"
         );
         assert_eq!(
-            tmux_attach_command("review-pr_2"),
+            tmux_attach_command("review-pr_2", false),
             "exec tmux new-session -A -s 'review-pr_2'"
+        );
+    }
+
+    #[test]
+    fn tmux_attach_command_hides_status_when_requested() {
+        assert_eq!(
+            tmux_attach_command("terax-rs-abc", true),
+            "exec tmux new-session -A -s 'terax-rs-abc' \\; set-option status off"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_local_tmux_tab_hides_the_tmux_status_line() {
+        // A managed (terax-rs-) session hides tmux's status line; a user's own
+        // local tmux tab keeps it.
+        let managed = super::unix::build(None, false, None, Some("terax-rs-x")).unwrap();
+        let managed_argv: Vec<String> = managed
+            .get_argv()
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            managed_argv
+                .iter()
+                .any(|a| a.contains("set-option status off")),
+            "managed session must hide status: {managed_argv:?}"
+        );
+
+        let user = super::unix::build(None, false, None, Some("main")).unwrap();
+        let user_argv: Vec<String> = user
+            .get_argv()
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !user_argv.iter().any(|a| a.contains("set-option")),
+            "user session must keep its status line: {user_argv:?}"
         );
     }
 
