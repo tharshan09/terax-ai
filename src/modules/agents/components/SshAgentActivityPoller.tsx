@@ -3,6 +3,7 @@ import type { Tab } from "@/modules/tabs";
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef } from "react";
 import {
+  agentFromPaneCommand,
   collectSshAgentLeaves,
   groupLeavesByHost,
   type LeafAgentState,
@@ -15,12 +16,14 @@ import {
 import { useAgentStore } from "../store/agentStore";
 
 /**
- * Drives the per-tab activity indicator for agents tmux hides from the OSC
- * detector: SSH tabs (one batched remote exec per host per tick, riding the
- * shared ControlMaster) and local managed restart-safe tabs (one batched local
- * file read per tick). Feeds working/finish into agentStore keyed by leafId.
- * Gated on the Claude stats opt-in, which is what installs the statusLine
- * wrapper (locally and on connected hosts) in the first place. Renders nothing.
+ * Drives the per-tab activity indicator and the Mission Control roster for
+ * agents tmux hides from the OSC detector: SSH tabs (one batched remote exec
+ * per host per tick, riding the shared ControlMaster) and every local tmux
+ * tab (one batched local read per tick). Feeds start/working/idle/finish into
+ * agentStore keyed by leafId — presence (the pane's foreground command) keeps
+ * an idle agent listed; a moving stats ts drives the spinner. Gated on the
+ * Claude stats opt-in, which is what installs the statusLine wrapper (locally
+ * and on connected hosts) in the first place. Renders nothing.
  *
  * Hosts are polled independently: a wedged host (socket alive but the command
  * hangs) only stalls its own leaves, never the others, and its own in-flight
@@ -62,7 +65,7 @@ export function SshAgentActivityPoller({ tabs }: { tabs: Tab[] }) {
       try {
         const { host, origin } = hostLeaves[0];
         const sessions = [...new Set(hostLeaves.map((l) => l.session))];
-        let statuses: BatchStatus[] = [];
+        let statuses: BatchStatus[];
         try {
           statuses =
             origin === "local-tmux"
@@ -74,18 +77,32 @@ export function SshAgentActivityPoller({ tabs }: { tabs: Tab[] }) {
                   tmuxSessions: sessions,
                 });
         } catch {
-          statuses = [];
+          // An IPC failure says nothing about the host. Skip the round rather
+          // than reporting "absent", which would finish every live agent row.
+          return;
         }
         if (cancelled || !fresh()) return;
         const tsBySession = new Map(
           sessions.map((s, i) => [s, statuses[i]?.ts ?? null] as const),
         );
+        const agentBySession = new Map(
+          sessions.map(
+            (s, i) =>
+              [s, agentFromPaneCommand(statuses[i]?.paneCommand)] as const,
+          ),
+        );
         const tsByLeaf = new Map(
           hostLeaves.map((l) => [l.leafId, tsBySession.get(l.session) ?? null]),
+        );
+        const agentByLeaf = new Map(
+          hostLeaves.map(
+            (l) => [l.leafId, agentBySession.get(l.session) ?? null] as const,
+          ),
         );
         const { actions, state: next } = planHostAgentUpdates(
           hostLeaves,
           tsByLeaf,
+          agentByLeaf,
           state,
           Date.now(),
           oscOwnedLeaves(),
@@ -163,7 +180,7 @@ export function SshAgentActivityPoller({ tabs }: { tabs: Tab[] }) {
   return null;
 }
 
-type BatchStatus = { ts: number | null } | null;
+type BatchStatus = { ts: number | null; paneCommand?: string | null } | null;
 
 /** Whether an agentStore session origin belongs to this poller (either
  *  flavor), as opposed to the richer OSC detector. */
@@ -186,10 +203,16 @@ function applyActions(actions: SshAgentAction[]): void {
   for (const action of actions) {
     switch (action.kind) {
       case "start":
-        store.start(action.leafId, action.tabId, "claude", action.origin);
+        store.start(action.leafId, action.tabId, action.agent, action.origin);
         break;
       case "working":
         store.setStatus(action.leafId, "working");
+        break;
+      case "idle":
+        // Same ownership rule as finish: never touch an OSC-driven session.
+        if (pollerOwns(store.sessions[action.leafId]?.origin)) {
+          store.setStatus(action.leafId, "idle");
+        }
         break;
       case "finish":
         // Never delete a session the OSC detector has since taken over.

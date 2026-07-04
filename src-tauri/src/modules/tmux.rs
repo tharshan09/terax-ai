@@ -59,6 +59,47 @@ fn kill_command(name: &str) -> String {
     format!("tmux kill-session -t '{name}'")
 }
 
+/// One exec that reports, for every pane on the server, which command runs in
+/// its foreground. The agent activity poller uses this as its presence signal:
+/// a live Claude keeps a session's agent row alive even while idle. Shared by
+/// the local path and the SSH batch splice; stderr is silenced so a host
+/// without tmux (or without a server) contributes nothing instead of noise.
+pub(crate) fn pane_commands_command() -> &'static str {
+    "tmux list-panes -a -F '#{session_name}\t#{pane_current_command}' 2>/dev/null"
+}
+
+/// Parse [`pane_commands_command`] output into (session, command) pairs.
+/// Tolerates garbage lines; a session with several panes yields several pairs
+/// (the caller decides how to weigh them).
+pub(crate) fn parse_pane_commands(out: &str) -> Vec<(String, String)> {
+    out.lines()
+        .filter_map(|line| {
+            let (session, cmd) = line.split_once('\t')?;
+            if session.is_empty() || cmd.is_empty() {
+                return None;
+            }
+            Some((session.to_string(), cmd.to_string()))
+        })
+        .collect()
+}
+
+/// Foreground commands of every LOCAL tmux pane. Empty when tmux is absent or
+/// no server runs — in both cases no local session can exist, so "no panes"
+/// is the truthful answer, not an error.
+pub(crate) fn local_pane_commands() -> Vec<(String, String)> {
+    #[cfg(unix)]
+    {
+        match run_local_login(pane_commands_command()) {
+            Ok(out) => parse_pane_commands(&out.stdout),
+            Err(_) => Vec::new(),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        Vec::new()
+    }
+}
+
 /// The `tmux rename-session` invocation for allowlist-validated names.
 fn rename_command(from: &str, to: &str) -> String {
     format!("tmux rename-session -t '{from}' '{to}'")

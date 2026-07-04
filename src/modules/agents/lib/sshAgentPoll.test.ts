@@ -1,6 +1,7 @@
 import type { Tab } from "@/modules/tabs";
 import { describe, expect, it } from "vitest";
 import {
+  agentFromPaneCommand,
   collectSshAgentLeaves,
   groupLeavesByHost,
   type LeafAgentState,
@@ -65,7 +66,7 @@ describe("collectSshAgentLeaves", () => {
     expect(collectSshAgentLeaves(tabs)).toEqual([]);
   });
 
-  it("collects local MANAGED leaves but leaves user tmux tabs alone", () => {
+  it("collects EVERY local tmux leaf (managed and user), never WSL", () => {
     const tabs: Tab[] = [
       // Managed restart-safe tab: joins the poller (OSC markers are swallowed
       // by tmux), even when cold.
@@ -75,7 +76,8 @@ describe("collectSshAgentLeaves", () => {
         tmuxSession: "terax-rs-abc123",
         paneTree: { kind: "leaf", id: 10, tmuxSession: "terax-rs-abc123" },
       }),
-      // A user's own local tmux tab (Cmd+Shift+M): not ours to poll.
+      // A user's own local tmux tab (Cmd+Shift+M): same OSC blind spot, so it
+      // polls too — a Claude living in it must show up in Mission Control.
       terminalTab({
         id: 2,
         tmuxSession: "roadmap",
@@ -96,7 +98,24 @@ describe("collectSshAgentLeaves", () => {
         session: "terax-rs-abc123",
         origin: "local-tmux",
       },
+      {
+        leafId: 20,
+        tabId: 2,
+        host: "local",
+        session: "roadmap",
+        origin: "local-tmux",
+      },
     ]);
+  });
+
+  it("recognizes agents by pane command, version-named Claude included", () => {
+    expect(agentFromPaneCommand("2.1.201")).toBe("claude");
+    expect(agentFromPaneCommand("claude")).toBe("claude");
+    expect(agentFromPaneCommand("codex")).toBe("codex");
+    expect(agentFromPaneCommand("zsh")).toBeNull();
+    expect(agentFromPaneCommand("vim")).toBeNull();
+    expect(agentFromPaneCommand(null)).toBeNull();
+    expect(agentFromPaneCommand(undefined)).toBeNull();
   });
 
   it("includes cold restored tabs: their remote session may be live", () => {
@@ -156,6 +175,7 @@ describe("groupLeavesByHost", () => {
 const NOW = 1_000_000_000_000;
 const NOW_SEC = NOW / 1000;
 const NONE: ReadonlySet<number> = new Set();
+const NO_AGENTS: ReadonlyMap<number, string | null> = new Map();
 
 const leaf = (leafId: number, tabId = 1): SshAgentLeaf => ({
   leafId,
@@ -172,6 +192,7 @@ describe("planHostAgentUpdates", () => {
     const plan = planHostAgentUpdates(
       [leaf(10)],
       tsMap([[10, NOW_SEC]]),
+      NO_AGENTS,
       new Map(),
       NOW,
       NONE,
@@ -188,6 +209,7 @@ describe("planHostAgentUpdates", () => {
     const first = planHostAgentUpdates(
       [leaf(10)],
       tsMap([[10, NOW_SEC]]),
+      NO_AGENTS,
       new Map(),
       NOW,
       NONE,
@@ -195,12 +217,13 @@ describe("planHostAgentUpdates", () => {
     const second = planHostAgentUpdates(
       [leaf(10)],
       tsMap([[10, NOW_SEC + 0.3]]),
+      NO_AGENTS,
       first.state,
       NOW + 3000,
       NONE,
     );
     expect(second.actions).toEqual([
-      { kind: "start", leafId: 10, tabId: 1, origin: "ssh" },
+      { kind: "start", leafId: 10, tabId: 1, origin: "ssh", agent: "claude" },
       { kind: "working", leafId: 10 },
     ]);
     expect(second.state.get(10)?.inStore).toBe(true);
@@ -217,6 +240,7 @@ describe("planHostAgentUpdates", () => {
     const first = planHostAgentUpdates(
       [local],
       tsMap([[10, NOW_SEC]]),
+      NO_AGENTS,
       new Map(),
       NOW,
       NONE,
@@ -224,6 +248,7 @@ describe("planHostAgentUpdates", () => {
     const second = planHostAgentUpdates(
       [local],
       tsMap([[10, NOW_SEC + 0.3]]),
+      NO_AGENTS,
       first.state,
       NOW + 3000,
       NONE,
@@ -233,6 +258,7 @@ describe("planHostAgentUpdates", () => {
       leafId: 10,
       tabId: 1,
       origin: "local-tmux",
+      agent: "claude",
     });
   });
 
@@ -241,6 +267,7 @@ describe("planHostAgentUpdates", () => {
     const first = planHostAgentUpdates(
       [leaf(10)],
       tsMap([[10, skewed]]),
+      NO_AGENTS,
       new Map(),
       NOW,
       NONE,
@@ -248,6 +275,7 @@ describe("planHostAgentUpdates", () => {
     const second = planHostAgentUpdates(
       [leaf(10)],
       tsMap([[10, skewed + 0.2]]),
+      NO_AGENTS,
       first.state,
       NOW + 3000,
       NONE,
@@ -261,6 +289,7 @@ describe("planHostAgentUpdates", () => {
     const first = planHostAgentUpdates(
       [leaf(10)],
       tsMap([[10, NOW_SEC - 2]]),
+      NO_AGENTS,
       new Map(),
       NOW,
       NONE,
@@ -268,6 +297,7 @@ describe("planHostAgentUpdates", () => {
     const second = planHostAgentUpdates(
       [leaf(10)],
       tsMap([[10, NOW_SEC - 2]]),
+      NO_AGENTS,
       first.state,
       NOW + 3000,
       NONE,
@@ -280,6 +310,7 @@ describe("planHostAgentUpdates", () => {
     const s0 = planHostAgentUpdates(
       [leaf(10)],
       tsMap([[10, NOW_SEC]]),
+      NO_AGENTS,
       new Map(),
       NOW,
       NONE,
@@ -287,6 +318,7 @@ describe("planHostAgentUpdates", () => {
     const s1 = planHostAgentUpdates(
       [leaf(10)],
       tsMap([[10, NOW_SEC + 1]]),
+      NO_AGENTS,
       s0.state,
       NOW + 3000,
       NONE,
@@ -296,6 +328,7 @@ describe("planHostAgentUpdates", () => {
     const held = planHostAgentUpdates(
       [leaf(10)],
       tsMap([[10, NOW_SEC + 1]]),
+      NO_AGENTS,
       s1.state,
       NOW + 3000 + WORKING_HOLD_MS - 1,
       NONE,
@@ -305,6 +338,7 @@ describe("planHostAgentUpdates", () => {
     const done = planHostAgentUpdates(
       [leaf(10)],
       tsMap([[10, NOW_SEC + 1]]),
+      NO_AGENTS,
       held.state,
       NOW + 3000 + WORKING_HOLD_MS + 1,
       NONE,
@@ -317,6 +351,7 @@ describe("planHostAgentUpdates", () => {
     const s0 = planHostAgentUpdates(
       [leaf(10)],
       tsMap([[10, NOW_SEC]]),
+      NO_AGENTS,
       new Map(),
       NOW,
       NONE,
@@ -324,6 +359,7 @@ describe("planHostAgentUpdates", () => {
     const gone = planHostAgentUpdates(
       [leaf(10)],
       tsMap([[10, null]]),
+      NO_AGENTS,
       s0.state,
       NOW + 3000,
       NONE,
@@ -332,6 +368,7 @@ describe("planHostAgentUpdates", () => {
     const back = planHostAgentUpdates(
       [leaf(10)],
       tsMap([[10, NOW_SEC + 5]]),
+      NO_AGENTS,
       gone.state,
       NOW + 6000,
       NONE,
@@ -345,6 +382,7 @@ describe("planHostAgentUpdates", () => {
     const plan = planHostAgentUpdates(
       [leaf(10)],
       tsMap([[10, NOW_SEC]]),
+      NO_AGENTS,
       new Map([
         [10, { lastTs: NOW_SEC - 1, workingUntilMs: 0, inStore: true }],
       ]),
@@ -353,6 +391,100 @@ describe("planHostAgentUpdates", () => {
     );
     expect(plan.actions).toEqual([]);
     expect(plan.state.has(10)).toBe(false);
+  });
+});
+
+describe("planHostAgentUpdates: presence", () => {
+  const AGENT = new Map<number, string | null>([[10, "claude"]]);
+  const SHELL = new Map<number, string | null>([[10, null]]);
+
+  it("lists a present-but-idle agent immediately (no warm-up)", () => {
+    const plan = planHostAgentUpdates(
+      [leaf(10)],
+      tsMap([[10, null]]),
+      AGENT,
+      new Map(),
+      NOW,
+      NONE,
+    );
+    expect(plan.actions).toEqual([
+      { kind: "start", leafId: 10, tabId: 1, origin: "ssh", agent: "claude" },
+      { kind: "idle", leafId: 10 },
+    ]);
+    expect(plan.state.get(10)?.inStore).toBe(true);
+  });
+
+  it("drops back to idle after the hold, NOT to finish, while present", () => {
+    const s0 = planHostAgentUpdates(
+      [leaf(10)],
+      tsMap([[10, NOW_SEC]]),
+      AGENT,
+      new Map(),
+      NOW,
+      NONE,
+    );
+    const s1 = planHostAgentUpdates(
+      [leaf(10)],
+      tsMap([[10, NOW_SEC + 1]]),
+      AGENT,
+      s0.state,
+      NOW + 3000,
+      NONE,
+    );
+    expect(s1.actions).toContainEqual({ kind: "working", leafId: 10 });
+    const after = planHostAgentUpdates(
+      [leaf(10)],
+      tsMap([[10, NOW_SEC + 1]]),
+      AGENT,
+      s1.state,
+      NOW + 3000 + WORKING_HOLD_MS + 1,
+      NONE,
+    );
+    expect(after.actions).toEqual([{ kind: "idle", leafId: 10 }]);
+    expect(after.state.get(10)?.inStore).toBe(true);
+  });
+
+  it("finishes as soon as the agent's process is gone (shell back)", () => {
+    const s0 = planHostAgentUpdates(
+      [leaf(10)],
+      tsMap([[10, NOW_SEC]]),
+      AGENT,
+      new Map(),
+      NOW,
+      NONE,
+    );
+    const gone = planHostAgentUpdates(
+      [leaf(10)],
+      tsMap([[10, NOW_SEC]]),
+      SHELL,
+      s0.state,
+      NOW + 3000,
+      NONE,
+    );
+    expect(gone.actions).toEqual([{ kind: "finish", leafId: 10 }]);
+    expect(gone.state.get(10)?.inStore).toBe(false);
+  });
+
+  it("keeps the spinner via moving ts even when presence detection misses", () => {
+    // Unknown foreground command (e.g. a renamed CLI): the old ts-only path
+    // still drives working, so the feature never regresses.
+    const s0 = planHostAgentUpdates(
+      [leaf(10)],
+      tsMap([[10, NOW_SEC]]),
+      SHELL,
+      new Map(),
+      NOW,
+      NONE,
+    );
+    const s1 = planHostAgentUpdates(
+      [leaf(10)],
+      tsMap([[10, NOW_SEC + 1]]),
+      SHELL,
+      s0.state,
+      NOW + 3000,
+      NONE,
+    );
+    expect(s1.actions).toContainEqual({ kind: "working", leafId: 10 });
   });
 });
 

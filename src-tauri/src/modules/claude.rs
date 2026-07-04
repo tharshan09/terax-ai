@@ -335,7 +335,7 @@ fn enabled_local() -> bool {
         .is_some_and(is_our_command)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeStatus {
     pub model: Option<String>,
@@ -354,6 +354,10 @@ pub struct ClaudeStatus {
     /// Epoch seconds the wrapper last wrote. The frontend hides stale stats
     /// (e.g. after the Claude session exited) using this.
     pub ts: Option<f64>,
+    /// Foreground command of the session's pane, batch reads only: the agent
+    /// poller's presence signal (a live-but-idle Claude keeps its row). Never
+    /// part of the wrapper's JSON.
+    pub pane_command: Option<String>,
 }
 
 /// Read the stats the wrapper wrote for the given tab. Local reads the per-PTY
@@ -393,6 +397,7 @@ fn build_status(v: &Value) -> ClaudeStatus {
         lines_added: v.get("linesAdded").and_then(Value::as_u64),
         lines_removed: v.get("linesRemoved").and_then(Value::as_u64),
         ts: v.get("ts").and_then(Value::as_f64),
+        pane_command: None,
     }
 }
 
@@ -523,7 +528,39 @@ fn batch_read_command(sessions: &[String]) -> String {
         }
         cmd.push_str("printf '\\036';");
     }
+    // Presence probe rides the same exec: everything after the last separator
+    // is the pane-command listing (see `merge_presence`).
+    cmd.push_str(tmux::pane_commands_command());
+    cmd.push(';');
     cmd
+}
+
+/// Attach each session's foreground pane command to its status slot. A session
+/// that exists on the server but has no stats file yet gets a fresh slot, so
+/// presence alone (a just-launched, still-idle agent) is visible to the
+/// poller. Sessions with several panes: the first listed pane wins.
+fn merge_presence(
+    mut slots: Vec<Option<ClaudeStatus>>,
+    sessions: &[String],
+    presence: &[(String, String)],
+) -> Vec<Option<ClaudeStatus>> {
+    for (i, session) in sessions.iter().enumerate().take(slots.len()) {
+        let cmd = presence
+            .iter()
+            .find(|(s, _)| s == session)
+            .map(|(_, c)| c.clone());
+        let Some(cmd) = cmd else { continue };
+        match &mut slots[i] {
+            Some(s) => s.pane_command = Some(cmd),
+            slot @ None => {
+                *slot = Some(ClaudeStatus {
+                    pane_command: Some(cmd),
+                    ..ClaudeStatus::default()
+                });
+            }
+        }
+    }
+    slots
 }
 
 /// Split the batch output back into one record per requested session. Missing
@@ -563,7 +600,12 @@ pub fn claude_status_batch(host: String, tmux_sessions: Vec<String>) -> Vec<Opti
         return absent();
     }
     match ssh::run_remote_capture(&host, &batch_read_command(&tmux_sessions)) {
-        Ok(cap) => parse_batch_output(&cap.stdout, n),
+        Ok(cap) => {
+            let slots = parse_batch_output(&cap.stdout, n);
+            // The presence listing is everything after the n-th separator.
+            let tail = cap.stdout.split(BATCH_SEP).nth(n).unwrap_or("");
+            merge_presence(slots, &tmux_sessions, &tmux::parse_pane_commands(tail))
+        }
         Err(_) => absent(),
     }
 }
@@ -576,7 +618,7 @@ pub fn claude_status_batch(host: String, tmux_sessions: Vec<String>) -> Vec<Opti
 /// only `ts`).
 #[tauri::command]
 pub fn claude_status_batch_local(tmux_sessions: Vec<String>) -> Vec<Option<ClaudeStatus>> {
-    tmux_sessions
+    let slots = tmux_sessions
         .iter()
         .map(|session| {
             if !tmux::is_valid_session_name(session) {
@@ -592,7 +634,8 @@ pub fn claude_status_batch_local(tmux_sessions: Vec<String>) -> Vec<Option<Claud
                 Some(s)
             }
         })
-        .collect()
+        .collect();
+    merge_presence(slots, &tmux_sessions, &tmux::local_pane_commands())
 }
 
 #[cfg(test)]
@@ -733,8 +776,36 @@ mod tests {
             cmd,
             "cat ~/.claude/'.terax/status-tmux-main.json' 2>/dev/null;printf '\\036';\
              printf '\\036';\
-             cat ~/.claude/'.terax/status-tmux-wt-obs-801.json' 2>/dev/null;printf '\\036';"
+             cat ~/.claude/'.terax/status-tmux-wt-obs-801.json' 2>/dev/null;printf '\\036';\
+             tmux list-panes -a -F '#{session_name}\t#{pane_current_command}' 2>/dev/null;"
         );
+    }
+
+    #[test]
+    fn merge_presence_attaches_commands_and_creates_presence_only_slots() {
+        let slots = vec![
+            Some(ClaudeStatus {
+                ts: Some(1.0),
+                ..ClaudeStatus::default()
+            }),
+            None,
+            None,
+        ];
+        let sessions = vec!["main".to_string(), "idle-agent".to_string(), "gone".to_string()];
+        let presence = vec![
+            ("main".to_string(), "2.1.201".to_string()),
+            ("idle-agent".to_string(), "2.1.201".to_string()),
+            ("unrelated".to_string(), "vim".to_string()),
+        ];
+        let out = merge_presence(slots, &sessions, &presence);
+        // Existing stats slot keeps its ts and gains the command.
+        assert_eq!(out[0].as_ref().unwrap().ts, Some(1.0));
+        assert_eq!(out[0].as_ref().unwrap().pane_command.as_deref(), Some("2.1.201"));
+        // No stats file yet, but the session lives: presence-only slot.
+        assert!(out[1].as_ref().unwrap().ts.is_none());
+        assert_eq!(out[1].as_ref().unwrap().pane_command.as_deref(), Some("2.1.201"));
+        // Session absent from the server stays None.
+        assert!(out[2].is_none());
     }
 
     #[test]

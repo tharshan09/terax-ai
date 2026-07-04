@@ -1,24 +1,25 @@
 import type { Tab } from "@/modules/tabs";
-import { isManagedSession } from "@/modules/terminal/lib/managedTmux";
 import { isLeaf, type PaneNode } from "@/modules/terminal/lib/panes";
 
 /**
  * Agents inside tmux emit no OSC hook markers Terax can see: over SSH the
- * remote bootstrap only forwards OSC 7, and a local managed (restart-safe)
- * session's markers are swallowed by tmux itself. For both, the per-tab
- * activity indicator is derived from the Claude stats file the statusLine
- * wrapper writes on the host while Claude renders. This module is the pure
- * core: which leaves to poll, and how observed stats timestamps map onto
- * agentStore transitions. The polling component stays thin.
+ * remote bootstrap only forwards OSC 7, and a local tmux session's markers are
+ * swallowed by tmux itself. For both, the per-tab activity indicator and the
+ * Mission Control roster are derived from two signals riding one batched exec
+ * per host: the Claude stats file the statusLine wrapper writes while Claude
+ * renders, and the session's foreground pane command. This module is the pure
+ * core: which leaves to poll, and how the observed signals map onto agentStore
+ * transitions. The polling component stays thin.
  *
- * Working is inferred purely from a CHANGED `ts` between polls: the wrapper
- * only rewrites the file while Claude renders, so a moving `ts` means active
- * work. This is immune to host/local clock skew (no wall-clock comparison) and
- * cannot mistake a just-finished session for a live one. The cost is a short
- * warm-up: a genuinely working agent is picked up on the second non-null poll.
- * The indicator only ever shows working (spinner) or nothing; "needs input"
- * detection for polled leaves is a deliberate follow-up (the statusLine
- * carries no such signal).
+ * PRESENCE (pane command names a known agent) keeps a session in the store —
+ * an idle Claude sitting at its prompt stays listed in Mission Control, it
+ * just shows no spinner. WORKING is inferred purely from a CHANGED `ts`
+ * between polls: the wrapper only rewrites the file while Claude renders, so
+ * a moving `ts` means active work. This is immune to host/local clock skew
+ * (no wall-clock comparison). A moving `ts` also keeps a session alive when
+ * presence detection misses (unknown process name), so the spinner never
+ * regresses below the old behavior. "needs input" detection for polled leaves
+ * is a deliberate follow-up (neither signal carries it).
  */
 
 /** Which poller flavor drives a leaf; doubles as the agentStore origin so the
@@ -45,9 +46,9 @@ export const WORKING_HOLD_MS = 7000;
 
 /** Every pollable leaf across all terminal tabs, cold (restored, unmounted)
  *  tabs included: their session may be live, and the indicator reads purely
- *  from tab state. SSH tabs contribute every tmux-bound leaf; local tabs
- *  contribute ONLY managed (`terax-rs-`) leaves — a plain local tab stays on
- *  the OSC detector path, and a user's own tmux tab is left alone. */
+ *  from tab state. SSH and local tabs contribute every tmux-bound leaf
+ *  (managed or the user's own — tmux swallows OSC markers for both); a plain
+ *  local tab stays on the OSC detector path. */
 export function collectSshAgentLeaves(tabs: Tab[]): SshAgentLeaf[] {
   const out: SshAgentLeaf[] = [];
   for (const tab of tabs) {
@@ -70,8 +71,7 @@ function collectLeaves(
 ): void {
   if (isLeaf(node)) {
     const session = node.tmuxSession;
-    const wanted = origin === "ssh" ? !!session : isManagedSession(session);
-    if (session && wanted) {
+    if (session) {
       out.push({ leafId: node.id, tabId, host, session, origin });
     }
     return;
@@ -79,6 +79,19 @@ function collectLeaves(
   for (const child of node.children) {
     collectLeaves(child, tabId, host, origin, out);
   }
+}
+
+/** Known coding-agent CLIs by the foreground command tmux reports. Claude
+ *  Code's CLI names its process after its own version ("2.1.201"), so a
+ *  dotted version number IS the Claude signature. */
+const AGENT_COMMANDS = new Set(["claude", "codex", "gemini", "aider"]);
+
+export function agentFromPaneCommand(
+  cmd: string | null | undefined,
+): string | null {
+  if (!cmd) return null;
+  if (/^\d+\.\d+\.\d+/.test(cmd)) return "claude";
+  return AGENT_COMMANDS.has(cmd) ? cmd : null;
 }
 
 /** Group leaves per poll target (origin + host) so each SSH host is polled in
@@ -109,8 +122,15 @@ export type LeafAgentState = {
 };
 
 export type SshAgentAction =
-  | { kind: "start"; leafId: number; tabId: number; origin: PollOrigin }
+  | {
+      kind: "start";
+      leafId: number;
+      tabId: number;
+      origin: PollOrigin;
+      agent: string;
+    }
   | { kind: "working"; leafId: number }
+  | { kind: "idle"; leafId: number }
   | { kind: "finish"; leafId: number };
 
 export type SshAgentPlan = {
@@ -129,6 +149,7 @@ export type SshAgentPlan = {
 export function planHostAgentUpdates(
   leaves: SshAgentLeaf[],
   tsByLeaf: ReadonlyMap<number, number | null>,
+  agentByLeaf: ReadonlyMap<number, string | null>,
   prev: ReadonlyMap<number, LeafAgentState>,
   nowMs: number,
   oscOwned: ReadonlySet<number>,
@@ -143,6 +164,7 @@ export function planHostAgentUpdates(
     // its session (that would delete the OSC-owned entry).
     if (oscOwned.has(leaf.leafId)) continue;
 
+    const agent = agentByLeaf.get(leaf.leafId) ?? null;
     const ts = tsByLeaf.get(leaf.leafId) ?? null;
     const changed =
       ts !== null && before?.lastTs != null && ts !== before.lastTs;
@@ -152,18 +174,25 @@ export function planHostAgentUpdates(
       : (before?.workingUntilMs ?? 0);
     const working = nowMs < workingUntilMs;
 
+    // Presence keeps the session alive (idle at worst); a moving ts keeps it
+    // alive even when presence detection misses. Only both gone finishes it.
     let inStore = before?.inStore ?? false;
-    if (working) {
+    if (agent !== null || working) {
       if (!inStore) {
         actions.push({
           kind: "start",
           leafId: leaf.leafId,
           tabId: leaf.tabId,
           origin: leaf.origin,
+          agent: agent ?? "claude",
         });
         inStore = true;
       }
-      actions.push({ kind: "working", leafId: leaf.leafId });
+      actions.push(
+        working
+          ? { kind: "working", leafId: leaf.leafId }
+          : { kind: "idle", leafId: leaf.leafId },
+      );
     } else if (inStore) {
       actions.push({ kind: "finish", leafId: leaf.leafId });
       inStore = false;
