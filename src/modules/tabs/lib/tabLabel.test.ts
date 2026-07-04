@@ -52,4 +52,15 @@ describe("labelFor (terminal tabs)", () => {
       labelFor(terminalTab({ cwd: "~", tmuxSession: "main", customTitle: "Server" })),
     ).toBe("Server");
   });
+
+  it("keeps the cwd label for a managed (restart-safe) session, not the token", () => {
+    expect(
+      labelFor(
+        terminalTab({
+          cwd: "/Users/me/projects/trade-insight",
+          tmuxSession: "terax-rs-fe9da7a131d3",
+        }),
+      ),
+    ).toBe("trade-insight");
+  });
 });
