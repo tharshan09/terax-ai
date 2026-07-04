@@ -66,6 +66,18 @@ describe("buildAgentRows", () => {
     });
   });
 
+  it("blanks a managed restart-safe session name (implementation detail)", () => {
+    const tabs = [sshTab(7, 70, { tmuxSession: "terax-rs-abc123" })];
+    const rows = buildAgentRows(
+      sessionMap([session({ leafId: 70, tabId: 7 })]),
+      null,
+      tabs,
+    );
+    expect(rows[0].session).toBeNull();
+    // Everything else on the row stays intact.
+    expect(rows[0]).toMatchObject({ tabId: 7, cwd: "/home/u/proj" });
+  });
+
   it("orders waiting before working before idle, newest first in a bucket", () => {
     const rows = buildAgentRows(
       sessionMap([

@@ -41,12 +41,18 @@ describe("collectSshAgentLeaves", () => {
       }),
     ];
     expect(collectSshAgentLeaves(tabs)).toEqual([
-      { leafId: 10, tabId: 1, host: "claude", session: "main" },
-      { leafId: 12, tabId: 1, host: "claude", session: "wt-obs-801" },
+      { leafId: 10, tabId: 1, host: "claude", session: "main", origin: "ssh" },
+      {
+        leafId: 12,
+        tabId: 1,
+        host: "claude",
+        session: "wt-obs-801",
+        origin: "ssh",
+      },
     ]);
   });
 
-  it("ignores local tabs, non-terminal tabs, and ssh tabs without tmux", () => {
+  it("ignores plain local tabs, non-terminal tabs, and ssh tabs without tmux", () => {
     const tabs: Tab[] = [
       terminalTab({ id: 1, paneTree: { kind: "leaf", id: 10 } }),
       terminalTab({
@@ -59,6 +65,40 @@ describe("collectSshAgentLeaves", () => {
     expect(collectSshAgentLeaves(tabs)).toEqual([]);
   });
 
+  it("collects local MANAGED leaves but leaves user tmux tabs alone", () => {
+    const tabs: Tab[] = [
+      // Managed restart-safe tab: joins the poller (OSC markers are swallowed
+      // by tmux), even when cold.
+      terminalTab({
+        id: 1,
+        cold: true,
+        tmuxSession: "terax-rs-abc123",
+        paneTree: { kind: "leaf", id: 10, tmuxSession: "terax-rs-abc123" },
+      }),
+      // A user's own local tmux tab (Cmd+Shift+M): not ours to poll.
+      terminalTab({
+        id: 2,
+        tmuxSession: "roadmap",
+        paneTree: { kind: "leaf", id: 20, tmuxSession: "roadmap" },
+      }),
+      // WSL tabs never join the poller.
+      terminalTab({
+        id: 3,
+        workspace: { kind: "wsl", distro: "ubuntu" },
+        paneTree: { kind: "leaf", id: 30, tmuxSession: "terax-rs-zz" },
+      }),
+    ];
+    expect(collectSshAgentLeaves(tabs)).toEqual([
+      {
+        leafId: 10,
+        tabId: 1,
+        host: "local",
+        session: "terax-rs-abc123",
+        origin: "local-tmux",
+      },
+    ]);
+  });
+
   it("includes cold restored tabs: their remote session may be live", () => {
     const tabs: Tab[] = [
       terminalTab({
@@ -69,22 +109,47 @@ describe("collectSshAgentLeaves", () => {
       }),
     ];
     expect(collectSshAgentLeaves(tabs)).toEqual([
-      { leafId: 40, tabId: 4, host: "s1", session: "main" },
+      { leafId: 40, tabId: 4, host: "s1", session: "main", origin: "ssh" },
     ]);
   });
 });
 
 describe("groupLeavesByHost", () => {
-  it("buckets leaves by host preserving order", () => {
+  it("buckets leaves by origin+host preserving order", () => {
     const leaves: SshAgentLeaf[] = [
-      { leafId: 1, tabId: 1, host: "a", session: "s1" },
-      { leafId: 2, tabId: 2, host: "b", session: "s2" },
-      { leafId: 3, tabId: 3, host: "a", session: "s3" },
+      { leafId: 1, tabId: 1, host: "a", session: "s1", origin: "ssh" },
+      { leafId: 2, tabId: 2, host: "b", session: "s2", origin: "ssh" },
+      { leafId: 3, tabId: 3, host: "a", session: "s3", origin: "ssh" },
+      {
+        leafId: 4,
+        tabId: 4,
+        host: "local",
+        session: "terax-rs-x",
+        origin: "local-tmux",
+      },
     ];
     const grouped = groupLeavesByHost(leaves);
-    expect([...grouped.keys()]).toEqual(["a", "b"]);
-    expect(grouped.get("a")?.map((l) => l.leafId)).toEqual([1, 3]);
-    expect(grouped.get("b")?.map((l) => l.leafId)).toEqual([2]);
+    expect([...grouped.keys()]).toEqual(["ssh:a", "ssh:b", "local-tmux:local"]);
+    expect(grouped.get("ssh:a")?.map((l) => l.leafId)).toEqual([1, 3]);
+    expect(grouped.get("ssh:b")?.map((l) => l.leafId)).toEqual([2]);
+    expect(grouped.get("local-tmux:local")?.map((l) => l.leafId)).toEqual([4]);
+  });
+
+  it("keeps an SSH host literally named 'local' apart from the local group", () => {
+    const leaves: SshAgentLeaf[] = [
+      { leafId: 1, tabId: 1, host: "local", session: "s1", origin: "ssh" },
+      {
+        leafId: 2,
+        tabId: 2,
+        host: "local",
+        session: "terax-rs-x",
+        origin: "local-tmux",
+      },
+    ];
+    expect([...groupLeavesByHost(leaves).keys()]).toEqual([
+      "ssh:local",
+      "local-tmux:local",
+    ]);
   });
 });
 
@@ -97,6 +162,7 @@ const leaf = (leafId: number, tabId = 1): SshAgentLeaf => ({
   tabId,
   host: "claude",
   session: `s${leafId}`,
+  origin: "ssh",
 });
 
 const tsMap = (entries: [number, number | null][]) => new Map(entries);
@@ -134,10 +200,40 @@ describe("planHostAgentUpdates", () => {
       NONE,
     );
     expect(second.actions).toEqual([
-      { kind: "start", leafId: 10, tabId: 1 },
+      { kind: "start", leafId: 10, tabId: 1, origin: "ssh" },
       { kind: "working", leafId: 10 },
     ]);
     expect(second.state.get(10)?.inStore).toBe(true);
+  });
+
+  it("plumbs a local-tmux leaf's origin into its start action", () => {
+    const local: SshAgentLeaf = {
+      leafId: 10,
+      tabId: 1,
+      host: "local",
+      session: "terax-rs-abc",
+      origin: "local-tmux",
+    };
+    const first = planHostAgentUpdates(
+      [local],
+      tsMap([[10, NOW_SEC]]),
+      new Map(),
+      NOW,
+      NONE,
+    );
+    const second = planHostAgentUpdates(
+      [local],
+      tsMap([[10, NOW_SEC + 0.3]]),
+      first.state,
+      NOW + 3000,
+      NONE,
+    );
+    expect(second.actions[0]).toEqual({
+      kind: "start",
+      leafId: 10,
+      tabId: 1,
+      origin: "local-tmux",
+    });
   });
 
   it("detects working under heavy host clock skew (no wall-clock compare)", () => {

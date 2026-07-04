@@ -387,6 +387,7 @@ pub fn run() {
             claude::claude_statusline_enabled,
             claude::claude_status,
             claude::claude_status_batch,
+            claude::claude_status_batch_local,
             secrets::secrets_get,
             secrets::secrets_set,
             secrets::secrets_delete,

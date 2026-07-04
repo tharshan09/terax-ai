@@ -3,9 +3,11 @@ export type AgentStatus = "idle" | "working" | "waiting";
 export type AgentSource = "terminal" | "local";
 
 /** Which subsystem owns a terminal agent session. `osc` is the local OSC
- *  133/777 detector (AgentNotificationsBridge); `ssh` is the SSH stats poller.
- *  A leaf is driven by exactly one, so each backs off the other's sessions. */
-export type AgentOrigin = "osc" | "ssh";
+ *  133/777 detector (AgentNotificationsBridge); `ssh` and `local-tmux` are the
+ *  stats poller's two flavors (remote host vs. a local managed tmux session,
+ *  where tmux swallows the OSC markers). A leaf is driven by exactly one
+ *  subsystem, so each backs off the others' sessions. */
+export type AgentOrigin = "osc" | "ssh" | "local-tmux";
 
 export type AgentSignalKind =
   | "started"

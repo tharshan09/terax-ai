@@ -568,6 +568,33 @@ pub fn claude_status_batch(host: String, tmux_sessions: Vec<String>) -> Vec<Opti
     }
 }
 
+/// Local counterpart of [`claude_status_batch`] for managed (restart-safe) tmux
+/// sessions: the wrapper writes the same per-session stats file under the local
+/// `~/.claude/.terax` when Claude runs inside a local tmux session, so this is
+/// a plain aligned file read — no exec, no separator protocol. Like the SSH
+/// batch, a record carrying only a `ts` is kept (the activity poller consumes
+/// only `ts`).
+#[tauri::command]
+pub fn claude_status_batch_local(tmux_sessions: Vec<String>) -> Vec<Option<ClaudeStatus>> {
+    tmux_sessions
+        .iter()
+        .map(|session| {
+            if !tmux::is_valid_session_name(session) {
+                return None;
+            }
+            let path = terax_subdir().ok()?.join(format!("status-tmux-{session}.json"));
+            let raw = std::fs::read_to_string(path).ok()?;
+            let v: Value = serde_json::from_str(&raw).ok()?;
+            let s = build_status(&v);
+            if s.ts.is_none() && s.model.is_none() && s.context_pct.is_none() && s.cost_usd.is_none() {
+                None
+            } else {
+                Some(s)
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -708,6 +735,18 @@ mod tests {
              printf '\\036';\
              cat ~/.claude/'.terax/status-tmux-wt-obs-801.json' 2>/dev/null;printf '\\036';"
         );
+    }
+
+    #[test]
+    fn batch_local_rejects_hostile_names_without_touching_the_fs() {
+        // An invalid name must short-circuit to None before any path is built
+        // (the session name is spliced into a filename), keeping alignment.
+        let out = claude_status_batch_local(vec![
+            "../../../etc/passwd".to_string(),
+            "x'; rm -rf ~; '".to_string(),
+        ]);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(Option::is_none));
     }
 
     #[test]
