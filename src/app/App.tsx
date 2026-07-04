@@ -210,7 +210,12 @@ export default function App() {
   const activeLeafId = activeTerminalTab?.activeLeafId ?? null;
   const restartSafeSession = useMemo(
     () =>
-      activeTerminalTab
+      // Only a LOCAL tab can be restart-safe: a remote session that happens to
+      // carry the managed prefix must not make the badge promise "survives an
+      // app restart" for a host Terax does not manage.
+      activeTerminalTab &&
+      (!activeTerminalTab.workspace ||
+        activeTerminalTab.workspace.kind === "local")
         ? activeManagedSession(
             activeTerminalTab.paneTree,
             activeTerminalTab.activeLeafId,
@@ -949,7 +954,11 @@ export default function App() {
       "ai.askSelection": askFromSelection,
       "agent.focusAttention": () => {
         const from = activeTerminalTabRef.current?.activeLeafId ?? null;
-        const t = cycleWaitingTarget(useAgentStore.getState().sessions, from);
+        const t = cycleWaitingTarget(
+          useAgentStore.getState().sessions,
+          tabsRef.current,
+          from,
+        );
         if (t) activateAgentTarget(t.tabId, t.leafId);
       },
       "agent.overview": () => setMissionControlOpen((v) => !v),

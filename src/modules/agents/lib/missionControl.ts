@@ -150,16 +150,22 @@ export function filterAgentRows(rows: AgentRow[], query: string): AgentRow[] {
 
 /** The leaf/tab of the next waiting terminal agent AFTER `fromLeafId`, wrapping
  *  around, so the attention hotkey cycles through every waiting agent instead
- *  of pinning the most recent one. Null when none is waiting. */
+ *  of pinning the most recent one. Only leaves that still live in a tab are
+ *  candidates, and the target is the tab that CURRENTLY holds the leaf (same
+ *  rule as the overview rows) — a stale session.tabId would activate a dead
+ *  tab id and blank the tab area. Null when none is waiting. */
 export function cycleWaitingTarget(
   sessions: Record<number, AgentSession>,
+  tabs: Tab[],
   fromLeafId: number | null,
 ): { tabId: number; leafId: number } | null {
   const waiting = Object.values(sessions)
     .filter((s) => s.status === "waiting")
-    .sort((a, b) => (b.attentionSince ?? 0) - (a.attentionSince ?? 0));
+    .map((s) => ({ s, found: findTabAndLeaf(tabs, s.leafId) }))
+    .filter((w): w is { s: AgentSession; found: FoundLeaf } => !!w.found)
+    .sort((a, b) => (b.s.attentionSince ?? 0) - (a.s.attentionSince ?? 0));
   if (waiting.length === 0) return null;
-  const idx = waiting.findIndex((s) => s.leafId === fromLeafId);
+  const idx = waiting.findIndex((w) => w.s.leafId === fromLeafId);
   const next = waiting[(idx + 1) % waiting.length];
-  return { tabId: next.tabId, leafId: next.leafId };
+  return { tabId: next.found.tab.id, leafId: next.s.leafId };
 }

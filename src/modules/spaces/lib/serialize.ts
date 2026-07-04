@@ -173,9 +173,15 @@ function hydrateTab(
   switch (s.kind) {
     case "terminal": {
       const { tree, activeLeafId, firstLeafCwd } = hydrateTree(s.tree, allocId);
+      // Mirror labelFor: a managed restart-safe session's random name is
+      // noise, so a restored managed tab keeps the cwd-derived title instead
+      // of surfacing the raw terax-rs- token.
+      const sessionTitle = isManagedSession(s.tmuxSession)
+        ? undefined
+        : s.tmuxSession;
       const title =
         s.customTitle ??
-        s.tmuxSession ??
+        sessionTitle ??
         (firstLeafCwd ? basename(firstLeafCwd) : s.blocks ? "blocks" : "shell");
       // A managed (restart-safe) session is local by construction, but Local
       // is not persisted (absent == Local) and a workspace-less tab spawns on

@@ -192,22 +192,48 @@ describe("cycleWaitingTarget", () => {
     session({ leafId: 20, tabId: 2, status: "waiting", attentionSince: 200 }),
     session({ leafId: 30, tabId: 3, status: "working" }),
   ]);
+  const tabs = [sshTab(1, 10, {}), sshTab(2, 20, {}), sshTab(3, 30, {})];
 
   it("returns the most recent waiting agent when starting fresh", () => {
-    expect(cycleWaitingTarget(sessions, null)).toEqual({
+    expect(cycleWaitingTarget(sessions, tabs, null)).toEqual({
       tabId: 1,
       leafId: 10,
     });
   });
 
   it("advances to the next waiting agent and wraps around", () => {
-    expect(cycleWaitingTarget(sessions, 10)).toEqual({ tabId: 2, leafId: 20 });
-    expect(cycleWaitingTarget(sessions, 20)).toEqual({ tabId: 1, leafId: 10 });
+    expect(cycleWaitingTarget(sessions, tabs, 10)).toEqual({
+      tabId: 2,
+      leafId: 20,
+    });
+    expect(cycleWaitingTarget(sessions, tabs, 20)).toEqual({
+      tabId: 1,
+      leafId: 10,
+    });
   });
 
   it("returns null when nothing is waiting", () => {
     expect(
-      cycleWaitingTarget(sessionMap([session({ leafId: 1 })]), null),
+      cycleWaitingTarget(sessionMap([session({ leafId: 1 })]), tabs, null),
     ).toBeNull();
+  });
+
+  it("skips sessions whose leaf no longer lives in any tab", () => {
+    // Leaf 10's tab is gone: cycling must never target the dead tab id.
+    const live = [sshTab(2, 20, {})];
+    expect(cycleWaitingTarget(sessions, live, null)).toEqual({
+      tabId: 2,
+      leafId: 20,
+    });
+    expect(cycleWaitingTarget(sessions, [], null)).toBeNull();
+  });
+
+  it("targets the tab that currently holds the leaf, not the launch tab", () => {
+    // Session says tabId 1, but the pane moved to tab 8.
+    const moved = [sshTab(8, 10, {})];
+    expect(cycleWaitingTarget(sessions, moved, null)).toEqual({
+      tabId: 8,
+      leafId: 10,
+    });
   });
 });

@@ -17,6 +17,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useMemo, useState } from "react";
+import { isManagedSession } from "./lib/managedTmux";
 import {
   autoSessionName,
   isValidSessionName,
@@ -97,6 +98,10 @@ export function TmuxSessionSwitcher({
       .finally(() => void refresh(workspace));
   };
   const renameSession = (from: string, to: string) => {
+    // The terax-rs- prefix is reserved: renaming a user session INTO it would
+    // hand the session to the managed-session cleanup (boot reaper, tab-close
+    // kill).
+    if (isManagedSession(to)) return;
     void renameTmuxSession(workspace, from, to)
       .then(() => onRenamed?.(from, to))
       .catch((e) => console.error("[terax] tmux rename failed:", e))
@@ -104,11 +109,15 @@ export function TmuxSessionSwitcher({
   };
 
   // Attached first, then most-recently-attached (desc, never-attached last).
+  // Managed restart-safe sessions are plumbing behind their own tab, not
+  // something to attach twice; they never clutter the picker.
   const sorted = useMemo(() => {
-    return [...sessions].sort((a, b) => {
-      if (a.attached !== b.attached) return a.attached ? -1 : 1;
-      return (b.lastAttached ?? -1) - (a.lastAttached ?? -1);
-    });
+    return sessions
+      .filter((s) => !isManagedSession(s.name))
+      .sort((a, b) => {
+        if (a.attached !== b.attached) return a.attached ? -1 : 1;
+        return (b.lastAttached ?? -1) - (a.lastAttached ?? -1);
+      });
   }, [sessions]);
 
   const q = query.trim().toLowerCase();
@@ -119,7 +128,9 @@ export function TmuxSessionSwitcher({
 
   const newName =
     sanitizeSessionName(query) || autoSessionName(sessions.map((s) => s.name));
-  const canCreate = isValidSessionName(newName);
+  // The reserved prefix also blocks CREATE, so a user session can never be
+  // mistaken for (and reaped as) a managed one.
+  const canCreate = isValidSessionName(newName) && !isManagedSession(newName);
 
   // Cmd/Ctrl+Enter opens the highlighted session in a NEW tab instead of
   // attaching here. cmdk marks the active item with aria-selected; we stash the

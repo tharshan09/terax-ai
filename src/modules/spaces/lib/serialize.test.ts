@@ -152,6 +152,32 @@ describe("hydrateTabs", () => {
     expect(restored.workspace).toEqual({ kind: "local" });
   });
 
+  it("never titles a restored tab by its managed session token", () => {
+    // A cwd-less managed tab falls back to "shell", mirroring labelFor: the
+    // random terax-rs- token is noise, not a label.
+    const tabs: Tab[] = [
+      term({
+        paneTree: { kind: "leaf", id: 2, tmuxSession: "terax-rs-abc123" },
+        activeLeafId: 2,
+        tmuxSession: "terax-rs-abc123",
+      }),
+    ];
+    const [restored] = hydrateTabs(serializeTabs(tabs), "s1", counter());
+    if (restored.kind !== "terminal") throw new Error("expected terminal");
+    expect(restored.title).toBe("shell");
+    // A user tmux session still titles the tab (existing behavior).
+    const userTabs: Tab[] = [
+      term({
+        paneTree: { kind: "leaf", id: 2, cwd: "~", tmuxSession: "main" },
+        activeLeafId: 2,
+        tmuxSession: "main",
+      }),
+    ];
+    const [user] = hydrateTabs(serializeTabs(userTabs), "s1", counter());
+    if (user.kind !== "terminal") throw new Error("expected terminal");
+    expect(user.title).toBe("main");
+  });
+
   it("never overrides a persisted remote workspace, managed-looking or not", () => {
     const tabs: Tab[] = [
       term({

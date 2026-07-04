@@ -24,24 +24,41 @@ import { useAgentStore } from "../store/agentStore";
  *
  * Hosts are polled independently: a wedged host (socket alive but the command
  * hangs) only stalls its own leaves, never the others, and its own in-flight
- * guard stops a second exec from piling up behind it.
+ * guard stops a second exec from piling up behind it. A watchdog force-
+ * releases a group whose exec blocks for too many ticks, so even that host's
+ * own spinner cannot freeze until the SSH-level timeout bites.
  */
+/** Consecutive blocked ticks (≈3s each) before a group's in-flight exec is
+ *  declared wedged and force-released, so a hung remote command cannot freeze
+ *  a "working" spinner indefinitely. Deliberately a poller-side watchdog: a
+ *  timeout inside run_remote_capture would also cut off legitimately slow
+ *  git/fs operations that share that path. */
+const WATCHDOG_STUCK_TICKS = 10;
+
 export function SshAgentActivityPoller({ tabs }: { tabs: Tab[] }) {
   const enabled = useClaudeStatsStore((s) => s.enabled) === true;
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
-  const stateRef = useRef<Map<number, LeafAgentState>>(new Map());
-  const inFlightHostsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
-    const state = stateRef.current;
-    const inFlight = inFlightHostsRef.current;
+    // All tracking is effect-local: a torn-down effect's late completion must
+    // never release or mutate a successor effect's guards (a shared ref's
+    // `finally` did exactly that on a rapid pref toggle).
+    const state = new Map<number, LeafAgentState>();
+    const inFlight = new Set<string>();
+    // Watchdog bookkeeping per poll group: how many ticks its exec has been
+    // blocking, and an epoch that invalidates a force-released exec's late
+    // completion (the wedged invoke may still resolve minutes later).
+    const stuckTicks = new Map<string, number>();
+    const epochs = new Map<string, number>();
 
     const pollHost = async (groupKey: string, hostLeaves: SshAgentLeaf[]) => {
       if (inFlight.has(groupKey)) return;
       inFlight.add(groupKey);
+      const epoch = epochs.get(groupKey) ?? 0;
+      const fresh = () => (epochs.get(groupKey) ?? 0) === epoch;
       try {
         const { host, origin } = hostLeaves[0];
         const sessions = [...new Set(hostLeaves.map((l) => l.session))];
@@ -59,7 +76,7 @@ export function SshAgentActivityPoller({ tabs }: { tabs: Tab[] }) {
         } catch {
           statuses = [];
         }
-        if (cancelled) return;
+        if (cancelled || !fresh()) return;
         const tsBySession = new Map(
           sessions.map((s, i) => [s, statuses[i]?.ts ?? null] as const),
         );
@@ -79,8 +96,28 @@ export function SshAgentActivityPoller({ tabs }: { tabs: Tab[] }) {
         for (const [leafId, s] of next) state.set(leafId, s);
         applyActions(actions);
       } finally {
-        inFlight.delete(groupKey);
+        // After a watchdog force-release the slot may already belong to a new
+        // exec; only the exec that still owns its epoch may free the guard.
+        if (fresh()) inFlight.delete(groupKey);
       }
+    };
+
+    // A group whose exec has been blocking for WATCHDOG_STUCK_TICKS ticks is
+    // wedged (socket alive, command hung): release its sessions so the spinner
+    // dies with the host, bump the epoch so the hung exec's eventual return is
+    // discarded, and free the guard so the next tick can try again.
+    const releaseWedged = (groupKey: string, hostLeaves: SshAgentLeaf[]) => {
+      epochs.set(groupKey, (epochs.get(groupKey) ?? 0) + 1);
+      inFlight.delete(groupKey);
+      stuckTicks.delete(groupKey);
+      const finishes: SshAgentAction[] = [];
+      for (const l of hostLeaves) {
+        if (state.get(l.leafId)?.inStore) {
+          finishes.push({ kind: "finish", leafId: l.leafId });
+        }
+        state.delete(l.leafId);
+      }
+      applyActions(finishes);
     };
 
     const tick = () => {
@@ -92,6 +129,15 @@ export function SshAgentActivityPoller({ tabs }: { tabs: Tab[] }) {
         if (!present.has(leafId)) state.delete(leafId);
       }
       for (const [groupKey, hostLeaves] of groupLeavesByHost(leaves)) {
+        if (inFlight.has(groupKey)) {
+          const blocked = (stuckTicks.get(groupKey) ?? 0) + 1;
+          stuckTicks.set(groupKey, blocked);
+          if (blocked >= WATCHDOG_STUCK_TICKS) {
+            releaseWedged(groupKey, hostLeaves);
+          }
+          continue;
+        }
+        stuckTicks.delete(groupKey);
         void pollHost(groupKey, hostLeaves);
       }
     };
