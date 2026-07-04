@@ -3,6 +3,7 @@ import {
   collectManagedSessions,
   isManagedSession,
   newManagedSession,
+  orphanedManagedSessions,
   removedManagedSessions,
 } from "./managedTmux";
 import type { PaneNode } from "./panes";
@@ -93,5 +94,35 @@ describe("removedManagedSessions", () => {
   it("returns nothing when no managed session was removed", () => {
     const plain: PaneNode = { kind: "leaf", id: 1, tmuxSession: "main" };
     expect(removedManagedSessions(plain, null)).toEqual([]);
+  });
+});
+
+describe("orphanedManagedSessions", () => {
+  it("selects only unreferenced managed sessions, never user sessions", () => {
+    const existing = [
+      "terax-rs-live",
+      "terax-rs-leak1",
+      "terax-rs-leak2",
+      "roadmap",
+      "test",
+    ];
+    const referenced = new Set(["terax-rs-live"]);
+    expect(orphanedManagedSessions(existing, referenced)).toEqual([
+      "terax-rs-leak1",
+      "terax-rs-leak2",
+    ]);
+  });
+
+  it("reaps every managed session when nothing is referenced", () => {
+    expect(orphanedManagedSessions(["terax-rs-a", "main"], new Set())).toEqual([
+      "terax-rs-a",
+    ]);
+  });
+
+  it("reaps nothing when everything is referenced or unmanaged", () => {
+    const referenced = new Set(["terax-rs-a", "terax-rs-b"]);
+    expect(
+      orphanedManagedSessions(["terax-rs-a", "terax-rs-b", "s1"], referenced),
+    ).toEqual([]);
   });
 });

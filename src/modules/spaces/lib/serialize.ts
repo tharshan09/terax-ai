@@ -12,7 +12,11 @@ import type {
   Tab,
   TerminalTab,
 } from "@/modules/tabs/lib/useTabs";
-import type { WorkspaceEnv } from "@/modules/workspace";
+import {
+  collectManagedSessions,
+  isManagedSession,
+} from "@/modules/terminal/lib/managedTmux";
+import { LOCAL_WORKSPACE, type WorkspaceEnv } from "@/modules/workspace";
 
 export type SerializedNode =
   | { kind: "leaf"; cwd?: string; active?: boolean; tmuxSession?: string }
@@ -173,6 +177,14 @@ function hydrateTab(
         s.customTitle ??
         s.tmuxSession ??
         (firstLeafCwd ? basename(firstLeafCwd) : s.blocks ? "blocks" : "shell");
+      // A managed (restart-safe) session is local by construction, but Local
+      // is not persisted (absent == Local) and a workspace-less tab spawns on
+      // the AMBIENT env at mount — under an SSH/WSL env the reattach would
+      // recreate the session on the remote host. Re-pin it explicitly.
+      const managed =
+        !s.workspace &&
+        (isManagedSession(s.tmuxSession) ||
+          collectManagedSessions(tree).length > 0);
       return {
         id: allocId(),
         kind: "terminal",
@@ -185,6 +197,7 @@ function hydrateTab(
         ...(s.blocks && { blocks: true }),
         ...(s.customTitle !== undefined && { customTitle: s.customTitle }),
         ...(s.workspace && { workspace: s.workspace }),
+        ...(managed && { workspace: LOCAL_WORKSPACE }),
         ...(s.tmuxSession !== undefined && { tmuxSession: s.tmuxSession }),
       } satisfies TerminalTab;
     }

@@ -132,6 +132,40 @@ describe("hydrateTabs", () => {
     expect(leaf.kind === "leaf" && leaf.tmuxSession).toBe("main");
   });
 
+  it("re-pins a restored managed tab to the LOCAL workspace", () => {
+    // Local is not persisted, but a managed session must never spawn on the
+    // ambient env at mount (it could be SSH by then) — hydrate pins it back.
+    const tabs: Tab[] = [
+      term({
+        paneTree: {
+          kind: "leaf",
+          id: 2,
+          cwd: "/a",
+          tmuxSession: "terax-rs-abc123",
+        },
+        activeLeafId: 2,
+        tmuxSession: "terax-rs-abc123",
+      }),
+    ];
+    const [restored] = hydrateTabs(serializeTabs(tabs), "s1", counter());
+    if (restored.kind !== "terminal") throw new Error("expected terminal");
+    expect(restored.workspace).toEqual({ kind: "local" });
+  });
+
+  it("never overrides a persisted remote workspace, managed-looking or not", () => {
+    const tabs: Tab[] = [
+      term({
+        paneTree: { kind: "leaf", id: 2, tmuxSession: "terax-rs-zz" },
+        activeLeafId: 2,
+        tmuxSession: "terax-rs-zz",
+        workspace: { kind: "ssh", host: "box" },
+      }),
+    ];
+    const [restored] = hydrateTabs(serializeTabs(tabs), "s1", counter());
+    if (restored.kind !== "terminal") throw new Error("expected terminal");
+    expect(restored.workspace).toEqual({ kind: "ssh", host: "box" });
+  });
+
   it("allocates fresh, unique, monotonic ids across all tabs and leaves", () => {
     const tree: PaneNode = {
       kind: "split",

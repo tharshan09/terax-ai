@@ -1,4 +1,6 @@
+import { LOCAL_WORKSPACE } from "@/modules/workspace";
 import { isLeaf, type PaneNode } from "./panes";
+import { killTmuxSession, listTmuxSessions } from "./tmux";
 
 /**
  * Restart-safe local terminals (opt-in). When the preference is on, a new local
@@ -66,4 +68,38 @@ export function removedManagedSessions(
 ): string[] {
   const remaining = new Set(after ? collectManagedSessions(after) : []);
   return collectManagedSessions(before).filter((s) => !remaining.has(s));
+}
+
+/** The managed sessions in `existing` that no restored leaf references: dead
+ *  weight from a path that unbound a session without killing it (picker
+ *  switch-away, workspace switch, an in-pane `Ctrl-b d` detach). Pure core of
+ *  the boot reaper. */
+export function orphanedManagedSessions(
+  existing: readonly string[],
+  referenced: ReadonlySet<string>,
+): string[] {
+  return existing.filter((s) => isManagedSession(s) && !referenced.has(s));
+}
+
+/** Kill every LOCAL managed tmux session that no restored tab references.
+ *  Runs once at boot, after spaces hydration: whatever legitimately survives a
+ *  restart is exactly the set of sessions the restored pane trees still name,
+ *  so anything else with our prefix is a leak — one sweep covers every orphan
+ *  path without ever racing a live, still-referenced agent. A user's own tmux
+ *  sessions never match the prefix. Errors are swallowed: no tmux installed
+ *  (or none running) simply means nothing to reap. */
+export async function reapOrphanedManagedSessions(
+  referenced: ReadonlySet<string>,
+): Promise<void> {
+  let names: string[];
+  try {
+    names = (await listTmuxSessions(LOCAL_WORKSPACE)).map((s) => s.name);
+  } catch {
+    return;
+  }
+  for (const name of orphanedManagedSessions(names, referenced)) {
+    void killTmuxSession(LOCAL_WORKSPACE, name).catch((e) =>
+      console.error("[terax] managed session reap failed:", e),
+    );
+  }
 }
