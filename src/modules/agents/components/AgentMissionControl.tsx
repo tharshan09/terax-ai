@@ -2,6 +2,7 @@ import {
   Command,
   CommandDialog,
   CommandEmpty,
+  CommandGroup,
   CommandInput,
   CommandItem,
   CommandList,
@@ -17,7 +18,6 @@ import {
   type AgentRow,
   buildAgentRows,
   filterAgentRows,
-  STATUS_LABEL,
 } from "../lib/missionControl";
 import type { AgentSession, AgentStatus } from "../lib/types";
 import { useAgentStore } from "../store/agentStore";
@@ -48,16 +48,16 @@ function elapsed(fromMs: number, nowMs: number): string {
   return h < 24 ? `${h}h` : `${Math.floor(h / 24)}d`;
 }
 
-function StatusBadge({
+/** Right-hand meta of a row. The status GROUP already names the state, so the
+ *  row only carries the liveness cue (spinner / pulse) and the time in that
+ *  state — no repeated status word. */
+function StatusMeta({
   status,
   elapsed,
 }: {
   status: AgentStatus;
-  /** Time in the current state, rendered inline ("working · 45s") so the
-   *  number is never a floating, unlabeled figure. */
   elapsed: string | null;
 }) {
-  const suffix = elapsed ? ` · ${elapsed}` : "";
   if (status === "working") {
     return (
       <span className="flex items-center gap-1.5 text-[11px] tabular-nums text-muted-foreground">
@@ -66,8 +66,7 @@ function StatusBadge({
           size={12}
           className="animate-spin text-primary"
         />
-        {STATUS_LABEL.working}
-        {suffix}
+        {elapsed}
       </span>
     );
   }
@@ -75,15 +74,13 @@ function StatusBadge({
     return (
       <span className="flex items-center gap-1.5 text-[11px] font-medium tabular-nums text-primary">
         <span className="size-1.5 animate-pulse rounded-full bg-primary" />
-        {STATUS_LABEL.waiting}
-        {suffix}
+        {elapsed}
       </span>
     );
   }
   return (
-    <span className="text-[11px] tabular-nums text-muted-foreground/70">
-      {STATUS_LABEL.idle}
-      {suffix}
+    <span className="text-[11px] tabular-nums text-muted-foreground/60">
+      {elapsed}
     </span>
   );
 }
@@ -113,36 +110,37 @@ function AgentRowItem({
 }) {
   const sub = subtitle(row);
   return (
-    <CommandItem value={row.key} onSelect={onRun} className="gap-2.5 py-2">
-      <AgentIcon agent={row.agent} size={16} className="shrink-0" />
-      <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex items-center gap-2">
-          <span className="truncate text-[13px] text-foreground">
-            {row.title}
-          </span>
-          <span className="shrink-0 text-[11px] text-muted-foreground/70">
-            {displayAgent(row.agent)}
-          </span>
-        </div>
-        {sub ? (
-          <span className="truncate text-[11px] text-muted-foreground">
-            {sub}
-          </span>
-        ) : null}
-      </div>
-      <div className="flex shrink-0 items-center">
-        <StatusBadge
-          status={row.status}
-          elapsed={
-            row.startedAt > 0
-              ? elapsed(row.attentionSince ?? row.startedAt, now)
-              : null
-          }
-        />
-      </div>
+    <CommandItem
+      value={row.key}
+      onSelect={onRun}
+      title={row.tabId !== null ? `Jump to ${row.title}` : undefined}
+      className="group gap-2 text-[12.5px]"
+    >
+      <AgentIcon agent={row.agent} size={15} className="shrink-0" />
+      <span className="shrink-0 truncate text-foreground">{row.title}</span>
+      <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground/70">
+        {displayAgent(row.agent)}
+        {sub ? ` · ${sub}` : ""}
+      </span>
+      <StatusMeta
+        status={row.status}
+        elapsed={
+          row.startedAt > 0
+            ? elapsed(row.attentionSince ?? row.startedAt, now)
+            : null
+        }
+      />
     </CommandItem>
   );
 }
+
+// Group order mirrors the row sort: the bucket the user most likely came for
+// sits on top.
+const GROUPS: Array<{ status: AgentStatus; heading: string }> = [
+  { status: "waiting", heading: "Needs input" },
+  { status: "working", heading: "Working" },
+  { status: "idle", heading: "Idle" },
+];
 
 export function AgentMissionControl({
   open,
@@ -194,45 +192,73 @@ export function AgentMissionControl({
       onOpenChange={onOpenChange}
       title="Agent mission control"
       description="Jump to any running agent."
-      className="top-1/2 w-[min(640px,calc(100vw-32px))] -translate-y-1/2"
+      className="w-[min(560px,calc(100vw-32px))]"
     >
       <Command shouldFilter={false} loop>
-        <div className="flex items-center gap-2 px-3 pt-2.5 pb-0.5">
-          <span className="text-[13px] text-foreground">Agents</span>
-          <span className="rounded-full bg-accent px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">
-            {rows.length}
+        <div className="flex items-center justify-between px-3 pt-2.5 pb-1">
+          <span className="text-xs font-medium text-muted-foreground">
+            {rows.length === 1 ? "1 agent" : `${rows.length} agents`}
           </span>
           {waitingCount > 0 ? (
-            <span className="flex items-center gap-1 text-[11px] font-medium text-primary">
-              <span className="size-1.5 rounded-full bg-primary" />
-              {waitingCount} waiting
+            <span className="flex items-center gap-1.5 text-[11px] font-medium text-primary">
+              <span className="size-1.5 animate-pulse rounded-full bg-primary" />
+              {waitingCount} need{waitingCount === 1 ? "s" : ""} input
             </span>
           ) : null}
         </div>
         <CommandInput
           value={query}
           onValueChange={setQuery}
-          placeholder="Filter agents by name, host, session, path..."
+          placeholder="Filter by name, host, or path..."
           autoFocus
         />
-        <ScrollArea className="max-h-[420px]">
-          <CommandList className="max-h-none overflow-visible pr-2">
+        <ScrollArea className="max-h-[360px]">
+          <CommandList className="max-h-none overflow-visible">
             <CommandEmpty className="px-3 py-8 text-center text-xs text-muted-foreground">
               {rows.length === 0
                 ? "No running agents. Start a coding agent to track it here."
                 : "No agents match your filter."}
             </CommandEmpty>
-            {filtered.map((row) => (
-              <AgentRowItem
-                key={row.key}
-                row={row}
-                now={now}
-                onRun={() => run(row)}
-              />
-            ))}
+            {GROUPS.map(({ status, heading }) => {
+              const group = filtered.filter((r) => r.status === status);
+              if (group.length === 0) return null;
+              return (
+                <CommandGroup key={status} heading={heading}>
+                  {group.map((row) => (
+                    <AgentRowItem
+                      key={row.key}
+                      row={row}
+                      now={now}
+                      onRun={() => run(row)}
+                    />
+                  ))}
+                </CommandGroup>
+              );
+            })}
           </CommandList>
         </ScrollArea>
+        <div className="flex items-center justify-between border-t border-border/50 px-3 py-2 text-[11px] text-muted-foreground/70">
+          <span className="flex items-center gap-1.5">
+            <Kbd>Enter</Kbd> jump to agent
+          </span>
+          <span className="flex items-center gap-1.5">
+            <Kbd>{MOD}+Shift+A</Kbd> next waiting
+          </span>
+        </div>
       </Command>
     </CommandDialog>
+  );
+}
+
+const isMac =
+  typeof navigator !== "undefined" && navigator.userAgent.includes("Mac");
+const MOD = isMac ? "Cmd" : "Ctrl";
+
+// Mirrors the tmux switcher's Kbd so the two pickers read as one family.
+function Kbd({ children }: { children: React.ReactNode }) {
+  return (
+    <kbd className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+      {children}
+    </kbd>
   );
 }
