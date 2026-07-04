@@ -70,11 +70,14 @@ export async function openPty(
     close: async () => {
       if (closed) return;
       closed = true;
-      try {
-        await invoke("pty_close", { id });
-      } finally {
-        releaseHandlers();
-      }
+      // Release handlers BEFORE closing: pty_close kills the process, which
+      // emits an exit event mid-close. If onExit were still wired, this
+      // deliberate close would fire handleLeafExit and wrongly close the tab
+      // (a respawn/reattach closes the old PTY on purpose). Local tabs have no
+      // isSshDisconnect guard to catch it, so switching a local tmux session
+      // used to close the terminal.
+      releaseHandlers();
+      await invoke("pty_close", { id });
     },
   };
 }
