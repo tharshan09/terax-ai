@@ -153,7 +153,7 @@ fn build_ssh(
     // remote login shell), so neither script needs extra quoting.
     match tmux_session {
         Some(session) => {
-            cmd.arg(remote_tmux_command(session));
+            cmd.arg(tmux_attach_command(session));
         }
         None => {
             cmd.arg(REMOTE_SHELL_INIT);
@@ -163,12 +163,16 @@ fn build_ssh(
     Ok(cmd)
 }
 
-/// Remote command that attaches to, or creates, `session` in tmux. `session` is
-/// allowlist-validated upstream (`[A-Za-z0-9_-]`), so single-quoting is
-/// injection-safe with no escaping. The OSC 7 rc bootstrap is intentionally
-/// skipped: tmux runs its own shells and does not reliably propagate it, so cwd
-/// tracking inside tmux is best-effort and simply absent rather than wrong.
-fn remote_tmux_command(session: &str) -> String {
+/// Login-shell command that attaches to, or creates, `session` in tmux. Used by
+/// both the SSH path (over the remote login shell) and the local path (through
+/// `$SHELL -l`), so `tmux` is resolved against the full interactive PATH: a
+/// GUI-launched macOS app otherwise gets a minimal PATH that misses Homebrew and
+/// a bare `tmux` fails to spawn. `session` is allowlist-validated upstream
+/// (`[A-Za-z0-9_-]`), so single-quoting is injection-safe with no escaping. The
+/// OSC 7 rc bootstrap is intentionally skipped: tmux runs its own shells and
+/// does not reliably propagate it, so cwd tracking inside tmux is best-effort
+/// and simply absent rather than wrong.
+fn tmux_attach_command(session: &str) -> String {
     format!("exec tmux new-session -A -s '{session}'")
 }
 
@@ -387,14 +391,18 @@ mod unix {
         tmux_session: Option<&str>,
     ) -> Result<CommandBuilder, String> {
         if let Some(session) = tmux_session {
-            // Attach-or-create the session directly. tmux runs the user's login
-            // shell inside, without our OSC 7/133 hooks, so cwd tracking in a
-            // tmux tab is best-effort (absent) rather than wrong.
-            let mut cmd = CommandBuilder::new("tmux");
-            cmd.arg("new-session");
-            cmd.arg("-A");
-            cmd.arg("-s");
-            cmd.arg(session);
+            // Attach-or-create the session THROUGH the user's login shell, so
+            // `tmux` is resolved against the full interactive PATH. A GUI
+            // (Finder/Dock) launch gives the app only a minimal PATH that misses
+            // Homebrew, so `CommandBuilder::new("tmux")` fails to spawn. `exec`
+            // replaces the shell with tmux (no lingering wrapper). tmux runs the
+            // user's login shell inside, without our OSC 7/133 hooks, so cwd
+            // tracking in a tmux tab is best-effort (absent) rather than wrong.
+            let (_shell, shell_path) = Shell::resolve(shell_override);
+            let mut cmd = CommandBuilder::new(&shell_path);
+            cmd.arg("-l");
+            cmd.arg("-c");
+            cmd.arg(super::tmux_attach_command(session));
             super::apply_common(&mut cmd, cwd, blocks);
             return Ok(cmd);
         }
@@ -1210,7 +1218,7 @@ fn which_in_path(name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{remote_tmux_command, sanitize_shell_override, validate_tmux_session};
+    use super::{sanitize_shell_override, tmux_attach_command, validate_tmux_session};
 
     #[test]
     fn rejects_non_enumerated_override() {
@@ -1261,15 +1269,39 @@ mod tests {
     }
 
     #[test]
-    fn remote_tmux_command_single_quotes_the_name() {
+    fn tmux_attach_command_single_quotes_the_name() {
         assert_eq!(
-            remote_tmux_command("main"),
+            tmux_attach_command("main"),
             "exec tmux new-session -A -s 'main'"
         );
         assert_eq!(
-            remote_tmux_command("review-pr_2"),
+            tmux_attach_command("review-pr_2"),
             "exec tmux new-session -A -s 'review-pr_2'"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_tmux_tab_spawns_through_a_login_shell() {
+        // Regression: a bare `tmux` binary is resolved against the process PATH,
+        // which is the minimal launchd PATH for a Finder/Dock-launched app and
+        // misses Homebrew. The tmux tab must go through `$SHELL -l -c` so tmux
+        // is found (mirrors the picker + the SSH path).
+        let cmd = super::unix::build(None, false, None, Some("main")).unwrap();
+        let argv: Vec<String> = cmd
+            .get_argv()
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        // shell -l -c "exec tmux new-session -A -s 'main'"
+        assert!(argv.iter().any(|a| a == "-l"), "must be a login shell: {argv:?}");
+        assert!(argv.iter().any(|a| a == "-c"));
+        assert!(
+            argv.iter().any(|a| a == "exec tmux new-session -A -s 'main'"),
+            "must exec tmux through the shell: {argv:?}"
+        );
+        // The bare-binary form that caused the bug must be gone.
+        assert_ne!(argv.first().map(String::as_str), Some("tmux"));
     }
 
     #[test]
