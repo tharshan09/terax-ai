@@ -360,11 +360,14 @@ pub struct ClaudeStatus {
     pub pane_command: Option<String>,
 }
 
-/// Read the stats the wrapper wrote for the given tab. Local reads the per-PTY
-/// file; SSH+tmux reads the remote per-session file over the ControlMaster (the
-/// PTY id can't reach the remote tmux pane, so the session name is the key).
-/// Returns `None` when nothing has been written (no Claude session, stats not
-/// enabled, or - over SSH - no tmux session bound / master down).
+/// Read the stats the wrapper wrote for the given tab. Local reads the
+/// per-session file when the tab runs inside tmux (the tmux server strips
+/// `TERAX_PTY_ID` from the pane env, so the wrapper only writes the session
+/// key there - exactly like over SSH), falling back to the per-PTY file for a
+/// plain shell; SSH+tmux reads the remote per-session file over the
+/// ControlMaster. Returns `None` when nothing has been written (no Claude
+/// session, stats not enabled, or - over SSH - no tmux session bound /
+/// master down).
 #[tauri::command]
 pub fn claude_status(
     pty_id: u32,
@@ -373,12 +376,24 @@ pub fn claude_status(
 ) -> Option<ClaudeStatus> {
     match WorkspaceEnv::from_option(workspace) {
         WorkspaceEnv::Ssh { host } => status_ssh(&host, tmux_session.as_deref()),
-        _ => status_local(pty_id),
+        _ => status_local(pty_id, tmux_session.as_deref()),
     }
 }
 
-fn status_local(pty_id: u32) -> Option<ClaudeStatus> {
-    let path = terax_subdir().ok()?.join(format!("status-{pty_id}.json"));
+fn status_local(pty_id: u32, tmux_session: Option<&str>) -> Option<ClaudeStatus> {
+    if let Some(session) = tmux_session {
+        // Defense in depth: the name is spliced into a filename.
+        if tmux::is_valid_session_name(session) {
+            if let Some(status) = read_local_status(&format!("status-tmux-{session}.json")) {
+                return Some(status);
+            }
+        }
+    }
+    read_local_status(&format!("status-{pty_id}.json"))
+}
+
+fn read_local_status(file: &str) -> Option<ClaudeStatus> {
+    let path = terax_subdir().ok()?.join(file);
     let content = std::fs::read_to_string(path).ok()?;
     let v: Value = serde_json::from_str(&content).ok()?;
     status_from_value(&v)
