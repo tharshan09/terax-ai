@@ -1,5 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
-import { currentWorkspaceEnv, type WorkspaceEnv } from "@/modules/workspace";
+import {
+  currentWorkspaceEnv,
+  LOCAL_WORKSPACE,
+  type WorkspaceEnv,
+} from "@/modules/workspace";
 
 export type TmuxSession = {
   name: string;
@@ -131,4 +135,66 @@ export function isCurrentTmuxTarget(
     current.activeLeafId === expected.leafId &&
     current.tmuxSession === expected.session
   );
+}
+
+/** The tmux-bound terminal leaf whose live `pane_current_path` the explorer and
+ *  source-control should follow. */
+export type TmuxPollTarget = {
+  workspace: WorkspaceEnv;
+  session: string;
+  leafId: number;
+  tabId: number;
+};
+
+type PollTab = {
+  kind: string;
+  id: number;
+  workspace?: WorkspaceEnv;
+  tmuxSession?: string;
+  activeLeafId?: number | null;
+};
+
+/** Pick the terminal leaf the tmux pane-cwd poll should track. tmux swallows the
+ *  inner shell's OSC 7, so a `cd` inside tmux only reaches us via
+ *  `pane_current_path`; this is as true for local restart-safe tmux tabs as for
+ *  SSH ones (a plain shell keeps its OSC 7 path, so it isn't polled). Prefers the
+ *  active tmux terminal; failing that, only on an SSH workspace (where the cwd
+ *  can't be recovered off a non-terminal tab) falls back to a background terminal
+ *  on the ambient host so source-control / history don't snap back to "No
+ *  repository". WSL is intentionally excluded (no managed-session path there). */
+export function pickTmuxPollTarget(
+  active: PollTab | null | undefined,
+  tabs: readonly PollTab[],
+  workspaceEnv: WorkspaceEnv,
+): TmuxPollTarget | null {
+  const fromTab = (t: PollTab | null | undefined): TmuxPollTarget | null => {
+    if (t?.kind !== "terminal" || !t.tmuxSession || t.activeLeafId == null)
+      return null;
+    const workspace = t.workspace ?? LOCAL_WORKSPACE;
+    if (workspace.kind !== "ssh" && workspace.kind !== "local") return null;
+    return {
+      workspace,
+      session: t.tmuxSession,
+      leafId: t.activeLeafId,
+      tabId: t.id,
+    };
+  };
+  const activeTarget = fromTab(active);
+  if (activeTarget) return activeTarget;
+  if (workspaceEnv.kind === "ssh") {
+    const host = workspaceEnv.host;
+    return (
+      fromTab(
+        tabs.find(
+          (t) =>
+            t.kind === "terminal" &&
+            t.workspace?.kind === "ssh" &&
+            t.workspace.host === host &&
+            !!t.tmuxSession &&
+            t.activeLeafId != null,
+        ),
+      ) ?? null
+    );
+  }
+  return null;
 }

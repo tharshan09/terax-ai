@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { LOCAL_WORKSPACE } from "@/modules/workspace";
 import {
   autoSessionName,
   isCurrentTmuxTarget,
   isValidSessionName,
+  pickTmuxPollTarget,
   relativeTime,
   sanitizeSessionName,
 } from "./tmux";
@@ -100,6 +102,104 @@ describe("isCurrentTmuxTarget", () => {
     expect(
       isCurrentTmuxTarget({ id: 1, activeLeafId: 5, tmuxSession: undefined }, expected),
     ).toBe(false);
+  });
+});
+
+describe("pickTmuxPollTarget", () => {
+  const localTmux = {
+    kind: "terminal",
+    id: 1,
+    workspace: { kind: "local" as const },
+    tmuxSession: "terax-rs-1",
+    activeLeafId: 5,
+  };
+  const sshTmux = {
+    kind: "terminal",
+    id: 2,
+    workspace: { kind: "ssh" as const, host: "litha" },
+    tmuxSession: "main",
+    activeLeafId: 9,
+  };
+  const ssh = { kind: "ssh" as const, host: "litha" };
+
+  it("tracks the active local tmux tab (restart-safe tabs are tmux)", () => {
+    expect(pickTmuxPollTarget(localTmux, [localTmux], LOCAL_WORKSPACE)).toEqual({
+      workspace: { kind: "local" },
+      session: "terax-rs-1",
+      leafId: 5,
+      tabId: 1,
+    });
+  });
+
+  it("tracks the active ssh tmux tab", () => {
+    expect(pickTmuxPollTarget(sshTmux, [sshTmux], ssh)).toEqual({
+      workspace: { kind: "ssh", host: "litha" },
+      session: "main",
+      leafId: 9,
+      tabId: 2,
+    });
+  });
+
+  it("defaults a missing workspace to local", () => {
+    const noWs = {
+      kind: "terminal",
+      id: 4,
+      tmuxSession: "terax-rs-2",
+      activeLeafId: 3,
+    };
+    expect(
+      pickTmuxPollTarget(noWs, [noWs], LOCAL_WORKSPACE)?.workspace,
+    ).toEqual({ kind: "local" });
+  });
+
+  it("does not poll a plain (non-tmux) local shell", () => {
+    const plain = {
+      kind: "terminal",
+      id: 3,
+      workspace: { kind: "local" as const },
+      activeLeafId: 7,
+    };
+    expect(pickTmuxPollTarget(plain, [plain], LOCAL_WORKSPACE)).toBeNull();
+  });
+
+  it("skips a leaf with no active pane", () => {
+    const noLeaf = { ...localTmux, activeLeafId: null };
+    expect(pickTmuxPollTarget(noLeaf, [noLeaf], LOCAL_WORKSPACE)).toBeNull();
+  });
+
+  it("excludes WSL tmux (no managed-session path there)", () => {
+    const wsl = {
+      kind: "terminal",
+      id: 5,
+      workspace: { kind: "wsl" as const, distro: "Ubuntu" },
+      tmuxSession: "main",
+      activeLeafId: 1,
+    };
+    expect(
+      pickTmuxPollTarget(wsl, [wsl], { kind: "wsl", distro: "Ubuntu" }),
+    ).toBeNull();
+  });
+
+  it("on an ssh workspace falls back to a background host terminal off a non-terminal tab", () => {
+    const gitTab = { kind: "git-history", id: 8 };
+    expect(pickTmuxPollTarget(gitTab, [gitTab, sshTmux], ssh)).toEqual({
+      workspace: { kind: "ssh", host: "litha" },
+      session: "main",
+      leafId: 9,
+      tabId: 2,
+    });
+  });
+
+  it("does not fall back for a local workspace off a non-terminal tab", () => {
+    const editor = { kind: "editor", id: 6 };
+    expect(
+      pickTmuxPollTarget(editor, [editor, localTmux], LOCAL_WORKSPACE),
+    ).toBeNull();
+  });
+
+  it("prefers the active tab over the ssh background fallback", () => {
+    const other = { ...sshTmux, id: 10, tmuxSession: "other", activeLeafId: 11 };
+    expect(pickTmuxPollTarget(sshTmux, [sshTmux, other], ssh)?.tabId).toBe(2);
   });
 });
 

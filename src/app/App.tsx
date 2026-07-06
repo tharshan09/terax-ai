@@ -99,6 +99,7 @@ import {
   isCurrentTmuxTarget,
   isValidSessionName,
   listTmuxSessions,
+  pickTmuxPollTarget,
   tmuxPaneCwd,
 } from "@/modules/terminal/lib/tmux";
 import { activeManagedSession } from "@/modules/terminal/lib/managedTmux";
@@ -420,58 +421,32 @@ export default function App() {
     }
   }, [activeTab, activeSpaceId, workspaceEnv, setWorkspaceEnv]);
 
-  // cwd-follow under tmux. tmux swallows the inner shell's OSC 7, so on an SSH
-  // host running tmux a terminal `cd` never reaches us and the explorer /
-  // source-control stay stuck at the seeded "~". Poll tmux's own
-  // `pane_current_path` for the ACTIVE ssh+tmux leaf (the only cwd the explorer
-  // and source-control read) and feed it through the same sink OSC 7 uses, so
-  // both panels follow with zero extra wiring. Additive: local and non-tmux SSH
-  // tabs keep their OSC 7 path untouched. Deps are primitive scalars only — the
+  // cwd-follow under tmux. tmux swallows the inner shell's OSC 7, so a terminal
+  // `cd` inside tmux never reaches us and the explorer / source-control stay
+  // stuck at the seeded cwd. This hits local restart-safe tmux tabs (every new
+  // local tab is a tmux tab now) as much as SSH ones. Poll tmux's own
+  // `pane_current_path` for the ACTIVE tmux leaf (the only cwd the explorer and
+  // source-control read) and feed it through the same sink OSC 7 uses, so both
+  // panels follow with zero extra wiring. Additive: plain (non-tmux) shells keep
+  // their OSC 7 path untouched. Deps are primitive scalars only — the
   // `activeTerminalTab` object identity changes on every keystroke-rate
-  // setLeafCwd, and depending on it would restart the interval (and spam the
-  // ControlMaster) on every cd.
-  // The SSH+tmux terminal whose live pane cwd should drive explorer +
-  // source-control. Prefer the active terminal tab; otherwise (you're on a
-  // Source-Control / History / editor tab, which carry no remote cwd) fall back
-  // to a terminal tab on the ambient SSH host, so the cwd stays resolved off the
-  // terminal instead of snapping back to "No repository".
-  const tmuxPollTarget = useMemo(() => {
-    const fromTab = (t: (typeof tabs)[number] | null | undefined) =>
-      t?.kind === "terminal" &&
-      t.workspace?.kind === "ssh" &&
-      t.tmuxSession &&
-      t.activeLeafId != null
-        ? {
-            host: t.workspace.host,
-            session: t.tmuxSession,
-            leafId: t.activeLeafId,
-            tabId: t.id,
-          }
-        : null;
-    const active = fromTab(activeTerminalTab);
-    if (active) return active;
-    if (workspaceEnv.kind === "ssh") {
-      const host = workspaceEnv.host;
-      return fromTab(
-        tabs.find(
-          (t) =>
-            t.kind === "terminal" &&
-            t.workspace?.kind === "ssh" &&
-            t.workspace.host === host &&
-            !!t.tmuxSession &&
-            t.activeLeafId != null,
-        ),
-      );
-    }
-    return null;
-  }, [activeTerminalTab, tabs, workspaceEnv]);
-  const tmuxPollHost = tmuxPollTarget?.host;
+  // setLeafCwd, and depending on it would restart the interval (and spam
+  // tmux / the ControlMaster) on every cd.
+  const tmuxPollTarget = useMemo(
+    () => pickTmuxPollTarget(activeTerminalTab, tabs, workspaceEnv),
+    [activeTerminalTab, tabs, workspaceEnv],
+  );
+  const tmuxPollKind = tmuxPollTarget?.workspace.kind ?? null;
+  const tmuxPollHost =
+    tmuxPollTarget?.workspace.kind === "ssh"
+      ? tmuxPollTarget.workspace.host
+      : null;
   const tmuxPollSession = tmuxPollTarget?.session;
   const tmuxPollLeafId = tmuxPollTarget?.leafId;
   const tmuxPollTabId = tmuxPollTarget?.tabId;
   useEffect(() => {
     if (
-      !tmuxPollHost ||
+      !tmuxPollKind ||
       !tmuxPollSession ||
       tmuxPollLeafId == null ||
       tmuxPollTabId == null
@@ -482,7 +457,10 @@ export default function App() {
       leafId: tmuxPollLeafId,
       session: tmuxPollSession,
     };
-    const workspace = { kind: "ssh" as const, host: tmuxPollHost };
+    const workspace: WorkspaceEnv =
+      tmuxPollKind === "ssh" && tmuxPollHost
+        ? { kind: "ssh", host: tmuxPollHost }
+        : LOCAL_WORKSPACE;
     let cancelled = false;
     let inFlight = false;
     const tick = () => {
@@ -507,7 +485,7 @@ export default function App() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [tmuxPollHost, tmuxPollSession, tmuxPollLeafId, tmuxPollTabId]);
+  }, [tmuxPollKind, tmuxPollHost, tmuxPollSession, tmuxPollLeafId, tmuxPollTabId]);
 
   // Claude Code stats over SSH. The model/context/cost widgets read stats the
   // statusLine wrapper writes; over SSH Claude runs on the host, so the wrapper

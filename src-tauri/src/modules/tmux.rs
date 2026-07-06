@@ -387,8 +387,7 @@ pub fn tmux_pane_cwd(workspace: Option<WorkspaceEnv>, session: String) -> Result
         other => {
             #[cfg(unix)]
             if matches!(other, WorkspaceEnv::Local) {
-                let out = run_local_login(&cmd)?;
-                return interpret_pane_cwd(out.code, &out.stdout, &out.stderr);
+                return local_pane_cwd(&session);
             }
             let out = crate::modules::shell::run_blocking_inner(
                 cmd,
@@ -449,6 +448,56 @@ fn run_local_login(command: &str) -> Result<LocalOutput, String> {
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
     })
+}
+
+/// Absolute path to the local `tmux`, resolved once through a login shell (so a
+/// GUI app picks up Homebrew's PATH) and cached. Lets the 2s local cwd poll run
+/// tmux directly instead of spawning a login shell every tick. `None` when tmux
+/// isn't on the login PATH; the caller then falls back to the login-shell form.
+#[cfg(unix)]
+fn local_tmux_bin() -> Option<&'static str> {
+    static BIN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BIN.get_or_init(|| {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        let out = std::process::Command::new(shell)
+            .arg("-lc")
+            .arg("command -v tmux")
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!path.is_empty()).then_some(path)
+    })
+    .as_deref()
+}
+
+/// Read a local session's active-pane cwd. Uses the cached tmux path with a
+/// direct exec (the allowlist-validated `session` is a literal argv, never
+/// spliced into a shell string) so the 2s poll isn't a login-shell spawn per
+/// tick; falls back to the login-shell command form when tmux can't be resolved.
+#[cfg(unix)]
+fn local_pane_cwd(session: &str) -> Result<String, String> {
+    if let Some(bin) = local_tmux_bin() {
+        let out = std::process::Command::new(bin)
+            .args([
+                "display-message",
+                "-p",
+                "-t",
+                session,
+                "#{pane_current_path}",
+            ])
+            .output()
+            .map_err(|e| format!("failed to run tmux: {e}"))?;
+        return interpret_pane_cwd(
+            out.status.code(),
+            &String::from_utf8_lossy(&out.stdout),
+            &String::from_utf8_lossy(&out.stderr),
+        );
+    }
+    let out = run_local_login(&pane_cwd_command(session))?;
+    interpret_pane_cwd(out.code, &out.stdout, &out.stderr)
 }
 
 #[cfg(test)]
