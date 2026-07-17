@@ -15,3 +15,17 @@ export function notifyClipboardWrite(): void {
   lastShownAt = now;
   toast("Clipboard set by a terminal program", { duration: 2000 });
 }
+
+// Failure is surfaced in every non-block mode (rate-limited separately):
+// tmux/vim already told the user "copied", so a silently kept old clipboard
+// is exactly the confusion this exists to prevent.
+let lastErrorShownAt = 0;
+
+export function notifyClipboardWriteFailed(): void {
+  const now = Date.now();
+  if (now - lastErrorShownAt < MIN_INTERVAL_MS) return;
+  lastErrorShownAt = now;
+  toast.error("Terminal clipboard copy failed — clipboard unchanged", {
+    duration: 4000,
+  });
+}

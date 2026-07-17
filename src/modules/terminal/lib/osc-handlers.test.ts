@@ -32,7 +32,9 @@ function makeFakeTerm() {
 }
 
 async function flushClipboardQueue() {
-  await Promise.resolve();
+  // A macrotask hop: the write runs in a queueMicrotask'd async IIFE and the
+  // notify/error callbacks fire only after the write settles.
+  await new Promise((r) => setTimeout(r, 0));
 }
 
 describe("OSC 7 cwd handler — gated by OSC 133 in-command state", () => {
@@ -265,5 +267,40 @@ describe("OSC 52 clipboard handler", () => {
 
     expect(writeClipboard).toHaveBeenCalledWith("Hello");
     expect(onNotify).not.toHaveBeenCalled();
+  });
+
+  it("fires onError instead of onNotify when the write fails", async () => {
+    // The bug this guards: WebKit rejects clipboard writes without user
+    // activation, so a "copied" notice over a failed write gaslights the user.
+    const { term, handlers } = makeFakeTerm();
+    const writeClipboard = vi.fn(() => Promise.reject(new Error("denied")));
+    const onNotify = vi.fn();
+    const onError = vi.fn();
+    registerOsc52ClipboardHandler(term, writeClipboard, {
+      getMode: () => "notify",
+      onNotify,
+      onError,
+    });
+
+    handlers.get(52)?.("c;SGVsbG8=");
+    await flushClipboardQueue();
+
+    expect(onNotify).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  it("fires onError on a failed write in allow mode too", async () => {
+    const { term, handlers } = makeFakeTerm();
+    const writeClipboard = vi.fn(() => Promise.reject(new Error("denied")));
+    const onError = vi.fn();
+    registerOsc52ClipboardHandler(term, writeClipboard, {
+      getMode: () => "allow",
+      onError,
+    });
+
+    handlers.get(52)?.("c;SGVsbG8=");
+    await flushClipboardQueue();
+
+    expect(onError).toHaveBeenCalledTimes(1);
   });
 });

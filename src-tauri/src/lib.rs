@@ -126,6 +126,41 @@ fn install_tab_swipe_monitor(app: &tauri::AppHandle) {
     }
 }
 
+/// Set the system clipboard from Rust. WebKit's navigator.clipboard.writeText
+/// requires transient user activation, which asynchronous writers — an OSC 52
+/// sequence arriving from PTY output after a tmux/SSH round trip — never have,
+/// so those writes silently fail and the clipboard keeps its old content.
+/// NSPasteboard has no such restriction. AppKit expects pasteboard access on
+/// the main thread, hence the hop.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn clipboard_write_text(app: tauri::AppHandle, text: String) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+        use objc2_foundation::NSString;
+        let ok = unsafe {
+            let pb = NSPasteboard::generalPasteboard();
+            pb.clearContents();
+            pb.setString_forType(&NSString::from_str(&text), NSPasteboardTypeString)
+        };
+        let _ = tx.send(ok);
+    })
+    .map_err(|e| e.to_string())?;
+    match rx.recv() {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("pasteboard rejected the write".into()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn clipboard_write_text(_text: String) -> Result<(), String> {
+    // The frontend falls back to navigator.clipboard on this error.
+    Err("unsupported platform".into())
+}
+
 #[tauri::command]
 async fn open_settings_window(app: tauri::AppHandle, tab: Option<String>) -> Result<(), String> {
     let url_path = match tab.as_deref() {
@@ -311,6 +346,7 @@ pub fn run() {
         })
         .manage(LaunchDir(Mutex::new(cli_dir)))
         .invoke_handler(tauri::generate_handler![
+            clipboard_write_text,
             pty::pty_open,
             pty::pty_write,
             pty::pty_resize,

@@ -9,7 +9,10 @@ import {
   type VisibleBlocks,
 } from "../block/lib/blockDecorations";
 import type { BlockMode } from "../block/lib/modeMachine";
-import { notifyClipboardWrite } from "./clipboardNotice";
+import {
+  notifyClipboardWrite,
+  notifyClipboardWriteFailed,
+} from "./clipboardNotice";
 import { DormantRing } from "./dormantRing";
 import {
   createShellIntegrationState,
@@ -53,6 +56,7 @@ import {
 const osc52ClipboardOpts = {
   getMode: () => usePreferencesStore.getState().terminalClipboardWrite,
   onNotify: notifyClipboardWrite,
+  onError: notifyClipboardWriteFailed,
 };
 
 type Callbacks = {

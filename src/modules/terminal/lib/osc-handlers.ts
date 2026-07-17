@@ -1,3 +1,4 @@
+import { writeSystemClipboard } from "@/lib/clipboard";
 import { IS_WINDOWS } from "@/lib/platform";
 import type { IMarker, Terminal } from "@xterm/xterm";
 
@@ -95,8 +96,12 @@ export type ClipboardWriteMode = "notify" | "allow" | "block";
 export type Osc52Options = {
   /** Current policy; read per-event so a settings change applies live. */
   getMode?: () => ClipboardWriteMode;
-  /** Invoked after a write in "notify" mode (e.g. a rate-limited toast). */
+  /** Invoked after a successful write in "notify" mode (rate-limited toast). */
   onNotify?: () => void;
+  /** Invoked when the write fails, in any non-block mode. Without it the user
+   *  sees tmux/vim report a copy while the clipboard silently kept its old
+   *  content. */
+  onError?: () => void;
 };
 
 export function registerOsc52ClipboardHandler(
@@ -111,11 +116,15 @@ export function registerOsc52ClipboardHandler(
     const mode = getMode();
     if (mode === "block") return true; // consume the sequence, drop the write
     queueMicrotask(() => {
-      try {
-        void Promise.resolve(writeClipboard(text)).catch(() => {});
-      } catch {}
+      void (async () => {
+        try {
+          await writeClipboard(text);
+          if (mode === "notify") opts.onNotify?.();
+        } catch {
+          opts.onError?.();
+        }
+      })();
     });
-    if (mode === "notify") opts.onNotify?.();
     return true;
   });
   return () => d.dispose();
@@ -159,8 +168,4 @@ function parseOsc52Clipboard(data: string): string | null {
   } catch {
     return null;
   }
-}
-
-async function writeSystemClipboard(text: string): Promise<void> {
-  await navigator.clipboard.writeText(text);
 }

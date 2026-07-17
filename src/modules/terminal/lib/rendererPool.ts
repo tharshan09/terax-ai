@@ -1,3 +1,4 @@
+import { writeSystemClipboard } from "@/lib/clipboard";
 import { resolveFontFamily } from "@/lib/fonts";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { buildTerminalTheme } from "@/styles/terminalTheme";
@@ -342,7 +343,7 @@ function createSlot(): Slot {
     if (isTerminalCopy(event)) {
       if (event.type === "keydown" && slot.term.hasSelection()) {
         const sel = slot.term.getSelection();
-        if (sel) void navigator.clipboard.writeText(sel).catch(() => {});
+        if (sel) void writeSystemClipboard(sel).catch(() => {});
       }
       event.preventDefault();
       return false;
@@ -366,7 +367,7 @@ function createSlot(): Slot {
       if (event.type !== "keydown") return false;
       if (slot.term.hasSelection()) {
         const sel = slot.term.getSelection();
-        if (sel) void navigator.clipboard.writeText(sel).catch(() => {});
+        if (sel) void writeSystemClipboard(sel).catch(() => {});
         slot.term.clearSelection();
         event.preventDefault();
         return false;
