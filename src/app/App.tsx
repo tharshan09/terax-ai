@@ -1030,8 +1030,10 @@ export default function App() {
   // detected natively (src-tauri install_tab_swipe_monitor) and delivered via
   // useTabSwipe; appRootRef bounds the under-cursor horizontal-scroller check.
   const appRootRef = useRef<HTMLDivElement>(null);
+  const trackpadTabSwipe = usePreferencesStore((s) => s.trackpadTabSwipe);
   const swipeTab = useCallback(
     (dir: -1 | 1) => {
+      if (!trackpadTabSwipe) return; // gesture disabled in settings
       const ids = spaceTabs.map((t) => t.id);
       if (ids.length < 2) return;
       const i = ids.indexOf(activeId);
@@ -1040,7 +1042,7 @@ export default function App() {
       if (next === i) return; // already at the edge tab in this direction
       setActiveId(ids[next]); // no swipe animation - the tab strip is the feedback
     },
-    [spaceTabs, activeId, setActiveId],
+    [trackpadTabSwipe, spaceTabs, activeId, setActiveId],
   );
   useTabSwipe(appRootRef, swipeTab);
 

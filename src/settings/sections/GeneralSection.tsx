@@ -45,6 +45,7 @@ import {
   setTerminalClipboardWrite,
   setTerminalScrollback,
   setTerminalWebglEnabled,
+  setTrackpadTabSwipe,
   setUiFontFamily,
   setUiMonoFontFamily,
   setVimMode,
@@ -144,6 +145,7 @@ export function GeneralSection() {
   const terminalFontSize = usePreferencesStore((s) => s.terminalFontSize);
   const terminalScrollback = usePreferencesStore((s) => s.terminalScrollback);
   const zoomLevel = usePreferencesStore((s) => s.zoomLevel);
+  const trackpadTabSwipe = usePreferencesStore((s) => s.trackpadTabSwipe);
   const agentNotifications = usePreferencesStore((s) => s.agentNotifications);
 
   useEffect(() => {
@@ -304,6 +306,19 @@ export function GeneralSection() {
           <Switch
             checked={explorerGitDecorations}
             onCheckedChange={(v) => void setExplorerGitDecorations(v)}
+          />
+        </SettingRow>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <Label>Tabs</Label>
+        <SettingRow
+          title="Trackpad swipe to switch tabs"
+          description="Switch to the neighboring tab with a horizontal two-finger trackpad swipe. Follows natural scrolling: swipe right reveals the tab to the left."
+        >
+          <Switch
+            checked={trackpadTabSwipe}
+            onCheckedChange={(v) => void setTrackpadTabSwipe(v)}
           />
         </SettingRow>
       </div>

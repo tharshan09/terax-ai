@@ -109,9 +109,10 @@ fn install_tab_swipe_monitor(app: &tauri::AppHandle) {
             let ay = accum_y.get();
             if ax.abs() >= THRESHOLD && ax.abs() > ay.abs() {
                 fired.set(true);
-                // Direction mapping (tune with one flip if it feels inverted):
-                // scrollingDeltaX > 0 = fingers moved right -> next tab.
-                let dir: i32 = if ax > 0.0 { 1 } else { -1 };
+                // Direction mapping follows natural scrolling (content tracks
+                // the fingers, like Safari's back swipe): fingers right reveals
+                // the tab to the LEFT (prev), fingers left the tab to the right.
+                let dir: i32 = if ax > 0.0 { -1 } else { 1 };
                 let _ = handle.emit("terax:tab-swipe", dir);
             }
         }
