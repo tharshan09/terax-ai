@@ -21,6 +21,11 @@ pub enum ReadResult {
     Text {
         content: String,
         size: u64,
+        /// Disk mtime (ms since epoch) at read time. The editor keeps this as
+        /// the baseline for save-conflict detection. `default` keeps older
+        /// remote-helper responses (which omit it) deserializable.
+        #[serde(default)]
+        mtime: u64,
     },
     Binary {
         size: u64,
@@ -45,6 +50,15 @@ pub struct FileStat {
     pub size: u64,
     pub mtime: u64,
     pub kind: StatKind,
+}
+
+/// Modification time in milliseconds since the Unix epoch, or 0 if unavailable.
+fn mtime_millis(meta: &fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[tauri::command]
@@ -101,7 +115,11 @@ fn fs_read_file_impl(
     }
 
     match String::from_utf8(bytes) {
-        Ok(content) => Ok(ReadResult::Text { content, size }),
+        Ok(content) => Ok(ReadResult::Text {
+            content,
+            size,
+            mtime: mtime_millis(&meta),
+        }),
         Err(_) => Ok(ReadResult::Binary { size }),
     }
 }
@@ -195,6 +213,8 @@ fn write_atomic(target: &Path, content: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Returns the new on-disk mtime (ms since epoch) so the editor can update its
+/// save-conflict baseline without a follow-up stat round-trip.
 #[tauri::command]
 pub fn fs_write_file(
     path: String,
@@ -204,10 +224,10 @@ pub fn fs_write_file(
     trusted: Option<bool>,
     app: tauri::AppHandle,
     registry: tauri::State<'_, WorkspaceRegistry>,
-) -> Result<(), String> {
-    fs_write_file_impl(&path, &content, workspace, trusted, &registry)?;
+) -> Result<u64, String> {
+    let mtime = fs_write_file_impl(&path, &content, workspace, trusted, &registry)?;
     let _ = app.emit("fs:file-written", FileWrittenEvent { path, source });
-    Ok(())
+    Ok(mtime)
 }
 
 fn fs_write_file_impl(
@@ -216,7 +236,7 @@ fn fs_write_file_impl(
     workspace: Option<WorkspaceEnv>,
     trusted: Option<bool>,
     registry: &WorkspaceRegistry,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     // Default = untrusted/guarded: an unmarked caller fails closed.
     let trusted = trusted.unwrap_or(false);
     let workspace = WorkspaceEnv::from_option(workspace);
@@ -224,7 +244,13 @@ fn fs_write_file_impl(
         if !trusted {
             guard::check_write_str(path)?;
         }
-        return crate::modules::ssh::write_file(host, path, content);
+        crate::modules::ssh::write_file(host, path, content)?;
+        // Report the post-write mtime for the editor's conflict baseline.
+        // Best-effort: a stat failure right after a successful write must not
+        // fail the save, so fall back to 0 (unknown).
+        return Ok(crate::modules::ssh::stat(host, path)
+            .map(|s| s.mtime)
+            .unwrap_or(0));
     }
     let target = guard::enforce_write(registry, &resolve_path(path, &workspace), path, trusted)?;
     let original_permissions = fs::metadata(&target).ok().map(|m| m.permissions());
@@ -236,7 +262,9 @@ fn fs_write_file_impl(
     if let Some(perms) = original_permissions {
         let _ = fs::set_permissions(&target, perms);
     }
-    Ok(())
+    Ok(fs::metadata(&target)
+        .map(|m| mtime_millis(&m))
+        .unwrap_or(0))
 }
 
 /// Runs the UNTRUSTED read guard without reading the file. The terminal
@@ -287,22 +315,22 @@ pub fn fs_stat(path: String, workspace: Option<WorkspaceEnv>) -> Result<FileStat
     }
     let p = resolve_path(&path, &workspace);
     let meta = std::fs::metadata(&p).map_err(|e| e.to_string())?;
-    let kind = if meta.is_dir() {
-        StatKind::Dir
-    } else if meta.file_type().is_symlink() {
+    // fs::metadata follows symlinks, so the link check needs symlink_metadata;
+    // otherwise a symlink's kind is never reported. size/mtime stay the
+    // followed target's, as before.
+    let kind = if std::fs::symlink_metadata(&p)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
         StatKind::Symlink
+    } else if meta.is_dir() {
+        StatKind::Dir
     } else {
         StatKind::File
     };
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
     Ok(FileStat {
         size: meta.len(),
-        mtime,
+        mtime: mtime_millis(&meta),
         kind,
     })
 }
@@ -328,9 +356,14 @@ mod tests {
         let f = dir.path().join("a.txt");
         std::fs::write(&f, b"hello world").unwrap();
         match fs_read_file_impl(s(&f), None, Some(false), &reg).unwrap() {
-            ReadResult::Text { content, size } => {
+            ReadResult::Text {
+                content,
+                size,
+                mtime,
+            } => {
                 assert_eq!(content, "hello world");
                 assert_eq!(size, 11);
+                assert!(mtime > 0);
             }
             _ => panic!("expected text"),
         }
