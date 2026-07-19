@@ -95,6 +95,8 @@ export function MarkdownPreviewPane({
               className="select-text [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
               components={components}
               plugins={{ math: mathPlugin }}
+              mode="static"
+              parseIncompleteMarkdown={false}
             >
               {status.content}
             </Streamdown>
