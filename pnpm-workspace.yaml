@@ -7,5 +7,15 @@ allowBuilds:
 # Force the transitive dompurify (streamdown -> mermaid) past the moderate/low
 # XSS advisories in 3.4.8. CSP already blunts it; this closes it outright. Capped
 # below 4 so a future install can't silently jump to a major (mermaid wants ^3).
+#
+# react-scan (dev-only) pins two of its deps to the floating `latest` tag
+# (react-grab, react-doctor). On any lock rewrite those re-resolve to brand-new
+# releases whose own transitives (react-grab 0.1.48 -> bippy@^0.5.43;
+# react-doctor 0.7.8 -> deslop-js -> oxc-resolver@^11.23.0) are newer than the
+# 3-day minimumReleaseAge gate above and cannot be fetched. Pin both to the exact
+# versions the fork already ships so the floating tags can't drag in un-aged
+# transitives on every regeneration.
 overrides:
   dompurify: ">=3.4.11 <4"
+  react-grab: "0.1.47"
+  react-doctor: "0.5.8"
