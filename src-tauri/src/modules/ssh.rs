@@ -304,7 +304,7 @@ def realpath(req):
 
 def read_file(req):
     path = os.path.expanduser(req["path"]); limit = req.get("limit", MAX_READ)
-    size = os.stat(path).st_size
+    st = os.stat(path); size = st.st_size
     if size > limit:
         return {"kind": "toolarge", "size": size, "limit": limit}
     with open(path, "rb") as f:
@@ -315,7 +315,8 @@ def read_file(req):
         content = data.decode("utf-8")
     except UnicodeDecodeError:
         return {"kind": "binary", "size": size}
-    return {"kind": "text", "content": content, "size": size}
+    return {"kind": "text", "content": content, "size": size,
+            "mtime": int(st.st_mtime * 1000)}
 
 
 def write_file(req):

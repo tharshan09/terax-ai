@@ -185,12 +185,12 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
         ),
         vimHandlersExtension(() => ({
           save: () => {
-            // onSaved must only fire on success; saveRef rejects on failure
-            // (the error is surfaced via a toast in useDocument). Swallow the
+            // onSaved must only fire on a real write: saveRef rejects on
+            // failure (surfaced via a toast in useDocument) and resolves false
+            // when the write was withheld on a disk-conflict. Swallow the
             // rejection here to avoid an unhandled promise.
             void (async () => {
-              await saveRef.current();
-              onSavedRef.current?.();
+              if (await saveRef.current()) onSavedRef.current?.();
             })().catch(() => {});
           },
           close: () => onCloseRef.current?.(),
@@ -242,8 +242,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
             preventDefault: true,
             run: () => {
               void (async () => {
-                await saveRef.current();
-                onSavedRef.current?.();
+                if (await saveRef.current()) onSavedRef.current?.();
               })().catch(() => {});
               return true;
             },
