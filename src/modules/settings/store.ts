@@ -189,6 +189,8 @@ export type Preferences = {
   terminalScrollback: number;
   lastWslDistro: string | null;
   zoomLevel: number;
+  /** macOS: switch tabs with a horizontal two-finger trackpad swipe. */
+  trackpadTabSwipe: boolean;
   agentNotifications: boolean;
   shortcuts: Record<ShortcutId, KeyBinding[]>;
   editorAutoSave: boolean;
@@ -254,6 +256,7 @@ const KEY_TERMINAL_FONT_SIZE = "terminalFontSize";
 const KEY_TERMINAL_SCROLLBACK = "terminalScrollback";
 const KEY_LAST_WSL_DISTRO = "lastWslDistro";
 const KEY_ZOOM_LEVEL = "zoomLevel";
+const KEY_TRACKPAD_TAB_SWIPE = "trackpadTabSwipe";
 const KEY_AGENT_NOTIFICATIONS = "agentNotifications";
 const KEY_SHORTCUTS = "shortcuts";
 const KEY_EDITOR_AUTO_SAVE = "editorAutoSave";
@@ -328,6 +331,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   terminalScrollback: TERMINAL_SCROLLBACK_DEFAULT,
   lastWslDistro: null,
   zoomLevel: 1.0,
+  trackpadTabSwipe: true,
   agentNotifications: true,
   shortcuts: {} as Record<ShortcutId, KeyBinding[]>,
   editorAutoSave: false,
@@ -505,6 +509,9 @@ export async function loadPreferences(): Promise<Preferences> {
       get<string | null>(KEY_LAST_WSL_DISTRO) ??
       DEFAULT_PREFERENCES.lastWslDistro,
     zoomLevel: get<number>(KEY_ZOOM_LEVEL) ?? DEFAULT_PREFERENCES.zoomLevel,
+    trackpadTabSwipe:
+      get<boolean>(KEY_TRACKPAD_TAB_SWIPE) ??
+      DEFAULT_PREFERENCES.trackpadTabSwipe,
     agentNotifications:
       get<boolean>(KEY_AGENT_NOTIFICATIONS) ??
       DEFAULT_PREFERENCES.agentNotifications,
@@ -832,6 +839,10 @@ export async function setZoomLevel(value: number): Promise<void> {
   await writePref(KEY_ZOOM_LEVEL, value);
 }
 
+export async function setTrackpadTabSwipe(value: boolean): Promise<void> {
+  await writePref(KEY_TRACKPAD_TAB_SWIPE, value);
+}
+
 function clampAutoSaveDelay(v: number): number {
   if (!Number.isFinite(v)) return 1000;
   return Math.min(60000, Math.max(100, Math.round(v)));
@@ -931,6 +942,7 @@ export async function onPreferencesChange(
     [KEY_TERMINAL_SCROLLBACK]: "terminalScrollback",
     [KEY_LAST_WSL_DISTRO]: "lastWslDistro",
     [KEY_ZOOM_LEVEL]: "zoomLevel",
+    [KEY_TRACKPAD_TAB_SWIPE]: "trackpadTabSwipe",
     [KEY_AGENT_NOTIFICATIONS]: "agentNotifications",
     [KEY_SHORTCUTS]: "shortcuts",
     [KEY_EDITOR_AUTO_SAVE]: "editorAutoSave",
