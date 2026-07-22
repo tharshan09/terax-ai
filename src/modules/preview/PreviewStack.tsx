@@ -1,6 +1,6 @@
 import { cn } from "@/lib/utils";
 import type { PreviewTab, Tab } from "@/modules/tabs";
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useMemo, useRef } from "react";
 import { PreviewPane, type PreviewPaneHandle } from "./PreviewPane";
 
 type Props = {
@@ -10,14 +10,52 @@ type Props = {
   registerHandle: (id: number, handle: PreviewPaneHandle | null) => void;
 };
 
-export function PreviewStack({
+type PreviewTabLayerProps = {
+  tab: PreviewTab;
+  visible: boolean;
+  setRef: (h: PreviewPaneHandle | null) => void;
+  onUrlChange: (url: string) => void;
+};
+
+/**
+ * One keep-alive layer per preview tab. Memoized so a bare `activeId` switch
+ * only re-renders the two tabs whose visibility flips; every other layer bails
+ * on the shallow prop compare. Callbacks are resolved per-id (and cached) in the
+ * parent, so they keep identity across a switch.
+ */
+const PreviewTabLayer = memo(function PreviewTabLayer({
+  tab,
+  visible,
+  setRef,
+  onUrlChange,
+}: PreviewTabLayerProps) {
+  return (
+    <div
+      className={cn(
+        "absolute inset-0",
+        !visible && "invisible pointer-events-none",
+      )}
+      aria-hidden={!visible}
+    >
+      <PreviewPane
+        ref={setRef}
+        url={tab.url}
+        visible={visible}
+        onUrlChange={onUrlChange}
+      />
+    </div>
+  );
+});
+
+function PreviewStackInner({
   tabs,
   activeId,
   onUrlChange,
   registerHandle,
 }: Props) {
-  const previews = tabs.filter(
-    (t): t is PreviewTab => t.kind === "preview" && !t.cold,
+  const previews = useMemo(
+    () => tabs.filter((t): t is PreviewTab => t.kind === "preview" && !t.cold),
+    [tabs],
   );
 
   const registerRef = useRef(registerHandle);
@@ -64,26 +102,17 @@ export function PreviewStack({
   if (previews.length === 0) return null;
   return (
     <div className="relative h-full w-full">
-      {previews.map((t) => {
-        const visible = t.id === activeId;
-        return (
-          <div
-            key={t.id}
-            className={cn(
-              "absolute inset-0",
-              !visible && "invisible pointer-events-none",
-            )}
-            aria-hidden={!visible}
-          >
-            <PreviewPane
-              ref={getRefCallback(t.id)}
-              url={t.url}
-              visible={visible}
-              onUrlChange={getUrlCallback(t.id)}
-            />
-          </div>
-        );
-      })}
+      {previews.map((t) => (
+        <PreviewTabLayer
+          key={t.id}
+          tab={t}
+          visible={t.id === activeId}
+          setRef={getRefCallback(t.id)}
+          onUrlChange={getUrlCallback(t.id)}
+        />
+      ))}
     </div>
   );
 }
+
+export const PreviewStack = memo(PreviewStackInner);

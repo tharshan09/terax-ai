@@ -1,4 +1,4 @@
-import type { ComponentProps } from "react";
+import { type ComponentProps, memo } from "react";
 import { cn } from "@/lib/utils";
 import { AiDiffStack, EditorStack, GitDiffStack } from "@/modules/editor";
 import { GitHistoryStack } from "@/modules/git-history";
@@ -39,8 +39,15 @@ type Props = {
  * Stacks every tab-kind surface absolutely on top of each other and toggles
  * visibility off the active tab, so panes keep their mounted state (terminal
  * buffers, editor scroll, ...) when switching tabs.
+ *
+ * Memoized so App re-renders that don't touch its props (status-bar polls, agent
+ * store churn, ...) skip the whole workspace subtree. Its callback props are all
+ * stabilized in App, so the memo actually bails on those unrelated renders; a tab
+ * switch or `cd` changes `activeId`/`activeTab`/`tabs` and re-renders it as
+ * intended, where the per-tab layer memos then keep the work off the inactive
+ * tabs.
  */
-export function WorkspaceSurface({
+export const WorkspaceSurface = memo(function WorkspaceSurface({
   tabs,
   activeId,
   activeTab,
@@ -188,4 +195,4 @@ export function WorkspaceSurface({
       </div>
     </div>
   );
-}
+});

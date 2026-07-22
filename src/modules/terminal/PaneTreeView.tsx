@@ -7,7 +7,11 @@ import { cn } from "@/lib/utils";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import type { SearchAddon } from "@xterm/addon-search";
-import { Fragment, type PointerEvent as ReactPointerEvent } from "react";
+import {
+  Fragment,
+  memo,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { useTerminalDropStore } from "./lib/dropStore";
 import { usePaneDndStore } from "./lib/paneDndStore";
 import { type DropEdge, leafIds, type PaneNode } from "./lib/panes";
@@ -36,7 +40,13 @@ type Props = {
   onPaneDragStart?: (leafId: number, e: ReactPointerEvent) => void;
 };
 
-export function PaneTreeView(props: Props) {
+// Memoized so an `activeId` switch (which re-renders TerminalStack and the two
+// tab layers whose visibility flips) does not cascade a re-render into every
+// mounted tab's pane tree. The recursion below routes through this memoized
+// wrapper (the impl is named distinctly to avoid shadowing it), so unchanged
+// split subtrees also bail. `tabVisible` is a prop, so the W2b visibility path
+// still propagates correctly to `TerminalPane` when a tab is shown/hidden.
+export const PaneTreeView = memo(function PaneTreeViewImpl(props: Props) {
   const { node } = props;
   const marker = usePreferencesStore((s) => s.activePaneMarker);
   const inactiveStyle = usePreferencesStore((s) => s.inactivePaneStyle);
@@ -153,7 +163,7 @@ export function PaneTreeView(props: Props) {
       })}
     </ResizablePanelGroup>
   );
-}
+});
 
 function PaneHeader({ cwd, focused }: { cwd?: string; focused: boolean }) {
   const label = cwd

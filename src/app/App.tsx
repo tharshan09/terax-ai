@@ -1165,6 +1165,17 @@ export default function App() {
     [updateTab],
   );
 
+  // Stable so the memoized WorkspaceSurface isn't invalidated on every App
+  // render (inline arrows here would defeat its memo boundary entirely).
+  const handleAiDiffAccept = useCallback(
+    (id: string) => respondToApproval(id, true),
+    [respondToApproval],
+  );
+  const handleAiDiffReject = useCallback(
+    (id: string) => respondToApproval(id, false),
+    [respondToApproval],
+  );
+
   const handleRenameTab = useCallback(
     (id: number, title: string) => updateTab(id, { customTitle: title.trim() }),
     [updateTab],
@@ -1530,8 +1541,8 @@ export default function App() {
                       onEditorCloseTab={disposeTab}
                       registerPreviewHandle={registerPreviewHandle}
                       onPreviewUrlChange={handlePreviewUrl}
-                      onAiDiffAccept={(id) => respondToApproval(id, true)}
-                      onAiDiffReject={(id) => respondToApproval(id, false)}
+                      onAiDiffAccept={handleAiDiffAccept}
+                      onAiDiffReject={handleAiDiffReject}
                       onOpenCommitFile={openCommitFileDiffTab}
                       onGitHistorySearchHandle={setGitHistoryHandle}
                       onSetDocView={setDocView}

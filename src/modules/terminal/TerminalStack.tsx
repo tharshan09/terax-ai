@@ -1,6 +1,13 @@
-import type { Tab } from "@/modules/tabs";
+import type { Tab, TerminalTab } from "@/modules/tabs";
 import type { SearchAddon } from "@xterm/addon-search";
-import { useEffect, useMemo, useRef } from "react";
+import {
+  memo,
+  type PointerEvent as ReactPointerEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+} from "react";
 import { selectLiveTerminals } from "./lib/liveTerminals";
 import { type DropEdge, leafIds } from "./lib/panes";
 import { useTerminalPaneDnd } from "./lib/useTerminalPaneDnd";
@@ -30,7 +37,57 @@ type Bundle = {
   onExit: (leafId: number, code: number) => void;
 };
 
-export function TerminalStack({
+type TerminalTabLayerProps = {
+  tab: TerminalTab;
+  tabVisible: boolean;
+  onFocusLeaf: (tabId: number, leafId: number) => void;
+  getBundle: (leafId: number) => Bundle;
+  onPaneDragStart: (leafId: number, e: ReactPointerEvent) => void;
+};
+
+/**
+ * One keep-alive layer per terminal tab. Memoized so a bare `activeId` switch
+ * only re-renders the two tabs whose visibility actually flips (the outgoing and
+ * incoming tab); every other layer bails on the shallow prop compare, which is
+ * what keeps a tab switch from scaling with the open-tab count. All props it
+ * receives are reference-stable across a switch: `tab` keeps identity via the
+ * store's structural sharing, and the callbacks are stabilized in the parent.
+ */
+const TerminalTabLayer = memo(function TerminalTabLayer({
+  tab,
+  tabVisible,
+  onFocusLeaf,
+  getBundle,
+  onPaneDragStart,
+}: TerminalTabLayerProps) {
+  const focusLeaf = useCallback(
+    (leafId: number) => onFocusLeaf(tab.id, leafId),
+    [onFocusLeaf, tab.id],
+  );
+  return (
+    <div
+      className="absolute inset-0"
+      style={{
+        visibility: tabVisible ? "visible" : "hidden",
+        pointerEvents: tabVisible ? "auto" : "none",
+      }}
+      aria-hidden={!tabVisible}
+    >
+      <PaneTreeView
+        node={tab.paneTree}
+        tabVisible={tabVisible}
+        activeLeafId={tab.activeLeafId}
+        blocks={tab.blocks ?? false}
+        workspace={tab.workspace}
+        onFocusLeaf={focusLeaf}
+        getBundle={getBundle}
+        onPaneDragStart={onPaneDragStart}
+      />
+    </div>
+  );
+});
+
+function TerminalStackInner({
   tabs,
   activeId,
   registerHandle,
@@ -61,7 +118,10 @@ export function TerminalStack({
   }, [onExit]);
 
   const bundles = useRef(new Map<number, Bundle>());
-  const getBundle = (leafId: number): Bundle => {
+  // Stable identity so the memoized layers below aren't invalidated every
+  // render. It reads the latest callbacks through refs, so a fresh
+  // `registerHandle`/`onCwd`/... never needs a new `getBundle`.
+  const getBundle = useCallback((leafId: number): Bundle => {
     let b = bundles.current.get(leafId);
     if (!b) {
       b = {
@@ -73,7 +133,7 @@ export function TerminalStack({
       bundles.current.set(leafId, b);
     }
     return b;
-  };
+  }, []);
 
   useEffect(() => {
     const live = new Set<number>();
@@ -86,31 +146,16 @@ export function TerminalStack({
 
   return (
     <div className="relative h-full w-full">
-      {terminals.map((t) => {
-        const tabVisible = t.id === activeId;
-        return (
-          <div
-            key={t.id}
-            className="absolute inset-0"
-            style={{
-              visibility: tabVisible ? "visible" : "hidden",
-              pointerEvents: tabVisible ? "auto" : "none",
-            }}
-            aria-hidden={!tabVisible}
-          >
-            <PaneTreeView
-              node={t.paneTree}
-              tabVisible={tabVisible}
-              activeLeafId={t.activeLeafId}
-              blocks={t.blocks ?? false}
-              workspace={t.workspace}
-              onFocusLeaf={(leafId) => onFocusLeaf(t.id, leafId)}
-              getBundle={getBundle}
-              onPaneDragStart={paneDnd.startDrag}
-            />
-          </div>
-        );
-      })}
+      {terminals.map((t) => (
+        <TerminalTabLayer
+          key={t.id}
+          tab={t}
+          tabVisible={t.id === activeId}
+          onFocusLeaf={onFocusLeaf}
+          getBundle={getBundle}
+          onPaneDragStart={paneDnd.startDrag}
+        />
+      ))}
       {paneDnd.dragging && (
         <div
           ref={paneDnd.ghostRef}
@@ -122,3 +167,5 @@ export function TerminalStack({
     </div>
   );
 }
+
+export const TerminalStack = memo(TerminalStackInner);
