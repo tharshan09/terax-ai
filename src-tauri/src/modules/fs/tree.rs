@@ -63,7 +63,27 @@ fn git_non_ignored_names(dir: &Path, show_hidden: bool) -> HashSet<String> {
 /// `show_hidden` is set. `git_decorations` opts into the per-entry `gitignored`
 /// flag; off by default so non-explorer callers pay nothing.
 #[tauri::command]
-pub fn fs_read_dir(
+pub async fn fs_read_dir(
+    path: String,
+    show_hidden: bool,
+    git_decorations: Option<bool>,
+    workspace: Option<WorkspaceEnv>,
+) -> Result<Vec<DirEntry>, String> {
+    // Off the main thread: the SSH branch reads the remote directory over ssh
+    // (now carrying REMOTE_FS_TIMEOUT), and the local branch does blocking
+    // std::fs. Local ops get no kill-timeout — only the thread hop — so a slow
+    // local disk is never truncated.
+    tauri::async_runtime::spawn_blocking(move || {
+        fs_read_dir_blocking(path, show_hidden, git_decorations, workspace)
+    })
+    .await
+    .map_err(|e| format!("fs_read_dir task failed: {e}"))?
+}
+
+/// Blocking core of [`fs_read_dir`]. Public so integration tests can drive the
+/// directory-listing logic directly without spinning up an async runtime; the
+/// async command is just a `spawn_blocking` thread-hop around this.
+pub fn fs_read_dir_blocking(
     path: String,
     show_hidden: bool,
     git_decorations: Option<bool>,

@@ -6,7 +6,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tempfile::NamedTempFile;
 
 use crate::modules::fs::guard;
@@ -62,13 +62,23 @@ fn mtime_millis(meta: &fs::Metadata) -> u64 {
 }
 
 #[tauri::command]
-pub fn fs_read_file(
+pub async fn fs_read_file(
     path: String,
     workspace: Option<WorkspaceEnv>,
     trusted: Option<bool>,
-    registry: tauri::State<'_, WorkspaceRegistry>,
+    app: tauri::AppHandle,
 ) -> Result<ReadResult, String> {
-    fs_read_file_impl(path, workspace, trusted, &registry)
+    // Off the main thread: a remote read (carrying REMOTE_FS_TIMEOUT for a
+    // wedged host) or a blocking local read of a potentially large file. The
+    // registry is fetched inside the blocking task via the AppHandle because a
+    // borrowed State cannot cross into a 'static closure. Local reads get no
+    // kill-timeout — a slow-but-healthy file is loaded in full, not truncated.
+    tauri::async_runtime::spawn_blocking(move || {
+        let registry = app.state::<WorkspaceRegistry>();
+        fs_read_file_impl(path, workspace, trusted, &registry)
+    })
+    .await
+    .map_err(|e| format!("fs_read_file task failed: {e}"))?
 }
 
 fn fs_read_file_impl(
@@ -294,45 +304,61 @@ fn fs_check_readable_impl(
 }
 
 #[tauri::command]
-pub fn fs_canonicalize(path: String, workspace: Option<WorkspaceEnv>) -> Result<String, String> {
-    let workspace = WorkspaceEnv::from_option(workspace);
-    // Remote paths resolve host-side via the helper's realpath. Returning them
-    // verbatim would make every canonicalize-then-recheck guard a no-op over
-    // SSH: a remote symlink at an innocent path could point anywhere.
-    if let WorkspaceEnv::Ssh { host } = &workspace {
-        return crate::modules::ssh::realpath(host, &path);
-    }
-    let p = resolve_path(&path, &workspace);
-    let canon = std::fs::canonicalize(&p).map_err(|e| e.to_string())?;
-    Ok(super::to_canon(&canon))
+pub async fn fs_canonicalize(
+    path: String,
+    workspace: Option<WorkspaceEnv>,
+) -> Result<String, String> {
+    // Off the main thread: the SSH branch calls the remote realpath helper
+    // (carrying REMOTE_FS_TIMEOUT); the local branch is a blocking canonicalize.
+    tauri::async_runtime::spawn_blocking(move || {
+        let workspace = WorkspaceEnv::from_option(workspace);
+        // Remote paths resolve host-side via the helper's realpath. Returning
+        // them verbatim would make every canonicalize-then-recheck guard a
+        // no-op over SSH: a remote symlink at an innocent path could point
+        // anywhere.
+        if let WorkspaceEnv::Ssh { host } = &workspace {
+            return crate::modules::ssh::realpath(host, &path);
+        }
+        let p = resolve_path(&path, &workspace);
+        let canon = std::fs::canonicalize(&p).map_err(|e| e.to_string())?;
+        Ok(super::to_canon(&canon))
+    })
+    .await
+    .map_err(|e| format!("fs_canonicalize task failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn fs_stat(path: String, workspace: Option<WorkspaceEnv>) -> Result<FileStat, String> {
-    let workspace = WorkspaceEnv::from_option(workspace);
-    if let WorkspaceEnv::Ssh { host } = &workspace {
-        return crate::modules::ssh::stat(host, &path);
-    }
-    let p = resolve_path(&path, &workspace);
-    let meta = std::fs::metadata(&p).map_err(|e| e.to_string())?;
-    // fs::metadata follows symlinks, so the link check needs symlink_metadata;
-    // otherwise a symlink's kind is never reported. size/mtime stay the
-    // followed target's, as before.
-    let kind = if std::fs::symlink_metadata(&p)
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        StatKind::Symlink
-    } else if meta.is_dir() {
-        StatKind::Dir
-    } else {
-        StatKind::File
-    };
-    Ok(FileStat {
-        size: meta.len(),
-        mtime: mtime_millis(&meta),
-        kind,
+pub async fn fs_stat(path: String, workspace: Option<WorkspaceEnv>) -> Result<FileStat, String> {
+    // Off the main thread: the SSH branch stats host-side (carrying
+    // REMOTE_FS_TIMEOUT); the local branch does blocking std::fs metadata.
+    tauri::async_runtime::spawn_blocking(move || {
+        let workspace = WorkspaceEnv::from_option(workspace);
+        if let WorkspaceEnv::Ssh { host } = &workspace {
+            return crate::modules::ssh::stat(host, &path);
+        }
+        let p = resolve_path(&path, &workspace);
+        let meta = std::fs::metadata(&p).map_err(|e| e.to_string())?;
+        // fs::metadata follows symlinks, so the link check needs
+        // symlink_metadata; otherwise a symlink's kind is never reported.
+        // size/mtime stay the followed target's, as before.
+        let kind = if std::fs::symlink_metadata(&p)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            StatKind::Symlink
+        } else if meta.is_dir() {
+            StatKind::Dir
+        } else {
+            StatKind::File
+        };
+        Ok(FileStat {
+            size: meta.len(),
+            mtime: mtime_millis(&meta),
+            kind,
+        })
     })
+    .await
+    .map_err(|e| format!("fs_stat task failed: {e}"))?
 }
 
 #[cfg(test)]

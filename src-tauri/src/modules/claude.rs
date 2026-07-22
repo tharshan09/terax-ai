@@ -369,15 +369,23 @@ pub struct ClaudeStatus {
 /// session, stats not enabled, or - over SSH - no tmux session bound /
 /// master down).
 #[tauri::command]
-pub fn claude_status(
+pub async fn claude_status(
     pty_id: u32,
     workspace: Option<WorkspaceEnv>,
     tmux_session: Option<String>,
 ) -> Option<ClaudeStatus> {
-    match WorkspaceEnv::from_option(workspace) {
+    // Async + spawn_blocking: the SSH branch does a synchronous remote read that
+    // must never run on the main thread (a wedged host would freeze the UI). The
+    // read also carries a short poll budget so a hung host is reclaimed.
+    tauri::async_runtime::spawn_blocking(move || match WorkspaceEnv::from_option(workspace) {
         WorkspaceEnv::Ssh { host } => status_ssh(&host, tmux_session.as_deref()),
         _ => status_local(pty_id, tmux_session.as_deref()),
-    }
+    })
+    .await
+    .unwrap_or_else(|e| {
+        log::warn!("claude_status task failed: {e}");
+        None
+    })
 }
 
 fn status_local(pty_id: u32, tmux_session: Option<&str>) -> Option<ClaudeStatus> {
@@ -431,8 +439,12 @@ fn status_from_value(v: &Value) -> Option<ClaudeStatus> {
 /// Read `~/.claude/<rel>` on the host over the ControlMaster. Empty/missing maps
 /// to `None`; never opens a fresh prompt (BatchMode). Reading via `cat` keeps a
 /// non-existent file from being treated as an error (so we never clobber).
-fn ssh_read(host: &str, rel: &str) -> Result<Option<String>, String> {
-    let cap = ssh::run_remote_capture(host, &ssh_read_command(rel))?;
+fn ssh_read(
+    host: &str,
+    rel: &str,
+    timeout: Option<std::time::Duration>,
+) -> Result<Option<String>, String> {
+    let cap = ssh::run_remote_capture(host, &ssh_read_command(rel), timeout)?;
     Ok(if cap.stdout.is_empty() {
         None
     } else {
@@ -452,10 +464,11 @@ fn ssh_read_command(rel: &str) -> String {
 
 fn enable_ssh(host: &str) -> Result<(), String> {
     ssh::validate_ssh_host(host)?;
-    ssh::run_remote_capture(host, "mkdir -p ~/.claude/.terax")?;
+    // Setup/install path (not a poll): wait indefinitely (None), same as before.
+    ssh::run_remote_capture(host, "mkdir -p ~/.claude/.terax", None)?;
     ssh::write_file(host, "~/.claude/.terax/statusline.sh", WRAPPER_SCRIPT)?;
 
-    let raw = ssh_read(host, "settings.json")?;
+    let raw = ssh_read(host, "settings.json", None)?;
     // Refuses to overwrite invalid JSON, same guard as the local path.
     let existing = existing_config(raw.as_deref(), Path::new("the remote ~/.claude/settings.json"))?;
     // Capture the user's original command exactly once (None when already ours).
@@ -464,7 +477,7 @@ fn enable_ssh(host: &str) -> Result<(), String> {
     }
     // Absolute remote path so the statusLine command does not depend on Claude's
     // exec shell expanding `$HOME`.
-    let home = ssh::run_remote_capture(host, "printf %s \"$HOME\"")?.stdout;
+    let home = ssh::run_remote_capture(host, "printf %s \"$HOME\"", None)?.stdout;
     let cmd = wrapper_command(Path::new(&format!("{}/.claude/.terax/statusline.sh", home.trim())));
     let merged = set_statusline_command(existing, &cmd);
     let out = serde_json::to_string_pretty(&merged).map_err(|e| e.to_string())?;
@@ -473,7 +486,7 @@ fn enable_ssh(host: &str) -> Result<(), String> {
 
 fn disable_ssh(host: &str) -> Result<(), String> {
     ssh::validate_ssh_host(host)?;
-    let raw = ssh_read(host, "settings.json")?;
+    let raw = ssh_read(host, "settings.json", None)?;
     let existing = existing_config(raw.as_deref(), Path::new("the remote ~/.claude/settings.json"))?;
     let is_ours = existing
         .get("statusLine")
@@ -483,7 +496,7 @@ fn disable_ssh(host: &str) -> Result<(), String> {
     if !is_ours {
         return Ok(());
     }
-    let original = ssh_read(host, ".terax/statusline-original")?
+    let original = ssh_read(host, ".terax/statusline-original", None)?
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     let restored = restore_statusline(existing, original.as_deref());
@@ -492,12 +505,13 @@ fn disable_ssh(host: &str) -> Result<(), String> {
     let _ = ssh::run_remote_capture(
         host,
         "rm -f ~/.claude/.terax/statusline.sh ~/.claude/.terax/statusline-original",
+        None,
     );
     Ok(())
 }
 
 fn enabled_ssh(host: &str) -> bool {
-    let Ok(Some(raw)) = ssh_read(host, "settings.json") else {
+    let Ok(Some(raw)) = ssh_read(host, "settings.json", None) else {
         return false;
     };
     let Ok(root) = existing_config(Some(&raw), Path::new("settings.json")) else {
@@ -519,7 +533,12 @@ fn status_ssh(host: &str, tmux_session: Option<&str>) -> Option<ClaudeStatus> {
     if !ssh::master_alive(host) {
         return None;
     }
-    let raw = ssh_read(host, &format!(".terax/status-tmux-{session}.json")).ok()??;
+    let raw = ssh_read(
+        host,
+        &format!(".terax/status-tmux-{session}.json"),
+        Some(ssh::REMOTE_POLL_TIMEOUT),
+    )
+    .ok()??;
     let v: Value = serde_json::from_str(&raw).ok()?;
     status_from_value(&v)
 }
@@ -608,13 +627,39 @@ fn parse_batch_output(stdout: &str, n: usize) -> Vec<Option<ClaudeStatus>> {
 /// with `tmux_sessions`; a down master, an invalid name, or a missing file all
 /// map to `None` in that slot.
 #[tauri::command]
-pub fn claude_status_batch(host: String, tmux_sessions: Vec<String>) -> Vec<Option<ClaudeStatus>> {
+pub async fn claude_status_batch(
+    host: String,
+    tmux_sessions: Vec<String>,
+) -> Vec<Option<ClaudeStatus>> {
+    let n = tmux_sessions.len();
+    // Async + spawn_blocking so the single remote exec never blocks the main
+    // thread. On a task-panic we degrade to all-absent aligned with the input.
+    tauri::async_runtime::spawn_blocking(move || claude_status_batch_blocking(host, tmux_sessions))
+        .await
+        .unwrap_or_else(|e| {
+            log::warn!("claude_status_batch task failed: {e}");
+            (0..n).map(|_| None).collect()
+        })
+}
+
+/// Blocking body of [`claude_status_batch`]. One remote exec for the whole host,
+/// so the [`REMOTE_POLL_TIMEOUT`](ssh::REMOTE_POLL_TIMEOUT) budget is **per
+/// remote call / per host** — it is never coupled to the variable number of
+/// sessions in `tmux_sessions`.
+fn claude_status_batch_blocking(
+    host: String,
+    tmux_sessions: Vec<String>,
+) -> Vec<Option<ClaudeStatus>> {
     let n = tmux_sessions.len();
     let absent = || (0..n).map(|_| None).collect::<Vec<_>>();
     if n == 0 || ssh::validate_ssh_host(&host).is_err() || !ssh::master_alive(&host) {
         return absent();
     }
-    match ssh::run_remote_capture(&host, &batch_read_command(&tmux_sessions)) {
+    match ssh::run_remote_capture(
+        &host,
+        &batch_read_command(&tmux_sessions),
+        Some(ssh::REMOTE_POLL_TIMEOUT),
+    ) {
         Ok(cap) => {
             let slots = parse_batch_output(&cap.stdout, n);
             // The presence listing is everything after the n-th separator.

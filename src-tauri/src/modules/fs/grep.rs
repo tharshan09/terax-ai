@@ -9,6 +9,8 @@ use grep_searcher::{BinaryDetection, SearcherBuilder};
 use ignore::{WalkBuilder, WalkState};
 use serde::{Deserialize, Serialize};
 
+use tauri::Manager;
+
 use super::to_canon;
 use crate::modules::fs::guard;
 use crate::modules::workspace::{resolve_path, WorkspaceEnv, WorkspaceRegistry};
@@ -236,15 +238,25 @@ pub fn fs_grep_impl(
 /// Interactive content search for the command palette. Treats the query as a
 /// literal (smart-case), and self-cancels when a newer query arrives.
 #[tauri::command]
-pub fn fs_grep_interactive(
-    state: tauri::State<'_, ContentSearchState>,
+pub async fn fs_grep_interactive(
     pattern: String,
     root: String,
     max_results: Option<usize>,
     workspace: Option<WorkspaceEnv>,
-    registry: tauri::State<'_, WorkspaceRegistry>,
+    app: tauri::AppHandle,
 ) -> Result<GrepResponse, String> {
-    fs_grep_interactive_impl(&state, pattern, root, max_results, workspace, &registry)
+    // Off the main thread: the command palette calls this debounced as-you-type,
+    // so over SSH a wedged host used to freeze the UI on each in-flight query.
+    // The remote path now also carries REMOTE_FS_TIMEOUT (see ssh::grep). Both
+    // managed states are fetched inside the task because a borrowed State cannot
+    // cross into a 'static closure.
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<ContentSearchState>();
+        let registry = app.state::<WorkspaceRegistry>();
+        fs_grep_interactive_impl(&state, pattern, root, max_results, workspace, &registry)
+    })
+    .await
+    .map_err(|e| format!("fs_grep_interactive task failed: {e}"))?
 }
 
 fn fs_grep_interactive_impl(
