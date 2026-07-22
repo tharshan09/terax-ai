@@ -21,6 +21,7 @@ import {
   registerPromptTracker,
 } from "./osc-handlers";
 import { openPty, type PtySession } from "./pty-bridge";
+import { visibilityHint } from "./visibilityHint";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import "../block/block.css";
 import { ensureAgentActivityListener, isAgentActivePty } from "./agentActivity";
@@ -116,6 +117,11 @@ type Session = {
   commandRunning: boolean;
   hiddenReleaseTimer: ReturnType<typeof setTimeout> | null;
   spawnFailed: boolean;
+  // Last on-screen state pushed to this leaf's PTY via pty_set_visible, so we
+  // skip redundant IPC on focus-only changes. null = never pushed (the Rust
+  // session defaults to visible, i.e. today's behavior). Reset on respawn — a
+  // respawn creates a fresh Rust session that starts visible again.
+  lastVisibleHint: boolean | null;
 };
 
 const sessions = new Map<number, Session>();
@@ -508,6 +514,7 @@ function ensureSession(
     commandRunning: false,
     hiddenReleaseTimer: null,
     spawnFailed: false,
+    lastVisibleHint: null,
   };
   sessions.set(leafId, session);
 
@@ -527,6 +534,46 @@ function deliverPtyBytes(leafId: number, bytes: Uint8Array): void {
   const slot = getLiveSlotForLeaf(leafId);
   if (slot) slot.term.write(bytes);
   else s.dormantRing.push(bytes);
+}
+
+// Push this leaf's on-screen state to its PTY so the Rust flusher coalesces
+// harder for hidden sessions (fewer, bigger main-thread emits) and flushes
+// immediately when it becomes visible again. No-op until the PTY exists — the
+// spawn/respawn path re-pushes once it does. `force` bypasses the dedup for a
+// freshly spawned Rust session (which starts visible and must be corrected if
+// the leaf is currently hidden). Fail-open: if the invoke fails, Rust keeps its
+// visible default, i.e. today's behavior (an active session is never throttled
+// because a hint was lost).
+function syncPtyVisible(leafId: number, force = false): void {
+  const s = sessions.get(leafId);
+  if (!s?.pty) return;
+  const pageHidden = typeof document !== "undefined" && document.hidden;
+  const visible = visibilityHint(s.visibleNow, pageHidden);
+  if (!force && s.lastVisibleHint === visible) return;
+  s.lastVisibleHint = visible;
+  const id = s.pty.id;
+  invoke("pty_set_visible", { id, visible }).catch((e) => {
+    console.error("[terax] pty_set_visible failed for leaf", leafId, "id", id, e);
+    // Roll back the optimistic cache so the NEXT visibility trigger re-sends.
+    // Otherwise a rejected push leaves Rust and the cache disagreeing — e.g. a
+    // failed push(true) after a good push(false) would strand the active tab at
+    // the hidden 64ms window until the next toggle. Resetting to null (not to
+    // the old value) guarantees the next syncPtyVisible re-pushes. We do NOT
+    // set the cache in .then instead: two fast toggles could resolve out of
+    // order and corrupt it.
+    const cur = sessions.get(leafId);
+    if (cur) cur.lastVisibleHint = null;
+  });
+}
+
+// When the whole window is hidden (minimized, occluded, another Space), every
+// terminal — even the active tab's — is off screen, so re-push visibility for
+// all live PTYs and let the flusher coalesce hard; re-assert real per-leaf
+// visibility when the window returns. Registered once, for the app's lifetime.
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    for (const [leafId] of sessions) syncPtyVisible(leafId);
+  });
 }
 
 const SPAWN_RETRY_DELAY_MS = 250;
@@ -774,6 +821,8 @@ function attachSession(
         }
         s.ptyOpening = false;
         s.pty = pty;
+        // Fresh Rust session starts visible; correct it if this leaf is hidden.
+        syncPtyVisible(leafId, true);
         if (s.pendingInput) {
           void pty.write(s.pendingInput);
           s.pendingInput = "";
@@ -820,6 +869,9 @@ export async function respawnSession(
   s.altScreenAtRelease = false;
   s.commandRunning = false;
   s.spawnFailed = false;
+  // The old Rust session (and its visibility state) is gone; the new one starts
+  // visible and is corrected by the forced push once it spawns below.
+  s.lastVisibleHint = null;
   cancelHiddenRelease(s);
 
   const slot = getSlotForLeaf(leafId);
@@ -847,6 +899,8 @@ export async function respawnSession(
   }
   s.ptyOpening = false;
   s.pty = pty;
+  // New Rust session from the respawn starts visible; re-assert real state.
+  syncPtyVisible(leafId, true);
   if (s.pendingInput) {
     void pty.write(s.pendingInput);
     s.pendingInput = "";
@@ -1052,6 +1106,9 @@ export function useTerminalSession({
     if (!s) return;
     s.visibleNow = visible;
     s.focusedNow = focused;
+    // Tell the PTY flusher this leaf's new on-screen state (deduped, no-op if
+    // unchanged or if the pty isn't up yet — the spawn path re-pushes then).
+    syncPtyVisible(leafId);
     if (visible) {
       cancelHiddenRelease(s);
       if (s.container && !s.hasSlot) bindLeafToSlot(leafId, s);

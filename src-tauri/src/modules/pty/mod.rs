@@ -172,6 +172,27 @@ pub fn pty_resize(
     result
 }
 
+// Push whether the leaf owning this pty is currently on screen. A hidden
+// session's flusher coalesces output into fewer, larger main-thread emits; a
+// visible one flushes promptly (and a hidden->visible flip flushes the backlog
+// at once). Cheap and non-blocking — a tiny lock, an atomic store and a condvar
+// notify — so it stays sync. Unknown ids are ignored rather than failed: a
+// visibility hint can legitimately race a just-closed pty. Never sending this
+// leaves the session visible (its default), i.e. exactly today's behavior.
+#[tauri::command]
+pub fn pty_set_visible(
+    state: tauri::State<PtyState>,
+    id: u32,
+    visible: bool,
+) -> Result<(), String> {
+    let sessions = state.sessions.read().unwrap_or_else(|e| e.into_inner());
+    match sessions.get(&id) {
+        Some(session) => session.set_visible(visible),
+        None => log::debug!("pty_set_visible: unknown id={id}"),
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn pty_close(state: tauri::State<PtyState>, id: u32) -> Result<(), String> {
     let session = state.sessions.write().unwrap_or_else(|e| e.into_inner()).remove(&id);
