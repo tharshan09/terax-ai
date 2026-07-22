@@ -3,7 +3,12 @@ mod common;
 use common::{git_available, FsFixture, GitRepoFixture};
 use terax_lib::modules::fs::grep::{fs_glob_impl, fs_grep_impl};
 use terax_lib::modules::fs::search::{fs_list_files_impl, fs_search_impl};
-use terax_lib::modules::fs::tree::{fs_read_dir, list_subdirs, EntryKind};
+// `fs_read_dir` is now an async command (spawn_blocking thread-hop); its
+// directory-listing core lives in `fs_read_dir_blocking`, which these sync
+// tests drive directly so no async runtime is needed.
+use terax_lib::modules::fs::tree::{
+    fs_read_dir_blocking as fs_read_dir, list_subdirs, EntryKind,
+};
 use terax_lib::modules::workspace::WorkspaceRegistry;
 
 #[test]

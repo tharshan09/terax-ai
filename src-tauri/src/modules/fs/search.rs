@@ -6,6 +6,8 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use serde::{Deserialize, Serialize};
 
+use tauri::Manager;
+
 use super::to_canon;
 use crate::modules::fs::guard;
 use crate::modules::workspace::{resolve_path, WorkspaceEnv, WorkspaceRegistry};
@@ -51,15 +53,24 @@ const PRUNE_DIRS: &[&str] = &[
 ];
 
 #[tauri::command]
-pub fn fs_search(
+pub async fn fs_search(
     root: String,
     query: String,
     limit: Option<usize>,
     workspace: Option<WorkspaceEnv>,
     show_hidden: Option<bool>,
-    registry: tauri::State<'_, WorkspaceRegistry>,
+    app: tauri::AppHandle,
 ) -> Result<SearchResult, String> {
-    fs_search_impl(root, query, limit, workspace, show_hidden, &registry)
+    // Off the main thread: this is a debounced as-you-type command, so over SSH
+    // a wedged host used to freeze the UI on every keystroke's in-flight search.
+    // The remote path now also carries REMOTE_FS_TIMEOUT (see ssh::search) so a
+    // hung host is reclaimed instead of piling up blocking-pool threads.
+    tauri::async_runtime::spawn_blocking(move || {
+        let registry = app.state::<WorkspaceRegistry>();
+        fs_search_impl(root, query, limit, workspace, show_hidden, &registry)
+    })
+    .await
+    .map_err(|e| format!("fs_search task failed: {e}"))?
 }
 
 pub fn fs_search_impl(

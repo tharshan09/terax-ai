@@ -572,6 +572,21 @@ const TERAX_SENTINEL: &[u8] = b"__TERAX_JSON__";
 /// stream unbounded JSON and exhaust memory on this side.
 const MAX_REMOTE_STDOUT: usize = 16 * 1024 * 1024;
 
+/// Per-call budget for **background polls** over SSH (tmux pane-cwd, Claude
+/// stats, the batched Claude read). Kept short so a *wedged* ControlMaster
+/// (socket alive, remote command hung) can't pin a blocking-pool thread for
+/// long — the poll fails after this and is simply retried next tick. For the
+/// batched read the budget applies per remote exec (one exec per host per
+/// tick), never as a fixed cap around a variable number of sessions.
+pub const REMOTE_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// Per-call budget for **user-triggered remote FS reads** (`fs_read_dir`,
+/// `fs_read_file`, `fs_canonicalize`, `fs_stat`). Generous, because a healthy
+/// but slow transfer must not be truncated; it still bounds a wedged host so a
+/// single open can't hang forever. Only the remote path carries this — local FS
+/// ops get no kill-timeout (they just run off the main thread).
+pub const REMOTE_FS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
@@ -655,8 +670,70 @@ fn classify_ssh_error(stderr: &str) -> Option<String> {
     None
 }
 
+/// Wait for a spawned `ssh` child, enforcing an optional per-call budget.
+///
+/// `Ok(Some(status))` — the child exited on its own. `Ok(None)` — the budget
+/// elapsed first; the child has already been killed and reaped, so the caller
+/// must surface a timeout error. `Err` — the wait itself failed.
+///
+/// This is the load-bearing anti-freeze primitive: with a `Some(_)` budget a
+/// wedged remote command is reclaimed after `timeout` instead of blocking the
+/// waiter forever. `None` preserves the historic "wait indefinitely" behavior
+/// for callers that must not risk a mid-operation kill (remote mutations).
+fn wait_child(
+    child: &std::sync::Arc<shared_child::SharedChild>,
+    timeout: Option<std::time::Duration>,
+) -> Result<Option<std::process::ExitStatus>, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let waiter = std::sync::Arc::clone(child);
+    std::thread::spawn(move || {
+        let _ = tx.send(waiter.wait());
+    });
+    match timeout {
+        Some(dur) => match rx.recv_timeout(dur) {
+            Ok(Ok(status)) => Ok(Some(status)),
+            Ok(Err(e)) => Err(format!("ssh wait failed: {e}")),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Reclaim the wedged process: kill, then reap so no zombie and
+                // the reader threads see EOF on the now-closed pipes.
+                let _ = child.kill();
+                let _ = child.wait();
+                Ok(None)
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err("ssh wait thread disconnected".to_string())
+            }
+        },
+        None => match rx.recv() {
+            Ok(Ok(status)) => Ok(Some(status)),
+            Ok(Err(e)) => Err(format!("ssh wait failed: {e}")),
+            Err(_) => Err("ssh wait thread disconnected".to_string()),
+        },
+    }
+}
+
+/// Loud, context-carrying error for a killed-on-budget remote call. `what`
+/// identifies the work (a command preview or the fs op name); `host` and the
+/// budget are always included so a poll failure is diagnosable in the log and
+/// the frontend surfaces the same kind of string it already shows for other
+/// SSH failures.
+fn timed_out_msg(host: &str, what: &str, budget_secs: u64) -> String {
+    format!(
+        "SSH request to '{host}' timed out after {budget_secs}s (budget) and was killed: {what}"
+    )
+}
+
 /// Run one remote FS op and return its `data` value (or the remote error).
-fn run_remote_json(host: &str, request: &serde_json::Value) -> Result<serde_json::Value, String> {
+///
+/// `timeout` bounds the whole ssh exec: `Some(_)` (the read commands pass
+/// [`REMOTE_FS_TIMEOUT`]) kills a wedged host after the budget; `None` (remote
+/// mutations) waits indefinitely as before, since killing mid-write is riskier
+/// than blocking.
+fn run_remote_json(
+    host: &str,
+    request: &serde_json::Value,
+    timeout: Option<std::time::Duration>,
+) -> Result<serde_json::Value, String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
@@ -681,10 +758,12 @@ fn run_remote_json(host: &str, request: &serde_json::Value) -> Result<serde_json
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut child = cmd.spawn().map_err(|e| format!("ssh spawn failed: {e}"))?;
-    let mut stdin = child.stdin.take().ok_or("no ssh stdin")?;
-    let mut stdout = child.stdout.take().ok_or("no ssh stdout")?;
-    let mut stderr = child.stderr.take().ok_or("no ssh stderr")?;
+    let child = std::sync::Arc::new(
+        shared_child::SharedChild::spawn(&mut cmd).map_err(|e| format!("ssh spawn failed: {e}"))?,
+    );
+    let mut stdin = child.take_stdin().ok_or("no ssh stdin")?;
+    let mut stdout = child.take_stdout().ok_or("no ssh stdout")?;
+    let mut stderr = child.take_stderr().ok_or("no ssh stderr")?;
 
     // Write the request and drain both pipes on separate threads. The helper
     // reads all of stdin before emitting anything, but doing the I/O
@@ -697,7 +776,20 @@ fn run_remote_json(host: &str, request: &serde_json::Value) -> Result<serde_json
     let out_reader = std::thread::spawn(move || read_capped(&mut stdout, MAX_REMOTE_STDOUT));
     let err_reader = std::thread::spawn(move || read_capped(&mut stderr, 64 * 1024));
 
-    let status = child.wait().map_err(|e| format!("ssh wait failed: {e}"))?;
+    let status = match wait_child(&child, timeout)? {
+        Some(status) => status,
+        None => {
+            // wait_child already killed + reaped the wedged process; the reader
+            // threads will unblock on the closed pipes and we drop them.
+            let budget = timeout.map(|d| d.as_secs()).unwrap_or(0);
+            let op = request
+                .get("op")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("?");
+            log::warn!("run_remote_json: remote fs op '{op}' on '{host}' exceeded {budget}s budget; killed");
+            return Err(timed_out_msg(host, op, budget));
+        }
+    };
     let _ = writer.join();
     let (stdout_bytes, overflow) = out_reader.join().unwrap_or((Vec::new(), false));
     let (stderr_bytes, _) = err_reader.join().unwrap_or((Vec::new(), false));
@@ -792,11 +884,17 @@ pub fn master_alive(host: &str) -> bool {
 }
 
 /// Run `command` on `host` over the shared ControlMaster (BatchMode, no stdin),
-/// capturing stdout/stderr. Returns `Err` only when ssh fails to spawn; a
-/// non-zero remote exit is reported via [`RemoteCapture::code`] so the caller
-/// decides whether it counts as an error (tmux's "no server", for one, does
-/// not).
-pub fn run_remote_capture(host: &str, command: &str) -> Result<RemoteCapture, String> {
+/// capturing stdout/stderr. Returns `Err` when ssh fails to spawn, or when a
+/// `Some(_)` `timeout` budget elapses (the child is killed and a loud
+/// context-carrying error returned); a non-zero remote exit is reported via
+/// [`RemoteCapture::code`] so the caller decides whether it counts as an error
+/// (tmux's "no server", for one, does not). Poll callers pass
+/// [`REMOTE_POLL_TIMEOUT`]; `None` waits indefinitely (unchanged behavior).
+pub fn run_remote_capture(
+    host: &str,
+    command: &str,
+    timeout: Option<std::time::Duration>,
+) -> Result<RemoteCapture, String> {
     use std::process::{Command, Stdio};
 
     validate_ssh_host(host)?;
@@ -822,13 +920,23 @@ pub fn run_remote_capture(host: &str, command: &str) -> Result<RemoteCapture, St
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut child = cmd.spawn().map_err(|e| format!("ssh spawn failed: {e}"))?;
-    let mut stdout = child.stdout.take().ok_or("no ssh stdout")?;
-    let mut stderr = child.stderr.take().ok_or("no ssh stderr")?;
+    let child = std::sync::Arc::new(
+        shared_child::SharedChild::spawn(&mut cmd).map_err(|e| format!("ssh spawn failed: {e}"))?,
+    );
+    let mut stdout = child.take_stdout().ok_or("no ssh stdout")?;
+    let mut stderr = child.take_stderr().ok_or("no ssh stderr")?;
     let out_reader = std::thread::spawn(move || read_capped(&mut stdout, MAX_REMOTE_STDOUT));
     let err_reader = std::thread::spawn(move || read_capped(&mut stderr, 64 * 1024));
 
-    let status = child.wait().map_err(|e| format!("ssh wait failed: {e}"))?;
+    let status = match wait_child(&child, timeout)? {
+        Some(status) => status,
+        None => {
+            let budget = timeout.map(|d| d.as_secs()).unwrap_or(0);
+            let preview: String = command.chars().take(120).collect();
+            log::warn!("run_remote_capture: '{command}' on '{host}' exceeded {budget}s budget; killed");
+            return Err(timed_out_msg(host, &preview, budget));
+        }
+    };
     let (stdout_bytes, _) = out_reader.join().unwrap_or((Vec::new(), false));
     let (stderr_bytes, _) = err_reader.join().unwrap_or((Vec::new(), false));
 
@@ -849,6 +957,7 @@ pub fn read_dir(
     let data = run_remote_json(
         host,
         &serde_json::json!({ "op": "read_dir", "path": path, "showHidden": show_hidden }),
+        Some(REMOTE_FS_TIMEOUT),
     )?;
     serde_json::from_value(data).map_err(|e| format!("bad read_dir response: {e}"))
 }
@@ -858,6 +967,9 @@ pub fn list_subdirs(host: &str, path: &str, show_hidden: bool) -> Result<Vec<Str
     let data = run_remote_json(
         host,
         &serde_json::json!({ "op": "list_subdirs", "path": path, "showHidden": show_hidden }),
+        // Out of W1 scope (breadcrumb helper, not one of the 7 async commands):
+        // keep the historic wait-forever behavior rather than risk a regression.
+        None,
     )?;
     serde_json::from_value(data).map_err(|e| format!("bad list_subdirs response: {e}"))
 }
@@ -865,28 +977,43 @@ pub fn list_subdirs(host: &str, path: &str, show_hidden: bool) -> Result<Vec<Str
 /// Remote `realpath` (backs `fs_canonicalize` on SSH): resolves symlinks on
 /// the host so a canonicalize-then-recheck guard sees the real target.
 pub fn realpath(host: &str, path: &str) -> Result<String, String> {
-    let data = run_remote_json(host, &serde_json::json!({ "op": "realpath", "path": path }))?;
+    let data = run_remote_json(
+        host,
+        &serde_json::json!({ "op": "realpath", "path": path }),
+        Some(REMOTE_FS_TIMEOUT),
+    )?;
     serde_json::from_value(data).map_err(|e| format!("bad realpath response: {e}"))
 }
 
 /// Remote `fs_read_file`.
 pub fn read_file(host: &str, path: &str) -> Result<crate::modules::fs::file::ReadResult, String> {
-    let data = run_remote_json(host, &serde_json::json!({ "op": "read_file", "path": path }))?;
+    let data = run_remote_json(
+        host,
+        &serde_json::json!({ "op": "read_file", "path": path }),
+        Some(REMOTE_FS_TIMEOUT),
+    )?;
     serde_json::from_value(data).map_err(|e| format!("bad read_file response: {e}"))
 }
 
 /// Remote `fs_write_file` (atomic tmp+rename on the host).
 pub fn write_file(host: &str, path: &str, content: &str) -> Result<(), String> {
+    // Mutations wait indefinitely (None): killing a write mid-flight is riskier
+    // than blocking, and these are not among the W1 async commands.
     run_remote_json(
         host,
         &serde_json::json!({ "op": "write_file", "path": path, "content": content }),
+        None,
     )?;
     Ok(())
 }
 
 /// Remote `fs_stat`.
 pub fn stat(host: &str, path: &str) -> Result<crate::modules::fs::file::FileStat, String> {
-    let data = run_remote_json(host, &serde_json::json!({ "op": "stat", "path": path }))?;
+    let data = run_remote_json(
+        host,
+        &serde_json::json!({ "op": "stat", "path": path }),
+        Some(REMOTE_FS_TIMEOUT),
+    )?;
     serde_json::from_value(data).map_err(|e| format!("bad stat response: {e}"))
 }
 
@@ -906,6 +1033,9 @@ pub fn search(
             "op": "search", "path": root, "query": query,
             "limit": limit, "showHidden": show_hidden,
         }),
+        // Debounced as-you-type over SSH: budget the remote call so a wedged
+        // host can't pile up blocking-pool threads per keystroke.
+        Some(REMOTE_FS_TIMEOUT),
     )?;
     crate::modules::fs::search::rank_remote_hits(data, query, limit)
 }
@@ -925,19 +1055,30 @@ pub fn grep(
         &serde_json::json!({
             "op": "grep", "path": root, "pattern": pattern, "limit": limit,
         }),
+        // Debounced as-you-type over SSH: budget the remote call so a wedged
+        // host can't pile up blocking-pool threads per keystroke.
+        Some(REMOTE_FS_TIMEOUT),
     )?;
     serde_json::from_value(data).map_err(|e| format!("bad grep response: {e}"))
 }
 
 /// Remote `fs_create_file` (atomic O_EXCL create; refuses to clobber).
 pub fn create_file(host: &str, path: &str) -> Result<(), String> {
-    run_remote_json(host, &serde_json::json!({ "op": "create_file", "path": path }))?;
+    run_remote_json(
+        host,
+        &serde_json::json!({ "op": "create_file", "path": path }),
+        None,
+    )?;
     Ok(())
 }
 
 /// Remote `fs_create_dir` (creates parents; refuses if the leaf exists).
 pub fn create_dir(host: &str, path: &str) -> Result<(), String> {
-    run_remote_json(host, &serde_json::json!({ "op": "create_dir", "path": path }))?;
+    run_remote_json(
+        host,
+        &serde_json::json!({ "op": "create_dir", "path": path }),
+        None,
+    )?;
     Ok(())
 }
 
@@ -946,19 +1087,28 @@ pub fn rename(host: &str, from: &str, to: &str) -> Result<(), String> {
     run_remote_json(
         host,
         &serde_json::json!({ "op": "rename", "from": from, "to": to }),
+        None,
     )?;
     Ok(())
 }
 
 /// Remote `fs_delete` (recursive for dirs; unlinks symlinks without following).
 pub fn delete(host: &str, path: &str) -> Result<(), String> {
-    run_remote_json(host, &serde_json::json!({ "op": "delete", "path": path }))?;
+    run_remote_json(
+        host,
+        &serde_json::json!({ "op": "delete", "path": path }),
+        None,
+    )?;
     Ok(())
 }
 
 /// True if `path` exists on the host (symlink-aware; does not follow).
 fn remote_exists(host: &str, path: &str) -> Result<bool, String> {
-    let data = run_remote_json(host, &serde_json::json!({ "op": "exists", "path": path }))?;
+    let data = run_remote_json(
+        host,
+        &serde_json::json!({ "op": "exists", "path": path }),
+        None,
+    )?;
     Ok(data.as_bool().unwrap_or(false))
 }
 
@@ -969,6 +1119,7 @@ fn write_bytes(host: &str, path: &str, bytes: &[u8], mode: Option<u32>) -> Resul
     run_remote_json(
         host,
         &serde_json::json!({ "op": "write_bytes", "path": path, "b64": b64, "mode": mode }),
+        None,
     )?;
     Ok(())
 }
@@ -1141,9 +1292,87 @@ Host !secret prod
 
     #[test]
     fn run_remote_capture_rejects_unsafe_hosts() {
-        assert!(run_remote_capture("-oProxyCommand=evil", "echo hi").is_err());
-        assert!(run_remote_capture("", "echo hi").is_err());
-        assert!(run_remote_capture("bad host", "echo hi").is_err());
+        assert!(run_remote_capture("-oProxyCommand=evil", "echo hi", None).is_err());
+        assert!(run_remote_capture("", "echo hi", None).is_err());
+        assert!(run_remote_capture("bad host", "echo hi", None).is_err());
+    }
+
+    // Drives the real timeout primitive against a genuinely hung child (no DI
+    // mock): a `sleep` that would run for 30s must be reclaimed after the short
+    // budget. This is the load-bearing anti-freeze path — with a wedged SSH the
+    // remote `ssh` process hangs exactly like this, and wait_child kills it.
+    #[cfg(unix)]
+    #[test]
+    fn wait_child_kills_a_hung_child_after_the_budget() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let child = std::sync::Arc::new(
+            shared_child::SharedChild::spawn(&mut cmd).expect("spawn sleep"),
+        );
+
+        let started = Instant::now();
+        let outcome = wait_child(&child, Some(Duration::from_millis(300)));
+        let elapsed = started.elapsed();
+
+        // Timed out → Ok(None), and it returned at ~the budget, not ~30s.
+        assert!(
+            matches!(outcome, Ok(None)),
+            "expected a timeout outcome, got {outcome:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "wait_child did not return promptly on timeout: {elapsed:?}"
+        );
+        // The child was actually killed + reaped inside wait_child: a second
+        // wait returns immediately with no exit code (signal-terminated),
+        // rather than blocking for the remaining ~30s.
+        let status = child.wait().expect("second wait");
+        assert!(
+            status.code().is_none(),
+            "expected a signal-terminated child, got {status:?}"
+        );
+    }
+
+    // The healthy path is untouched: a fast child returns its real exit status
+    // well within the budget (proves normal polls/reads aren't penalized).
+    #[cfg(unix)]
+    #[test]
+    fn wait_child_returns_status_for_a_fast_child() {
+        use std::process::{Command, Stdio};
+        use std::time::Duration;
+
+        let mut cmd = Command::new("true");
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let child = std::sync::Arc::new(
+            shared_child::SharedChild::spawn(&mut cmd).expect("spawn true"),
+        );
+        let outcome = wait_child(&child, Some(Duration::from_secs(5)));
+        match outcome {
+            Ok(Some(status)) => assert!(status.success(), "expected success, got {status:?}"),
+            other => panic!("expected Ok(Some(success)), got {other:?}"),
+        }
+    }
+
+    // The timeout error is loud and carries the host, the budget, and a work
+    // identifier — the three things needed to diagnose a killed poll/read.
+    #[test]
+    fn timed_out_msg_carries_host_budget_and_detail() {
+        let m = timed_out_msg("litha-claude", "read_file", 30);
+        assert!(m.contains("litha-claude"), "missing host: {m}");
+        assert!(m.contains("30s"), "missing budget: {m}");
+        assert!(m.contains("read_file"), "missing work detail: {m}");
+        assert!(
+            m.to_lowercase().contains("timed out") || m.to_lowercase().contains("budget"),
+            "not clearly a timeout: {m}"
+        );
     }
 
     // Runs the embedded helper against the local python3 (skipped when absent)

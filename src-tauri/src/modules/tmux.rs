@@ -220,7 +220,7 @@ pub fn tmux_list_sessions(workspace: Option<WorkspaceEnv>) -> Result<Vec<TmuxSes
                 // first connect, and the listing then rides it. Empty until then.
                 return Ok(Vec::new());
             }
-            let cap = crate::modules::ssh::run_remote_capture(&host, &list_command())?;
+            let cap = crate::modules::ssh::run_remote_capture(&host, &list_command(), None)?;
             interpret(cap.code, &cap.stdout, &cap.stderr, &host)
         }
         // Local or WSL: SSH is handled above, never here.
@@ -258,7 +258,7 @@ pub fn tmux_kill_session(workspace: Option<WorkspaceEnv>, name: String) -> Resul
             if !crate::modules::ssh::master_alive(&host) {
                 return Err("not connected to the host; open a terminal first".to_string());
             }
-            let cap = crate::modules::ssh::run_remote_capture(&host, &cmd)?;
+            let cap = crate::modules::ssh::run_remote_capture(&host, &cmd, None)?;
             (cap.code, cap.stderr)
         }
         other => {
@@ -321,7 +321,7 @@ pub fn tmux_rename_session(
             if !crate::modules::ssh::master_alive(&host) {
                 return Err("not connected to the host; open a terminal first".to_string());
             }
-            let cap = crate::modules::ssh::run_remote_capture(&host, &cmd)?;
+            let cap = crate::modules::ssh::run_remote_capture(&host, &cmd, None)?;
             (cap.code, cap.stderr)
         }
         other => {
@@ -368,37 +368,53 @@ fn interpret_rename(code: Option<i32>, stderr: &str, to: &str) -> Result<(), Str
 /// open yet or the session/server is gone; the name is allowlist-validated, so
 /// the single-quote splice in [`pane_cwd_command`] is injection-safe.
 #[tauri::command]
-pub fn tmux_pane_cwd(workspace: Option<WorkspaceEnv>, session: String) -> Result<String, String> {
-    if !is_valid_session_name(&session) {
-        return Err(format!("invalid tmux session name: {session:?}"));
-    }
-    let cmd = pane_cwd_command(&session);
-    let (code, stdout, stderr) = match WorkspaceEnv::from_option(workspace) {
-        WorkspaceEnv::Ssh { host } => {
-            crate::modules::ssh::validate_ssh_host(&host)?;
-            if !crate::modules::ssh::master_alive(&host) {
-                // No multiplexed connection yet: nothing to poll. Empty, not an
-                // error, so the caller silently skips rather than surfacing noise.
-                return Ok(String::new());
-            }
-            let cap = crate::modules::ssh::run_remote_capture(&host, &cmd)?;
-            (cap.code, cap.stdout, cap.stderr)
+pub async fn tmux_pane_cwd(
+    workspace: Option<WorkspaceEnv>,
+    session: String,
+) -> Result<String, String> {
+    // Async + spawn_blocking so this never runs on the main thread: a sync
+    // command doing a synchronous SSH round-trip over a *wedged* ControlMaster
+    // used to freeze the entire UI. The remote read additionally carries a poll
+    // budget (REMOTE_POLL_TIMEOUT) so a hung host is reclaimed, not just moved
+    // off-thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        if !is_valid_session_name(&session) {
+            return Err(format!("invalid tmux session name: {session:?}"));
         }
-        other => {
-            #[cfg(unix)]
-            if matches!(other, WorkspaceEnv::Local) {
-                return local_pane_cwd(&session);
+        let cmd = pane_cwd_command(&session);
+        let (code, stdout, stderr) = match WorkspaceEnv::from_option(workspace) {
+            WorkspaceEnv::Ssh { host } => {
+                crate::modules::ssh::validate_ssh_host(&host)?;
+                if !crate::modules::ssh::master_alive(&host) {
+                    // No multiplexed connection yet: nothing to poll. Empty, not
+                    // an error, so the caller silently skips rather than noise.
+                    return Ok(String::new());
+                }
+                let cap = crate::modules::ssh::run_remote_capture(
+                    &host,
+                    &cmd,
+                    Some(crate::modules::ssh::REMOTE_POLL_TIMEOUT),
+                )?;
+                (cap.code, cap.stdout, cap.stderr)
             }
-            let out = crate::modules::shell::run_blocking_inner(
-                cmd,
-                None,
-                other,
-                std::time::Duration::from_secs(10),
-            )?;
-            (out.exit_code, out.stdout, out.stderr)
-        }
-    };
-    interpret_pane_cwd(code, &stdout, &stderr)
+            other => {
+                #[cfg(unix)]
+                if matches!(other, WorkspaceEnv::Local) {
+                    return local_pane_cwd(&session);
+                }
+                let out = crate::modules::shell::run_blocking_inner(
+                    cmd,
+                    None,
+                    other,
+                    std::time::Duration::from_secs(10),
+                )?;
+                (out.exit_code, out.stdout, out.stderr)
+            }
+        };
+        interpret_pane_cwd(code, &stdout, &stderr)
+    })
+    .await
+    .map_err(|e| format!("tmux_pane_cwd task failed: {e}"))?
 }
 
 /// Map a `tmux display-message` result to the pane cwd. Exit 0 yields the
