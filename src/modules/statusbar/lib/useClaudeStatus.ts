@@ -46,25 +46,35 @@ export function useClaudeStatus(
       return;
     }
     let cancelled = false;
+    // Mirrors the tmux-poll guard (App.tsx) - a plain closure flag (no state,
+    // no re-render) so an overlapping tick is skipped while an `invoke` is
+    // still in flight, e.g. a slow SSH roundtrip past POLL_MS.
+    let inFlight = false;
 
     const poll = async () => {
-      const ptyId = ptyIdForLeaf(activeLeafId);
-      if (ptyId === null) {
-        if (!cancelled) setStatus(null);
-        return;
-      }
+      if (cancelled || inFlight || document.hidden) return;
+      inFlight = true;
       try {
-        const s = await invoke<ClaudeStatus | null>("claude_status", {
-          ptyId,
-          workspace: sshHost ? { kind: "ssh", host: sshHost } : undefined,
-          tmuxSession,
-        });
-        if (cancelled) return;
-        const fresh =
-          s && (s.ts === null || Date.now() / 1000 - s.ts < STALE_SECONDS);
-        setStatus(fresh ? s : null);
-      } catch {
-        if (!cancelled) setStatus(null);
+        const ptyId = ptyIdForLeaf(activeLeafId);
+        if (ptyId === null) {
+          if (!cancelled) setStatus(null);
+          return;
+        }
+        try {
+          const s = await invoke<ClaudeStatus | null>("claude_status", {
+            ptyId,
+            workspace: sshHost ? { kind: "ssh", host: sshHost } : undefined,
+            tmuxSession,
+          });
+          if (cancelled) return;
+          const fresh =
+            s && (s.ts === null || Date.now() / 1000 - s.ts < STALE_SECONDS);
+          setStatus(fresh ? s : null);
+        } catch {
+          if (!cancelled) setStatus(null);
+        }
+      } finally {
+        inFlight = false;
       }
     };
 
