@@ -19,16 +19,211 @@ const AGENT_EVENT: &str = "terax:agent-signal";
 // not single bytes. MAX_IDLE is only a safety net for missed signals.
 const FLUSH_COALESCE: Duration = Duration::from_millis(4);
 const FLUSH_MAX_IDLE: Duration = Duration::from_millis(50);
+// A hidden leaf coalesces over a much larger window than a visible one, so a
+// noisy background agent's output reaches the main thread in far fewer, bigger
+// emits (~15/s per session instead of ~250/s) — a ~16x cut in main-thread
+// callback rate. 64ms is 16x FLUSH_COALESCE and still under the ~100ms a tab
+// switch would notice, so even if a visibility hint were ever lost the
+// worst-case latency to screen stays imperceptible. Flush-on-visible normally
+// makes a hidden->visible switch instant anyway. This only changes WHEN/HOW BIG
+// a batch is emitted, never WHICH bytes arrive or their order.
+const FLUSH_HIDDEN_COALESCE: Duration = Duration::from_millis(64);
 const READ_BUF: usize = 16 * 1024;
 // Cap on buffered-but-not-yet-flushed bytes. On overflow we discard the
 // entire pending buffer and emit an SGR-reset + notice in its place.
 // Dropping a partial prefix would slice a CSI sequence in half and corrupt
 // xterm's screen state. 4 MiB is ~1000 full 80x24 screens.
 const MAX_PENDING: usize = 4 * 1024 * 1024;
+// Once the pending buffer grows past this, the reader wakes the flusher to cut
+// its coalescing window short instead of letting a hidden leaf's 16x-larger
+// window grow the backlog toward MAX_PENDING (which discards it). A flood then
+// degrades to more/earlier emits — the same ~1 GiB/s drop ceiling as before the
+// hidden window existed — rather than dropped output. A quarter of the cap
+// leaves ample headroom for bytes that arrive between the signal and the take.
+const FLUSH_FORCE_THRESHOLD: usize = MAX_PENDING / 4;
 // Hard reset (ESC c) + dim notice. Written verbatim into the stream when
 // we're forced to discard backlog.
 const OVERFLOW_NOTICE: &[u8] =
     b"\x1bc\x1b[2m[terax: dropped output due to backpressure]\x1b[0m\r\n";
+
+// Per-session flusher backpressure control. The frontend pushes on-screen state
+// through `pty_set_visible`, which routes here; the flusher reads `visible` to
+// size its coalescing window. Defaults to visible so a session that never
+// receives a hint (or whose hint was lost/failed) behaves exactly as before —
+// an on-screen session is never throttled by accident.
+struct FlushControl {
+    visible: AtomicBool,
+    // Set by the reader when the pending buffer crosses FLUSH_FORCE_THRESHOLD;
+    // consumed by `coalesce` to end the window early so a hidden leaf's backlog
+    // can't grow toward the MAX_PENDING drop cap. A one-shot signal.
+    force_flush: AtomicBool,
+    // Guards the coalesce condvar. Held only for the brief predicate checks
+    // between waits, never across the child's output path (that's the separate
+    // `pending` mutex), so pushing visibility never contends with the reader.
+    lock: Mutex<()>,
+    cv: Condvar,
+}
+
+impl FlushControl {
+    fn new() -> Self {
+        Self {
+            visible: AtomicBool::new(true),
+            force_flush: AtomicBool::new(false),
+            lock: Mutex::new(()),
+            cv: Condvar::new(),
+        }
+    }
+
+    // Push a visibility hint and wake the flusher's coalescing wait so a
+    // hidden->visible flip flushes the pending backlog immediately (no
+    // perceptible tab-switch latency) instead of waiting out the hidden window.
+    fn set_visible(&self, visible: bool) {
+        // Store under the lock the flusher checks under, so its predicate can't
+        // miss the flip between its check and its wait (no lost wakeup).
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.visible.store(visible, Ordering::Release);
+        self.cv.notify_one();
+    }
+
+    // Wake the flusher out of its coalescing wait without changing visibility
+    // (used on child exit so the loop re-checks `done` promptly).
+    fn wake(&self) {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.cv.notify_one();
+    }
+
+    // The reader calls this when the pending buffer crosses
+    // FLUSH_FORCE_THRESHOLD: flag it and wake the coalescing wait so a hidden
+    // window ends early instead of growing the backlog toward the drop cap.
+    // Same lock+notify discipline as set_visible — the flag is stored and the
+    // condvar notified under the same lock the flusher checks under, so its
+    // predicate can't miss the flag between its check and its wait (no lost
+    // wakeup). The flag persists until consumed, so even if this notify races a
+    // flusher that isn't currently parked here, the next coalesce entry sees it.
+    fn signal_force_flush(&self) {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.force_flush.store(true, Ordering::Release);
+        self.cv.notify_one();
+    }
+
+    // Sleep out the coalescing window for the current visibility, returning
+    // early if the leaf becomes visible (flush-on-visible) or the child exits.
+    // A visible leaf uses the short FLUSH_COALESCE window; a hidden one uses the
+    // much larger FLUSH_HIDDEN_COALESCE. This only changes WHEN/HOW BIG a batch
+    // is, never WHICH bytes flush or their order — the caller takes the whole
+    // pending buffer afterwards regardless.
+    fn coalesce(&self, done: &AtomicBool) {
+        let started_hidden = !self.visible.load(Ordering::Acquire);
+        let window = if started_hidden {
+            FLUSH_HIDDEN_COALESCE
+        } else {
+            FLUSH_COALESCE
+        };
+        let deadline = Instant::now() + window;
+        let mut g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if done.load(Ordering::Acquire) {
+                return;
+            }
+            // Only a hidden->visible transition cuts the window short; a leaf
+            // that was already visible just serves out its short window.
+            if started_hidden && self.visible.load(Ordering::Acquire) {
+                return;
+            }
+            // Cap-aware early flush: the reader signalled the buffer is large,
+            // so flush now rather than letting it grow toward MAX_PENDING.
+            // swap consumes the one-shot flag (also catches a flag set before we
+            // started coalescing, since this runs before the first wait).
+            if self.force_flush.swap(false, Ordering::AcqRel) {
+                return;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return;
+            }
+            let (next, _) = self
+                .cv
+                .wait_timeout(g, deadline - now)
+                .unwrap_or_else(|e| e.into_inner());
+            g = next;
+        }
+    }
+}
+
+// Drives one PTY's flusher loop: wait for output, coalesce a
+// visibility-dependent window, then hand the whole batched buffer to `emit` in
+// arrival order. Extracted from the spawn closure so the coalescing/backpressure
+// behavior is unit-testable without a real pty or IPC channel. `emit` returns
+// Err when its sink is gone (the frontend closed the channel), ending the loop.
+fn run_flusher(
+    pending: &(Mutex<Vec<u8>>, Condvar),
+    done: &AtomicBool,
+    ctrl: &FlushControl,
+    mut emit: impl FnMut(Vec<u8>) -> Result<(), ()>,
+) {
+    let (lock, cv) = pending;
+    loop {
+        {
+            let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
+            while g.is_empty() {
+                if done.load(Ordering::Acquire) {
+                    return;
+                }
+                let (next, _) = cv
+                    .wait_timeout(g, FLUSH_MAX_IDLE)
+                    .unwrap_or_else(|e| e.into_inner());
+                g = next;
+            }
+        }
+        // Coalesce a window so a burst flushes as one chunk. Hidden leaves
+        // coalesce harder; a hidden->visible flip (or child exit) cuts it short.
+        ctrl.coalesce(done);
+        let chunk = std::mem::take(&mut *lock.lock().unwrap_or_else(|e| e.into_inner()));
+        if chunk.is_empty() {
+            continue;
+        }
+        if emit(chunk).is_err() {
+            break;
+        }
+    }
+}
+
+// Append filtered PTY output to the pending buffer for the flusher. On overflow
+// the whole backlog is discarded for an OVERFLOW_NOTICE (dropping a partial
+// prefix would slice a CSI sequence and corrupt xterm) — returns how many bytes
+// were dropped, for the reader's warn log. When the buffer crosses
+// FLUSH_FORCE_THRESHOLD it signals the flusher to cut its coalescing window
+// short, so a hidden leaf's larger window can't grow the backlog to the drop
+// cap: a flood degrades to more/earlier emits, not lost output. Extracted from
+// the reader loop so this exact append+signal path is unit-testable.
+fn push_pending(
+    pending: &(Mutex<Vec<u8>>, Condvar),
+    ctrl: &FlushControl,
+    bytes: &[u8],
+) -> u64 {
+    let (lock, cv) = pending;
+    let mut dropped = 0u64;
+    let (before, after) = {
+        let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if g.len() + bytes.len() > MAX_PENDING {
+            dropped = g.len() as u64;
+            g.clear();
+            g.extend_from_slice(OVERFLOW_NOTICE);
+        }
+        let before = g.len();
+        g.extend_from_slice(bytes);
+        let after = g.len();
+        cv.notify_one();
+        (before, after)
+    };
+    // Signal only on the crossing (once per fill), and after releasing the
+    // pending lock so we never hold it across FlushControl's lock. Ordering is
+    // always pending->control; nothing takes them the other way, so no deadlock.
+    if before <= FLUSH_FORCE_THRESHOLD && after > FLUSH_FORCE_THRESHOLD {
+        ctrl.signal_force_flush();
+    }
+    dropped
+}
 
 pub struct Session {
     // Field drop order is intentional. Rust drops fields top-to-bottom:
@@ -52,6 +247,18 @@ pub struct Session {
     // Set by the waiter once the child exits, so pty_open can reap a shell
     // that died before it was registered.
     pub(super) exited: Arc<AtomicBool>,
+    // Visibility-aware flusher backpressure. `pty_set_visible` routes here so a
+    // hidden leaf's output is coalesced into fewer, bigger main-thread emits.
+    flush_control: Arc<FlushControl>,
+}
+
+impl Session {
+    /// Record whether the owning leaf is currently on screen. A hidden session
+    /// coalesces output over a larger window; a hidden->visible flip flushes
+    /// the backlog immediately. See `FlushControl`.
+    pub(super) fn set_visible(&self, visible: bool) {
+        self.flush_control.set_visible(visible);
+    }
 }
 
 impl Drop for Session {
@@ -158,6 +365,7 @@ pub fn spawn(
     };
 
     let exited = Arc::new(AtomicBool::new(false));
+    let flush_control = Arc::new(FlushControl::new());
 
     let session = Arc::new(Session {
         #[cfg(windows)]
@@ -167,6 +375,7 @@ pub fn spawn(
         writer: writer.clone(),
         master: Mutex::new(pair.master),
         exited: exited.clone(),
+        flush_control: flush_control.clone(),
     });
 
     let pending: Arc<(Mutex<Vec<u8>>, Condvar)> = Arc::new((
@@ -182,6 +391,7 @@ pub fn spawn(
     let writer_for_da = writer.clone();
     let app_reader = app.clone();
     let first_byte_r = first_byte;
+    let ctrl_r = flush_control.clone();
     let reader_thread = thread::Builder::new()
         .name("terax-pty-reader".into())
         .spawn(move || {
@@ -210,15 +420,7 @@ pub fn spawn(
                         if filtered.is_empty() {
                             continue;
                         }
-                        let (lock, cv) = &*pending_r;
-                        let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
-                        if g.len() + filtered.len() > MAX_PENDING {
-                            dropped_bytes += g.len() as u64;
-                            g.clear();
-                            g.extend_from_slice(OVERFLOW_NOTICE);
-                        }
-                        g.extend_from_slice(&filtered);
-                        cv.notify_one();
+                        dropped_bytes += push_pending(&pending_r, &ctrl_r, &filtered);
                     }
                     Err(e) => {
                         log::debug!("pty reader ended: {e}");
@@ -239,32 +441,15 @@ pub fn spawn(
     let on_data_flush = on_data.clone();
     let pending_f = pending.clone();
     let done_f = done.clone();
+    let ctrl_f = flush_control.clone();
     thread::Builder::new()
         .name("terax-pty-flusher".into())
         .spawn(move || {
-            let (lock, cv) = &*pending_f;
-            loop {
-                {
-                    let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
-                    while g.is_empty() {
-                        if done_f.load(Ordering::Acquire) {
-                            return;
-                        }
-                        let (next, _) = cv.wait_timeout(g, FLUSH_MAX_IDLE).unwrap();
-                        g = next;
-                    }
-                }
-                // Coalesce a short window so a burst flushes as one chunk.
-                thread::sleep(FLUSH_COALESCE);
-                let chunk = std::mem::take(&mut *lock.lock().unwrap_or_else(|e| e.into_inner()));
-                if chunk.is_empty() {
-                    continue;
-                }
-                if let Err(e) = on_data_flush.send(Response::new(chunk)) {
+            run_flusher(&pending_f, &done_f, &ctrl_f, |chunk| {
+                on_data_flush.send(Response::new(chunk)).map_err(|e| {
                     log::debug!("pty flusher exiting, channel closed: {e}");
-                    break;
-                }
-            }
+                })
+            });
         })
         .expect("spawn pty flusher thread");
 
@@ -273,6 +458,7 @@ pub fn spawn(
     let done_e = done;
     let app_waiter = app;
     let exited_w = exited;
+    let ctrl_e = flush_control;
     thread::Builder::new()
         .name("terax-pty-waiter".into())
         .spawn(move || {
@@ -306,6 +492,11 @@ pub fn spawn(
             }
             done_e.store(true, Ordering::Release);
             cv.notify_all();
+            // The coalescing wait parks on a different condvar than `pending`'s,
+            // so wake it too or the flusher lingers a full hidden window before
+            // seeing `done`. The tail above is already delivered; this is only
+            // for a prompt thread exit.
+            ctrl_e.wake();
             if let Err(e) = on_exit.send(code) {
                 log::debug!("pty exit send failed (channel closed): {e}");
             }
@@ -352,6 +543,7 @@ mod tests {
             writer,
             master: Mutex::new(pair.master),
             exited: Arc::new(AtomicBool::new(false)),
+            flush_control: Arc::new(FlushControl::new()),
         });
 
         assert!(
@@ -401,8 +593,316 @@ mod tests {
             writer,
             master: Mutex::new(pair.master),
             exited: Arc::new(AtomicBool::new(false)),
+            flush_control: Arc::new(FlushControl::new()),
         });
 
         drop_session(session);
+    }
+}
+
+// Visibility-aware backpressure: FlushControl window sizing, flush-on-visible,
+// order preservation and emit-rate reduction. Platform-independent (no pty), so
+// unlike the pty tests above these run everywhere.
+#[cfg(test)]
+mod flush_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, AtomicUsize};
+
+    // (d) A session that never received a visibility hint must behave exactly as
+    // before — i.e. default to visible and use the short window.
+    #[test]
+    fn default_is_visible() {
+        let ctrl = FlushControl::new();
+        assert!(
+            ctrl.visible.load(Ordering::Acquire),
+            "a fresh session must default to visible so it is never throttled without a hint",
+        );
+    }
+
+    // (a) A visible leaf coalesces only for the short window.
+    #[test]
+    fn coalesce_visible_uses_short_window() {
+        let ctrl = FlushControl::new(); // default visible
+        let done = AtomicBool::new(false);
+        let t0 = Instant::now();
+        ctrl.coalesce(&done);
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed >= FLUSH_COALESCE,
+            "visible window ended too early: {elapsed:?}",
+        );
+        assert!(
+            elapsed < FLUSH_HIDDEN_COALESCE,
+            "visible leaf coalesced for the hidden window: {elapsed:?}",
+        );
+    }
+
+    // (a) A hidden leaf coalesces for the much larger window.
+    #[test]
+    fn coalesce_hidden_uses_large_window() {
+        let ctrl = FlushControl::new();
+        ctrl.set_visible(false);
+        let done = AtomicBool::new(false);
+        let t0 = Instant::now();
+        ctrl.coalesce(&done);
+        let elapsed = t0.elapsed();
+        // Allow a little scheduling slack below the nominal window.
+        assert!(
+            elapsed >= FLUSH_HIDDEN_COALESCE - Duration::from_millis(8),
+            "hidden window ended far too early: {elapsed:?}",
+        );
+    }
+
+    // (b) A hidden->visible flip mid-window cuts the coalesce short so a tab
+    // switch never sits on buffered output.
+    #[test]
+    fn flip_to_visible_cuts_hidden_window_short() {
+        let ctrl = Arc::new(FlushControl::new());
+        ctrl.set_visible(false);
+        let done = Arc::new(AtomicBool::new(false));
+        let ctrl_t = ctrl.clone();
+        let done_t = done.clone();
+        let t0 = Instant::now();
+        let h = thread::spawn(move || ctrl_t.coalesce(&done_t));
+        // Let the flusher enter its hidden wait, then flip visible.
+        thread::sleep(Duration::from_millis(10));
+        ctrl.set_visible(true);
+        h.join().unwrap();
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed < FLUSH_HIDDEN_COALESCE,
+            "flush-on-visible did not cut the hidden window short: {elapsed:?}",
+        );
+    }
+
+    // Child exit must also break the coalesce promptly (used for a clean thread
+    // exit) rather than waiting out the hidden window.
+    #[test]
+    fn done_cuts_window_short() {
+        let ctrl = Arc::new(FlushControl::new());
+        ctrl.set_visible(false);
+        let done = Arc::new(AtomicBool::new(false));
+        let ctrl_t = ctrl.clone();
+        let done_t = done.clone();
+        let t0 = Instant::now();
+        let h = thread::spawn(move || ctrl_t.coalesce(&done_t));
+        thread::sleep(Duration::from_millis(10));
+        done.store(true, Ordering::Release);
+        ctrl.wake();
+        h.join().unwrap();
+        assert!(
+            t0.elapsed() < FLUSH_HIDDEN_COALESCE,
+            "child exit did not cut the coalesce short",
+        );
+    }
+
+    // Feed sequential bytes through run_flusher, flipping visibility partway,
+    // and assert every byte arrives exactly once and in order across the flip.
+    // (c) Byte order / no loss across a visibility change.
+    #[test]
+    fn run_flusher_preserves_order_across_visibility_flip() {
+        let pending: Arc<(Mutex<Vec<u8>>, Condvar)> =
+            Arc::new((Mutex::new(Vec::new()), Condvar::new()));
+        let done = Arc::new(AtomicBool::new(false));
+        let ctrl = Arc::new(FlushControl::new());
+        ctrl.set_visible(false); // start hidden
+
+        let out = Arc::new(Mutex::new(Vec::<u8>::new()));
+
+        let pending_f = pending.clone();
+        let done_f = done.clone();
+        let ctrl_f = ctrl.clone();
+        let out_f = out.clone();
+        let flusher = thread::spawn(move || {
+            run_flusher(&pending_f, &done_f, &ctrl_f, |chunk| {
+                out_f
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .extend_from_slice(&chunk);
+                Ok(())
+            });
+        });
+
+        // Push 0..N one byte at a time; flip to visible halfway.
+        let total: u16 = 256;
+        for i in 0..total {
+            {
+                let (lock, cv) = &*pending;
+                lock.lock().unwrap_or_else(|e| e.into_inner()).push(i as u8);
+                cv.notify_one();
+            }
+            if i == total / 2 {
+                ctrl.set_visible(true);
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        // Give the flusher time to drain the last batch, then stop it.
+        thread::sleep(FLUSH_HIDDEN_COALESCE + Duration::from_millis(30));
+        done.store(true, Ordering::Release);
+        {
+            let (lock, cv) = &*pending;
+            let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+            cv.notify_all();
+        }
+        ctrl.wake();
+        flusher.join().unwrap();
+
+        let got = out.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let expected: Vec<u8> = (0..total).map(|i| i as u8).collect();
+        assert_eq!(
+            got, expected,
+            "bytes must arrive exactly once, in order, across the visibility flip",
+        );
+    }
+
+    // Count emits produced by feeding a steady byte stream for a fixed wall
+    // time under a given visibility.
+    fn count_emits_over(duration: Duration, visible: bool) -> u32 {
+        let pending: Arc<(Mutex<Vec<u8>>, Condvar)> =
+            Arc::new((Mutex::new(Vec::new()), Condvar::new()));
+        let done = Arc::new(AtomicBool::new(false));
+        let ctrl = Arc::new(FlushControl::new());
+        ctrl.set_visible(visible);
+        let emits = Arc::new(AtomicU32::new(0));
+
+        let pending_f = pending.clone();
+        let done_f = done.clone();
+        let ctrl_f = ctrl.clone();
+        let emits_f = emits.clone();
+        let flusher = thread::spawn(move || {
+            run_flusher(&pending_f, &done_f, &ctrl_f, |_chunk| {
+                emits_f.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            });
+        });
+
+        let start = Instant::now();
+        while start.elapsed() < duration {
+            {
+                let (lock, cv) = &*pending;
+                lock.lock().unwrap_or_else(|e| e.into_inner()).push(0);
+                cv.notify_one();
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        done.store(true, Ordering::Release);
+        {
+            let (lock, cv) = &*pending;
+            let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+            cv.notify_all();
+        }
+        ctrl.wake();
+        flusher.join().unwrap();
+        emits.load(Ordering::Relaxed)
+    }
+
+    // The whole point of the feature: for identical output a hidden leaf emits
+    // to the main thread far less often than a visible one.
+    #[test]
+    fn hidden_emits_far_less_than_visible() {
+        let dur = FLUSH_HIDDEN_COALESCE * 4;
+        let visible = count_emits_over(dur, true);
+        let hidden = count_emits_over(dur, false);
+        assert!(
+            hidden < visible,
+            "hidden must emit fewer chunks than visible (hidden={hidden}, visible={visible})",
+        );
+        // With a 16x-larger window the reduction is dramatic, not marginal; a 3x
+        // floor keeps the assertion robust against scheduling jitter.
+        assert!(
+            hidden * 3 <= visible,
+            "hidden emit rate not meaningfully reduced (hidden={hidden}, visible={visible})",
+        );
+    }
+
+    // A pending buffer that grew large signals the flusher to cut a hidden
+    // window short (cap-aware early flush), like the visibility flip does.
+    #[test]
+    fn force_flush_cuts_hidden_window_short() {
+        let ctrl = Arc::new(FlushControl::new());
+        ctrl.set_visible(false);
+        let done = Arc::new(AtomicBool::new(false));
+        let ctrl_t = ctrl.clone();
+        let done_t = done.clone();
+        let t0 = Instant::now();
+        let h = thread::spawn(move || ctrl_t.coalesce(&done_t));
+        thread::sleep(Duration::from_millis(10));
+        ctrl.signal_force_flush();
+        h.join().unwrap();
+        assert!(
+            t0.elapsed() < FLUSH_HIDDEN_COALESCE,
+            "force-flush did not cut the hidden coalescing window short",
+        );
+    }
+
+    // The hard AC: a fast writer on a HIDDEN leaf must not lose output. Drives
+    // the real push_pending + run_flusher path (push_pending both discards on
+    // overflow AND signals the early flush), floods several MiB while hidden,
+    // and asserts no drop happened — every byte arrives and no OVERFLOW_NOTICE
+    // (ESC 'c') appears — because early flush keeps the buffer below the cap.
+    #[test]
+    fn hidden_flood_stays_under_cap_without_loss() {
+        let pending: Arc<(Mutex<Vec<u8>>, Condvar)> =
+            Arc::new((Mutex::new(Vec::new()), Condvar::new()));
+        let done = Arc::new(AtomicBool::new(false));
+        let ctrl = Arc::new(FlushControl::new());
+        ctrl.set_visible(false); // hidden: the 64ms window would otherwise grow the backlog
+
+        let received = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let max_chunk = Arc::new(AtomicUsize::new(0));
+
+        let pending_f = pending.clone();
+        let done_f = done.clone();
+        let ctrl_f = ctrl.clone();
+        let received_f = received.clone();
+        let max_chunk_f = max_chunk.clone();
+        let flusher = thread::spawn(move || {
+            run_flusher(&pending_f, &done_f, &ctrl_f, |chunk| {
+                max_chunk_f.fetch_max(chunk.len(), Ordering::Relaxed);
+                received_f
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .extend_from_slice(&chunk);
+                Ok(())
+            });
+        });
+
+        // Flood 8 MiB in 64-KiB blocks of a known non-ESC byte via the real
+        // push_pending. A small yield each block lets the flusher drain between
+        // threshold crossings, as a real pipe would pace the reader.
+        let block = vec![0xABu8; 64 * 1024];
+        let block_count = 128usize; // 8 MiB total, 2x the 4 MiB cap
+        for _ in 0..block_count {
+            push_pending(&pending, &ctrl, &block);
+            thread::sleep(Duration::from_micros(50));
+        }
+        // Let the flusher drain the tail, then stop it.
+        thread::sleep(Duration::from_millis(150));
+        done.store(true, Ordering::Release);
+        {
+            let (lock, cv) = &*pending;
+            let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+            cv.notify_all();
+        }
+        ctrl.wake();
+        flusher.join().unwrap();
+
+        let got = received.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            got.len(),
+            block_count * block.len(),
+            "hidden flood lost output (got {} of {} bytes)",
+            got.len(),
+            block_count * block.len(),
+        );
+        assert!(
+            !got.contains(&0x1b),
+            "OVERFLOW_NOTICE present: the hidden buffer hit the drop cap",
+        );
+        assert!(
+            max_chunk.load(Ordering::Relaxed) < MAX_PENDING,
+            "a single chunk approached the drop cap ({} bytes); early flush failed",
+            max_chunk.load(Ordering::Relaxed),
+        );
     }
 }
