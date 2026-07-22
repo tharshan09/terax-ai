@@ -1,7 +1,7 @@
 import { cn, isHtmlPath, isMarkdownPath } from "@/lib/utils";
 import { DocViewToggle } from "@/components/ui/DocViewToggle";
 import type { EditorTab, Tab } from "@/modules/tabs";
-import { useEffect, useRef } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef } from "react";
 import { EditorPane, type EditorPaneHandle } from "./EditorPane";
 
 type Props = {
@@ -13,7 +13,64 @@ type Props = {
   onSetDocView: (id: number, mode: "rendered" | "raw") => void;
 };
 
-export function EditorStack({
+type EditorTabLayerProps = {
+  tab: EditorTab;
+  visible: boolean;
+  setRef: (h: EditorPaneHandle | null) => void;
+  onDirty: (dirty: boolean) => void;
+  onClose: () => void;
+  onSetDocView: (id: number, mode: "rendered" | "raw") => void;
+};
+
+/**
+ * One keep-alive layer per editor tab. Memoized so a bare `activeId` switch only
+ * re-renders the two tabs whose visibility flips; every other layer bails on the
+ * shallow prop compare. The `setRef`/`onDirty`/`onClose` callbacks are resolved
+ * per-id (and cached) in the parent, so they keep identity across a switch.
+ */
+const EditorTabLayer = memo(function EditorTabLayer({
+  tab,
+  visible,
+  setRef,
+  onDirty,
+  onClose,
+  onSetDocView,
+}: EditorTabLayerProps) {
+  const setView = useCallback(
+    (mode: "rendered" | "raw") => onSetDocView(tab.id, mode),
+    [onSetDocView, tab.id],
+  );
+  return (
+    <div
+      className={cn(
+        "absolute inset-0",
+        !visible && "invisible pointer-events-none",
+      )}
+      aria-hidden={!visible}
+    >
+      <div className="relative h-full overflow-hidden rounded-md border border-border/60 bg-background">
+        {(isMarkdownPath(tab.path) || isHtmlPath(tab.path)) && (
+          <DocViewToggle
+            mode="raw"
+            onChange={setView}
+            renderedDisabled={tab.dirty}
+            renderedHint="Save to preview"
+          />
+        )}
+        <EditorPane
+          ref={setRef}
+          path={tab.path}
+          workspace={tab.workspace}
+          overrideLanguage={tab.overrideLanguage}
+          onDirtyChange={onDirty}
+          onClose={onClose}
+        />
+      </div>
+    </div>
+  );
+});
+
+function EditorStackInner({
   tabs,
   activeId,
   onDirtyChange,
@@ -21,8 +78,9 @@ export function EditorStack({
   onCloseTab,
   onSetDocView,
 }: Props) {
-  const editors = tabs.filter(
-    (t): t is EditorTab => t.kind === "editor" && !t.cold,
+  const editors = useMemo(
+    () => tabs.filter((t): t is EditorTab => t.kind === "editor" && !t.cold),
+    [tabs],
   );
 
   // Stable per-tab callbacks. Inline arrows in `ref` and `onDirtyChange`
@@ -91,38 +149,19 @@ export function EditorStack({
   if (editors.length === 0) return null;
   return (
     <div className="relative h-full w-full">
-      {editors.map((t) => {
-        const visible = t.id === activeId;
-        return (
-          <div
-            key={t.id}
-            className={cn(
-              "absolute inset-0",
-              !visible && "invisible pointer-events-none",
-            )}
-            aria-hidden={!visible}
-          >
-            <div className="relative h-full overflow-hidden rounded-md border border-border/60 bg-background">
-              {(isMarkdownPath(t.path) || isHtmlPath(t.path)) && (
-                <DocViewToggle
-                  mode="raw"
-                  onChange={(mode) => onSetDocView(t.id, mode)}
-                  renderedDisabled={t.dirty}
-                  renderedHint="Save to preview"
-                />
-              )}
-              <EditorPane
-                ref={getRefCallback(t.id)}
-                path={t.path}
-                workspace={t.workspace}
-                overrideLanguage={t.overrideLanguage}
-                onDirtyChange={getDirtyCallback(t.id)}
-                onClose={getCloseCallback(t.id)}
-              />
-            </div>
-          </div>
-        );
-      })}
+      {editors.map((t) => (
+        <EditorTabLayer
+          key={t.id}
+          tab={t}
+          visible={t.id === activeId}
+          setRef={getRefCallback(t.id)}
+          onDirty={getDirtyCallback(t.id)}
+          onClose={getCloseCallback(t.id)}
+          onSetDocView={onSetDocView}
+        />
+      ))}
     </div>
   );
 }
+
+export const EditorStack = memo(EditorStackInner);

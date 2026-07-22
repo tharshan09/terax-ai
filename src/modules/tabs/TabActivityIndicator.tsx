@@ -2,18 +2,23 @@ import { useAgentStore } from "@/modules/agents/store/agentStore";
 import { leafIds, type PaneNode } from "@/modules/terminal/lib/panes";
 import { Loading03Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { aggregateAgentStatus } from "./lib/aggregateAgentStatus";
+import { useMemo } from "react";
+import { selectTabAgentStatus } from "./lib/selectTabAgentStatus";
 
 type Props = {
   paneTree: PaneNode;
 };
 
 export function TabActivityIndicator({ paneTree }: Props) {
-  // Primitive selector: zustand's default equality bails re-renders unless the
-  // aggregated status actually changes, so pane session churn stays cheap.
-  const status = useAgentStore((s) =>
-    aggregateAgentStatus(leafIds(paneTree).map((id) => s.sessions[id]?.status)),
-  );
+  // Walk the pane tree once per tree change, not once per agent-store change.
+  // The old selector called `leafIds(paneTree).map(...)` inline, so it re-walked
+  // the tree and allocated two arrays on EVERY store transition (× every mounted
+  // tab), even though the Object.is bailout already suppressed the re-render.
+  const ids = useMemo(() => leafIds(paneTree), [paneTree]);
+  // Zero-allocation primitive selector over the memoized id list: an unrelated
+  // store change (a notification, another tab's agent) no longer allocates or
+  // traverses; the primitive result still lets Object.is bail the re-render.
+  const status = useAgentStore((s) => selectTabAgentStatus(s.sessions, ids));
 
   if (status === null) return null;
 
