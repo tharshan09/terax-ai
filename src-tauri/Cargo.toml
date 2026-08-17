@@ -94,3 +94,8 @@ opt-level = "s"
 # re-polled after wake-from-sleep) takes down the entire app via SIGABRT.
 panic = "unwind"
 strip = true
+
+# rust-lang/rust#110536: stripping proc-macro dylibs breaks the dlopen rustc does
+# at compile time on macOS, reported as a bogus E0463. Never shipped, so nothing to strip.
+[profile.release.build-override]
+strip = false
