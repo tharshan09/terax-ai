@@ -192,6 +192,7 @@ export type Preferences = {
   /** macOS: switch tabs with a horizontal two-finger trackpad swipe. */
   trackpadTabSwipe: boolean;
   agentNotifications: boolean;
+  agentNotificationSound: boolean;
   shortcuts: Record<ShortcutId, KeyBinding[]>;
   editorAutoSave: boolean;
   editorAutoSaveDelay: number;
@@ -258,6 +259,7 @@ const KEY_LAST_WSL_DISTRO = "lastWslDistro";
 const KEY_ZOOM_LEVEL = "zoomLevel";
 const KEY_TRACKPAD_TAB_SWIPE = "trackpadTabSwipe";
 const KEY_AGENT_NOTIFICATIONS = "agentNotifications";
+const KEY_AGENT_NOTIFICATION_SOUND = "agentNotificationSound";
 const KEY_SHORTCUTS = "shortcuts";
 const KEY_EDITOR_AUTO_SAVE = "editorAutoSave";
 const KEY_EDITOR_AUTO_SAVE_DELAY = "editorAutoSaveDelay";
@@ -333,6 +335,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   zoomLevel: 1.0,
   trackpadTabSwipe: true,
   agentNotifications: true,
+  agentNotificationSound: true,
   shortcuts: {} as Record<ShortcutId, KeyBinding[]>,
   editorAutoSave: false,
   editorAutoSaveDelay: 1000,
@@ -515,6 +518,9 @@ export async function loadPreferences(): Promise<Preferences> {
     agentNotifications:
       get<boolean>(KEY_AGENT_NOTIFICATIONS) ??
       DEFAULT_PREFERENCES.agentNotifications,
+    agentNotificationSound:
+      get<boolean>(KEY_AGENT_NOTIFICATION_SOUND) ??
+      DEFAULT_PREFERENCES.agentNotificationSound,
     shortcuts:
       get<Record<ShortcutId, KeyBinding[]>>(KEY_SHORTCUTS) ??
       DEFAULT_PREFERENCES.shortcuts,
@@ -860,6 +866,10 @@ export async function setAgentNotifications(value: boolean): Promise<void> {
   await writePref(KEY_AGENT_NOTIFICATIONS, value);
 }
 
+export async function setAgentNotificationSound(value: boolean): Promise<void> {
+  await writePref(KEY_AGENT_NOTIFICATION_SOUND, value);
+}
+
 export async function setShortcuts(
   value: Record<ShortcutId, KeyBinding[]> | {},
 ): Promise<void> {
@@ -944,6 +954,7 @@ export async function onPreferencesChange(
     [KEY_ZOOM_LEVEL]: "zoomLevel",
     [KEY_TRACKPAD_TAB_SWIPE]: "trackpadTabSwipe",
     [KEY_AGENT_NOTIFICATIONS]: "agentNotifications",
+    [KEY_AGENT_NOTIFICATION_SOUND]: "agentNotificationSound",
     [KEY_SHORTCUTS]: "shortcuts",
     [KEY_EDITOR_AUTO_SAVE]: "editorAutoSave",
     [KEY_EDITOR_AUTO_SAVE_DELAY]: "editorAutoSaveDelay",

@@ -32,6 +32,7 @@ import {
   setActivePaneMarker,
   setInactivePaneStyle,
   setPaneHeaders,
+  setAgentNotificationSound,
   setAgentNotifications,
   setAutostart,
   setEditorWordWrap,
@@ -159,6 +160,9 @@ export function GeneralSection() {
   const zoomLevel = usePreferencesStore((s) => s.zoomLevel);
   const trackpadTabSwipe = usePreferencesStore((s) => s.trackpadTabSwipe);
   const agentNotifications = usePreferencesStore((s) => s.agentNotifications);
+  const agentNotificationSound = usePreferencesStore(
+    (s) => s.agentNotificationSound,
+  );
   const [notificationTest, setNotificationTest] =
     useState<NotificationTestState>("idle");
   const notificationTestPending =
@@ -170,7 +174,7 @@ export function GeneralSection() {
       setTimeout(resolve, NOTIFICATION_TEST_DELAY_MS),
     );
     setNotificationTest("sending");
-    setNotificationTest(await testAgentOsNotification());
+    setNotificationTest(await testAgentOsNotification(agentNotificationSound));
   };
 
   useEffect(() => {
@@ -658,6 +662,16 @@ export function GeneralSection() {
               }}
             />
           </div>
+        </SettingRow>
+        <SettingRow
+          title="Notification sound"
+          description="Play a sound with agent notifications and in-app alerts."
+        >
+          <Switch
+            checked={agentNotificationSound}
+            disabled={!agentNotifications || notificationTestPending}
+            onCheckedChange={(v) => void setAgentNotificationSound(v)}
+          />
         </SettingRow>
       </div>
 
