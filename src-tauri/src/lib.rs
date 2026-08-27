@@ -1,5 +1,7 @@
 pub mod modules;
 
+#[cfg(target_os = "macos")]
+use modules::app_menu;
 use modules::{
     agent, claude, fs, git, history, net, pty, secrets, shell, ssh, test_bridge, tmux, workspace,
 };
@@ -289,7 +291,14 @@ pub fn run() {
     let cli_dir = parse_launch_dir();
     workspace::init_launch_cwd(cli_dir.as_deref());
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // macOS: replace the predefined Quit item so Cmd+Q closes the main window
+    // (running the frontend close guard) instead of exiting immediately.
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .menu(app_menu::build)
+        .on_menu_event(app_menu::handle_event);
+    builder
         // Skip restoring VISIBLE — frontend calls window.show() after first
         // paint so the user never sees a transparent window-shadow flash on
         // Windows/Linux.
