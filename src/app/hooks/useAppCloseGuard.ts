@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import type { Tab } from "@/modules/tabs";
@@ -57,7 +58,12 @@ export function useAppCloseGuard(tabsRef: RefObject<Tab[]>) {
     void getCurrentWindow().close();
   }, []);
 
-  const cancelAppClose = useCallback(() => setPendingAppClose(null), []);
+  const cancelAppClose = useCallback(() => {
+    setPendingAppClose(null);
+    // A Dock quit, `osascript` quit or logout defers to this answer, and the
+    // Settings window was hidden to uncover the dialog.
+    void invoke("app_close_declined").catch(() => {});
+  }, []);
 
   return { pendingAppClose, confirmAppClose, cancelAppClose };
 }

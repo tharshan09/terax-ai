@@ -168,6 +168,17 @@ const fn settings_always_on_top(is_macos: bool) -> bool {
     !is_macos
 }
 
+/// The close guard in the webview declined a close it was asked for. On macOS
+/// that releases a Dock quit, `osascript` quit or logout still waiting on the
+/// answer, and brings back a Settings window we hid to uncover the dialog.
+#[tauri::command]
+fn app_close_declined(app: tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    app_menu::on_close_declined(&app);
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
+}
+
 #[tauri::command]
 async fn open_settings_window(app: tauri::AppHandle, tab: Option<String>) -> Result<(), String> {
     let url_path = match tab.as_deref() {
@@ -335,6 +346,9 @@ pub fn run() {
                         if let Some(settings) = handle.get_webview_window("settings") {
                             let _ = settings.destroy();
                         }
+                        // A Dock quit or logout waiting on the guard may go
+                        // ahead now that the window is really gone.
+                        app_menu::on_main_window_destroyed(&handle);
                     }
                 });
             }
@@ -366,6 +380,7 @@ pub fn run() {
         })
         .manage(LaunchDir(Mutex::new(cli_dir)))
         .invoke_handler(tauri::generate_handler![
+            app_close_declined,
             clipboard_write_text,
             pty::pty_open,
             pty::pty_write,
