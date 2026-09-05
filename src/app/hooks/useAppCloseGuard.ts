@@ -60,6 +60,11 @@ export function useAppCloseGuard(tabsRef: RefObject<Tab[]>) {
 
   const cancelAppClose = useCallback(() => {
     setPendingAppClose(null);
+    // Radix runs the action button's onClick and then closes the dialog, so
+    // "Quit Anyway" lands here right after confirming. Declining then would
+    // tell macOS to cancel a quit the user just agreed to, which during a
+    // logout aborts the logout.
+    if (forceClose.current) return;
     // A Dock quit, `osascript` quit or logout defers to this answer, and the
     // Settings window was hidden to uncover the dialog.
     void invoke("app_close_declined").catch(() => {});

@@ -101,14 +101,16 @@ const TMUX_PANE_TTY: &str = r#""$(tmux display -p -t "$TMUX_PANE" '#{pane_tty}')
 // tab would address the wrong terminal. The `/dev/` prefix is re-checked here
 // and not just where we export it, because this command lives in the global
 // ~/.claude/settings.json and runs wherever Claude does: `>` on a value naming
-// a regular file would truncate it. `-w` then rejects a device that is gone.
+// a regular file would truncate it. A `..` anywhere is refused first, since
+// `/dev/../etc/passwd` matches the prefix and leaves the directory. `-w` then
+// rejects a device that is gone.
 //
 // What none of that catches is a recycled device name: a process that outlives
 // its tab (a detached `claude`, say) still holds the old path, and a later tab
 // on the same name would see its marker. The marker is an invisible OSC, so
 // the cost is a notification on the wrong tab, not damage.
 const TTY_NEEDLE: &str = "$TERAX_TTY";
-const TTY_GATE: &str = r#"elif [ -z "$TMUX" ] && [ -w "$TERAX_TTY" ] && case "$TERAX_TTY" in /dev/*) true ;; *) false ;; esac; then"#;
+const TTY_GATE: &str = r#"elif [ -z "$TMUX" ] && [ -w "$TERAX_TTY" ] && case "$TERAX_TTY" in *..*) false ;; /dev/*) true ;; *) false ;; esac; then"#;
 
 fn hook_command(spec: &AgentSpec, event: &str) -> String {
     match spec.delivery {
@@ -694,7 +696,7 @@ mod tests {
         // only failing that falls back to Claude's terminalSequence.
         assert!(cmd.starts_with(TMUX_GATE), "{cmd}");
         assert!(cmd.contains(r#"printf '\033Ptmux;\033\033]777;notify;Terax;attention\007\033\\' > "$(tmux display -p -t "$TMUX_PANE" '#{pane_tty}')" 2>/dev/null"#), "{cmd}");
-        assert!(cmd.contains(r#"elif [ -z "$TMUX" ] && [ -w "$TERAX_TTY" ] && case "$TERAX_TTY" in /dev/*) true ;; *) false ;; esac; then printf '\033]777;notify;Terax;attention\007' > "$TERAX_TTY" 2>/dev/null"#), "{cmd}");
+        assert!(cmd.contains(r#"elif [ -z "$TMUX" ] && [ -w "$TERAX_TTY" ] && case "$TERAX_TTY" in *..*) false ;; /dev/*) true ;; *) false ;; esac; then printf '\033]777;notify;Terax;attention\007' > "$TERAX_TTY" 2>/dev/null"#), "{cmd}");
         assert!(cmd.contains(r#"elif [ -n "$TERAX_TERMINAL" ]; then printf '{"terminalSequence":"\\u001b]777;notify;Terax;attention\\u0007"}'"#), "{cmd}");
         assert!(cmd.contains(TMUX_NEEDLE));
         assert!(cmd.contains(TTY_NEEDLE));
@@ -703,10 +705,11 @@ mod tests {
     #[test]
     fn plain_tab_branch_refuses_a_path_outside_dev() {
         // `>` on a regular file truncates it, and this command runs wherever
-        // Claude does, not only where we exported the variable.
+        // Claude does, not only where we exported the variable. The traversal
+        // arm earns its place: /dev/../etc/passwd matches the prefix.
         let cmd = hook_command(spec("claude"), "finished");
         assert!(
-            cmd.contains(r#"case "$TERAX_TTY" in /dev/*) true ;; *) false ;; esac"#),
+            cmd.contains(r#"case "$TERAX_TTY" in *..*) false ;; /dev/*) true ;; *) false ;; esac"#),
             "{cmd}"
         );
     }
@@ -726,7 +729,7 @@ mod tests {
     fn codex_hook_wraps_marker_in_tmux_passthrough() {
         let cmd = hook_command(spec("codex"), "finished");
         assert!(cmd.contains(r#"printf '\033Ptmux;\033\033]777;notify;Terax;codex;finished\007\033\\' > "$(tmux display -p -t "$TMUX_PANE" '#{pane_tty}')" 2>/dev/null"#), "{cmd}");
-        assert!(cmd.contains(r#"elif [ -z "$TMUX" ] && [ -w "$TERAX_TTY" ] && case "$TERAX_TTY" in /dev/*) true ;; *) false ;; esac; then printf '\033]777;notify;Terax;codex;finished\007' > "$TERAX_TTY" 2>/dev/null"#), "{cmd}");
+        assert!(cmd.contains(r#"elif [ -z "$TMUX" ] && [ -w "$TERAX_TTY" ] && case "$TERAX_TTY" in *..*) false ;; /dev/*) true ;; *) false ;; esac; then printf '\033]777;notify;Terax;codex;finished\007' > "$TERAX_TTY" 2>/dev/null"#), "{cmd}");
         assert!(cmd.contains(r#"elif [ -n "$TERAX_TERMINAL" ]; then printf '\033]777;notify;Terax;codex;finished\007' > /dev/tty"#), "{cmd}");
         assert!(cmd.ends_with("printf '{}'"), "{cmd}");
     }
