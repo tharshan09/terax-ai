@@ -84,7 +84,7 @@ fn find(agent: &str) -> Result<&'static AgentSpec, String> {
 // wrapped (ESCs doubled) and gated on the marker file Terax touches next to
 // the tmux socket on attach (`${TMUX%%,*}.terax`, see shell_init), which
 // reaches panes that predate the attach, unlike an env var.
-const TMUX_NEEDLE: &str = "Ptmux;";
+const TMUX_NEEDLE: &str = "${TMUX%%,*}.terax";
 const TMUX_GATE: &str = r#"if [ -n "$TMUX" ] && [ -e "${TMUX%%,*}.terax" ]; then"#;
 
 fn hook_command(spec: &AgentSpec, event: &str) -> String {
@@ -675,7 +675,7 @@ mod tests {
 
         // An install from before the passthrough form: every needle present, no
         // DCS wrapper → reports not installed and eligible for migration.
-        let legacy = fresh.replace("Ptmux;", "");
+        let legacy = fresh.replace(TMUX_NEEDLE, "");
         assert!(!hooks_installed(spec("claude"), &legacy));
         assert!(is_legacy_install(&legacy));
 
