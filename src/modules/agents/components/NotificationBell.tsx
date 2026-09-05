@@ -16,7 +16,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AgentIcon } from "../lib/agentIcon";
 import { displayAgent } from "../lib/format";
 import type { AgentNotification, AgentStatus } from "../lib/types";
@@ -233,7 +233,13 @@ export function NotificationBell({
         .then((ok) => setHooks((h) => ({ ...h, [id]: ok })))
         .catch(() => setHooks((h) => ({ ...h, [id]: false })));
     }
-    for (const host of sshHosts) {
+  };
+
+  // Remote probes cost an SSH round-trip per host: only when the rows show.
+  const sshHostsKey = sshHosts.join("\u0000");
+  useEffect(() => {
+    if (!alertsOpen) return;
+    for (const host of sshHostsKey ? sshHostsKey.split("\u0000") : []) {
       const key = remoteHookKey(host);
       invoke<boolean>("agent_hooks_status", {
         agent: REMOTE_HOOK_AGENT,
@@ -242,7 +248,7 @@ export function NotificationBell({
         .then((ok) => setHooks((h) => ({ ...h, [key]: ok })))
         .catch(() => setHooks((h) => ({ ...h, [key]: false })));
     }
-  };
+  }, [alertsOpen, sshHostsKey]);
 
   const onOpenChange = (next: boolean) => {
     setOpen(next);

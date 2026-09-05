@@ -51,9 +51,10 @@ export function routeAgentNotification({
   });
   if (!alerts && delivery !== "none") delivery = "bell";
   if (delivery === "none") return;
-  if (!shouldDeliver({ source, agent, kind, tabId, leafId })) return;
 
+  // The bell keeps every event; the cooldown only coalesces alerts.
   useAgentStore.getState().pushNotification({ source, agent, kind, tabId, leafId });
+  if (!shouldDeliver({ source, agent, kind, tabId, leafId })) return;
 
   if (delivery === "native") {
     void osNotify(title, body ?? agent).then((result) => {
@@ -64,9 +65,11 @@ export function routeAgentNotification({
         playAgentNotificationSound();
       }
     });
-    // Terax itself is frontmost: the banner alone offers no way to jump to
-    // the agent, so pair it with the in-app toast when the caller allows one.
-    if (focused && allowToast) showAgentToast({ agent, title, body, onActivate });
+    // Frontmost Terax: an attention banner alone offers no way to jump to the
+    // agent, so pair it with the toast. Finished turns stay banner-only.
+    if (focused && allowToast && kind === "attention") {
+      showAgentToast({ agent, title, body, onActivate });
+    }
     return;
   }
   if (delivery === "toast") {

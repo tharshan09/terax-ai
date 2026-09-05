@@ -376,9 +376,10 @@ describe("planHostAgentUpdates", () => {
     expect(back.actions).toContainEqual({ kind: "working", leafId: 10 });
   });
 
-  it("defers entirely to an OSC-owned leaf: no actions, no tracking", () => {
+  it("defers to an OSC-owned leaf: no status actions, presence-only tracking", () => {
     const owned = new Set([10]);
-    // Even with a would-be change, the OSC path owns it.
+    // Even with a would-be change, the OSC path owns it: the poller only keeps
+    // watching for the agent leaving the pane (see the exit-osc cases).
     const plan = planHostAgentUpdates(
       [leaf(10)],
       tsMap([[10, NOW_SEC]]),
@@ -390,7 +391,7 @@ describe("planHostAgentUpdates", () => {
       owned,
     );
     expect(plan.actions).toEqual([]);
-    expect(plan.state.has(10)).toBe(false);
+    expect(plan.state.get(10)?.inStore).toBe(false);
   });
 });
 
@@ -500,5 +501,45 @@ describe("planDepartedLeaves", () => {
     ]);
     // Still present: nothing.
     expect(planDepartedLeaves(new Set([10, 11]), prev)).toEqual([]);
+  });
+});
+
+describe("planHostAgentUpdates (OSC-owned tmux leaves)", () => {
+  it("finishes an OSC-owned session after the agent left the pane", () => {
+    const osc: ReadonlySet<number> = new Set([10]);
+    const gone: ReadonlyMap<number, string | null> = new Map([[10, null]]);
+    const first = planHostAgentUpdates(
+      [leaf(10)],
+      tsMap([[10, NOW_SEC]]),
+      gone,
+      new Map(),
+      NOW,
+      osc,
+    );
+    expect(first.actions).toEqual([]);
+    expect(first.state.get(10)?.absentPolls).toBe(1);
+    const second = planHostAgentUpdates(
+      [leaf(10)],
+      tsMap([[10, NOW_SEC]]),
+      gone,
+      first.state,
+      NOW + 3000,
+      osc,
+    );
+    expect(second.actions).toEqual([{ kind: "exit-osc", leafId: 10 }]);
+  });
+
+  it("keeps an OSC-owned session while the agent is present or working", () => {
+    const osc: ReadonlySet<number> = new Set([10]);
+    const present: ReadonlyMap<number, string | null> = new Map([[10, "claude"]]);
+    const a = planHostAgentUpdates([leaf(10)], tsMap([[10, NOW_SEC]]), present, new Map(), NOW, osc);
+    const b = planHostAgentUpdates([leaf(10)], tsMap([[10, NOW_SEC]]), present, a.state, NOW + 3000, osc);
+    expect(b.actions).toEqual([]);
+    expect(b.state.get(10)?.absentPolls).toBe(0);
+    // Presence lost but the stats file still moves (tool run): not an exit.
+    const gone: ReadonlyMap<number, string | null> = new Map([[10, null]]);
+    const c = planHostAgentUpdates([leaf(10)], tsMap([[10, NOW_SEC + 5]]), gone, b.state, NOW + 6000, osc);
+    expect(c.actions).toEqual([]);
+    expect(c.state.get(10)?.absentPolls).toBe(0);
   });
 });

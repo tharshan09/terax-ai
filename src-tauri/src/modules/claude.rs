@@ -445,6 +445,16 @@ fn ssh_read(
     timeout: Option<std::time::Duration>,
 ) -> Result<Option<String>, String> {
     let cap = ssh::run_remote_capture(host, &ssh_read_command(rel), timeout)?;
+    // `cat` of a missing file exits 1 with empty output (absent, start fresh);
+    // any other failure (exit 255 dropped connection, unreadable) must not read
+    // as absent or the enable path would overwrite the user's config.
+    if cap.code != Some(0) && !(cap.code == Some(1) && cap.stdout.is_empty()) {
+        return Err(format!(
+            "reading ~/.claude/{rel} on {host} failed (exit {:?}): {}",
+            cap.code,
+            cap.stderr.trim()
+        ));
+    }
     Ok(if cap.stdout.is_empty() {
         None
     } else {

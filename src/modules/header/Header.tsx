@@ -86,11 +86,14 @@ export function Header({
   searchTarget,
   searchRef,
 }: Props) {
-  // Hosts with an open SSH terminal, for the bell's remote hook rows.
+  // Hosts with a tmux-bound SSH terminal (the bound session implies the
+  // ControlMaster is up, so the reuse-only hook probe/install can succeed),
+  // for the bell's remote hook rows. Same gate as the Claude-stats hosts.
   const agentSshHosts = useMemo(() => {
     const hosts: string[] = [];
     for (const t of tabs) {
       if (t.kind !== "terminal" || t.workspace?.kind !== "ssh") continue;
+      if (!t.tmuxSession) continue;
       if (!hosts.includes(t.workspace.host)) hosts.push(t.workspace.host);
     }
     return hosts;

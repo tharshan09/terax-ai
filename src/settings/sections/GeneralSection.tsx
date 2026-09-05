@@ -757,6 +757,8 @@ function notificationTestTitle(status: NotificationTestState): string {
   switch (status) {
     case "waiting":
       return "Switch to another app to verify native delivery";
+    case "sending":
+      return "Requesting the native notification";
     case "requested":
       return "The native notification was requested";
     case "denied":

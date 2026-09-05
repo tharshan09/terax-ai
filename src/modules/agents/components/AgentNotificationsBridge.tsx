@@ -1,5 +1,6 @@
 import type { Tab } from "@/modules/tabs";
 import { hasLeaf, leafIdForPty } from "@/modules/terminal";
+import { usePreferencesStore } from "@/modules/settings/preferences";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef } from "react";
@@ -127,6 +128,7 @@ export function AgentNotificationsBridge({
   // Hooks installed by an older Terax print a bare OSC marker that tmux
   // swallows; upgrade them once per launch to the passthrough-wrapped form.
   useEffect(() => {
+    if (!usePreferencesStore.getState().agentNotifications) return;
     invoke<string[]>("agent_migrate_hooks")
       .then((agents) => {
         if (agents.length > 0) {
