@@ -1284,7 +1284,7 @@ Host !secret prod
 
     #[test]
     fn read_capped_truncates_beyond_cap() {
-        let data = vec![b'x'; 100];
+        let data = [b'x'; 100];
         let (out, truncated) = read_capped(&mut &data[..], 10);
         assert_eq!(out.len(), 10);
         assert!(truncated);
