@@ -25,6 +25,9 @@ type AgentStoreState = {
   finish: (leafId: number) => void;
   setLocalAgent: (state: LocalAgentState) => void;
   pushNotification: (n: Omit<AgentNotification, "id" | "at" | "read">) => void;
+  /** Leaves moved to another tab (tab merge): re-home their sessions and
+   *  bell entries so visibility checks and jump targets stay valid. */
+  moveLeavesToTab: (leafIds: number[], tabId: number) => void;
   markAllRead: () => void;
   clearNotifications: () => void;
   removeNotification: (id: string) => void;
@@ -101,6 +104,26 @@ export const useAgentStore = create<AgentStoreState>((set) => ({
         ...s.notifications,
       ].slice(0, MAX_NOTIFICATIONS),
     })),
+
+  moveLeavesToTab: (leafIds, tabId) =>
+    set((s) => {
+      const ids = new Set(leafIds);
+      let changed = false;
+      const sessions = { ...s.sessions };
+      for (const id of ids) {
+        const prev = sessions[id];
+        if (prev && prev.tabId !== tabId) {
+          sessions[id] = { ...prev, tabId };
+          changed = true;
+        }
+      }
+      const notifications = s.notifications.map((n) => {
+        if (!ids.has(n.leafId) || n.tabId === tabId) return n;
+        changed = true;
+        return { ...n, tabId };
+      });
+      return changed ? { sessions, notifications } : s;
+    }),
 
   markAllRead: () =>
     set((s) => {
