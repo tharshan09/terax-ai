@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useSpaces } from "@/modules/spaces/lib/useSpaces";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import type { Tab } from "./useTabs";
 
@@ -24,6 +25,16 @@ export function envsMatch(
   return true;
 }
 
+/** The tabs that belong to `spaceId`; every tab when no space is active
+ *  (single-space setups, tests). Explorer and source-control follow the
+ *  *active space* only, so a space switch never shows another space's last
+ *  terminal cwd (upstream #1159). */
+export function tabsInSpace(tabs: Tab[], spaceId: string | null): Tab[] {
+  return spaceId ? tabs.filter((t) => t.spaceId === spaceId) : tabs;
+}
+
+type CachedCwd = { cwd: string; env: WorkspaceEnv | undefined };
+
 export function useWorkspaceCwd(
   activeTab: Tab | undefined,
   tabs: Tab[],
@@ -31,65 +42,79 @@ export function useWorkspaceCwd(
   /** Ambient env (== file-tree / AI env). cwds from a different env are skipped. */
   workspaceEnv: WorkspaceEnv,
 ): Result {
-  // Cache the cwd *with* its env so it's never reused under a different env
-  // (handing a local /Users/... path to the remote fs yields ENOENT).
-  const lastTerminalCwd = useRef<{
-    cwd: string;
-    env: WorkspaceEnv | undefined;
-  } | null>(null);
+  const activeSpaceId = useSpaces((s) => s.activeId);
+  const spaceTabs = useMemo(
+    () => tabsInSpace(tabs, activeSpaceId),
+    [tabs, activeSpaceId],
+  );
+  // The active tab is the active space's by construction; guard anyway so a
+  // stale activeTab during a switch cannot leak its cwd into the new space.
+  const spaceActiveTab =
+    activeTab && (!activeSpaceId || activeTab.spaceId === activeSpaceId)
+      ? activeTab
+      : undefined;
+
+  // Cache the last terminal cwd per space, *with* its env so it's never reused
+  // under a different env (handing a local /Users/... path to the remote fs
+  // yields ENOENT). Per space so switching back restores that space's cwd.
+  const cwdBySpace = useRef(new Map<string, CachedCwd>());
+  const cacheKey = activeSpaceId ?? "*";
 
   useEffect(() => {
     if (
-      activeTab?.kind === "terminal" &&
-      activeTab.cwd &&
-      envsMatch(activeTab.workspace, workspaceEnv)
+      spaceActiveTab?.kind === "terminal" &&
+      spaceActiveTab.cwd &&
+      envsMatch(spaceActiveTab.workspace, workspaceEnv)
     ) {
-      lastTerminalCwd.current = { cwd: activeTab.cwd, env: activeTab.workspace };
+      cwdBySpace.current.set(cacheKey, {
+        cwd: spaceActiveTab.cwd,
+        env: spaceActiveTab.workspace,
+      });
     } else if (workspaceEnv.kind === "ssh") {
       // Off a terminal tab (source-control / history / editor) the tmux cwd poll
       // keeps a background SSH terminal's cwd fresh; mirror it into the cache so
       // explorerRoot follows the live remote cwd instead of a stale value. SSH
       // only, so the local/WSL last-active-terminal behavior is unchanged.
-      const term = tabs.find(
+      const term = spaceTabs.find(
         (t) => t.kind === "terminal" && t.cwd && envsMatch(t.workspace, workspaceEnv),
       );
       if (term?.kind === "terminal" && term.cwd) {
-        lastTerminalCwd.current = { cwd: term.cwd, env: term.workspace };
+        cwdBySpace.current.set(cacheKey, { cwd: term.cwd, env: term.workspace });
       }
     }
-  }, [activeTab, tabs, workspaceEnv]);
+  }, [spaceActiveTab, spaceTabs, workspaceEnv, cacheKey]);
 
   const explorerRoot = useMemo<string | null>(() => {
     if (
-      activeTab?.kind === "terminal" &&
-      activeTab.cwd &&
-      envsMatch(activeTab.workspace, workspaceEnv)
+      spaceActiveTab?.kind === "terminal" &&
+      spaceActiveTab.cwd &&
+      envsMatch(spaceActiveTab.workspace, workspaceEnv)
     )
-      return activeTab.cwd;
-    const last = lastTerminalCwd.current;
+      return spaceActiveTab.cwd;
+    const last = cwdBySpace.current.get(cacheKey);
     if (last && envsMatch(last.env, workspaceEnv)) return last.cwd;
-    const anyTerm = tabs.find(
+    const anyTerm = spaceTabs.find(
       (t) =>
         t.kind === "terminal" && t.cwd && envsMatch(t.workspace, workspaceEnv),
     );
     if (anyTerm?.kind === "terminal" && anyTerm.cwd) return anyTerm.cwd;
-    // `home` is a LOCAL path — only a fallback for the local env. A remote env
+    // `home` is a LOCAL path: only a fallback for the local env. A remote env
     // with no known cwd yet shows nothing rather than reading the local home
     // path against the remote host.
     return workspaceEnv.kind === "local" ? home : null;
-  }, [activeTab, tabs, home, workspaceEnv]);
+  }, [spaceActiveTab, spaceTabs, home, workspaceEnv, cacheKey]);
 
   const inheritedCwdForNewTab = useCallback((): string | undefined => {
     if (
-      activeTab?.kind === "terminal" &&
-      activeTab.cwd &&
-      envsMatch(activeTab.workspace, workspaceEnv)
+      spaceActiveTab?.kind === "terminal" &&
+      spaceActiveTab.cwd &&
+      envsMatch(spaceActiveTab.workspace, workspaceEnv)
     )
-      return activeTab.cwd;
-    const last = lastTerminalCwd.current;
+      return spaceActiveTab.cwd;
+    const last = cwdBySpace.current.get(cacheKey);
     if (last && envsMatch(last.env, workspaceEnv)) return last.cwd;
     return workspaceEnv.kind === "local" ? (home ?? undefined) : undefined;
-  }, [activeTab, home, workspaceEnv]);
+  }, [spaceActiveTab, home, workspaceEnv, cacheKey]);
 
   return { explorerRoot, inheritedCwdForNewTab };
 }

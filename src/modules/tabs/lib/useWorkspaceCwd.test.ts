@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { envsMatch } from "./useWorkspaceCwd";
+import { envsMatch, tabsInSpace } from "./useWorkspaceCwd";
+import type { Tab } from "./useTabs";
 
 // envsMatch decides whether a cached/inherited cwd may be reused for a target
 // env. A false positive hands a path to the wrong shell environment (a local
@@ -48,5 +49,24 @@ describe("envsMatch", () => {
         { kind: "wsl", distro: "Debian" },
       ),
     ).toBe(false);
+  });
+});
+
+describe("tabsInSpace", () => {
+  const tab = (id: number, spaceId: string) =>
+    ({ id, kind: "terminal", spaceId }) as unknown as Tab;
+  const tabs = [tab(1, "a"), tab(2, "b"), tab(3, "a")];
+
+  it("keeps only the active space's tabs", () => {
+    expect(tabsInSpace(tabs, "a").map((t) => t.id)).toEqual([1, 3]);
+    expect(tabsInSpace(tabs, "b").map((t) => t.id)).toEqual([2]);
+  });
+
+  it("returns every tab when no space is active", () => {
+    expect(tabsInSpace(tabs, null)).toBe(tabs);
+  });
+
+  it("yields nothing for a space without tabs (no cross-space leak)", () => {
+    expect(tabsInSpace(tabs, "c")).toEqual([]);
   });
 });
