@@ -25,7 +25,16 @@ import { useAgentStore } from "../store/agentStore";
 type Props = {
   onActivate: (tabId: number, leafId: number) => void;
   onActivateLocal: () => void;
+  /** SSH hosts with an open terminal tab; each gets a "Claude on <host>" hook
+   *  row so notifications also work for agents running remotely. */
+  sshHosts?: string[];
 };
+
+const REMOTE_HOOK_AGENT = "claude";
+
+function remoteHookKey(host: string): string {
+  return `${REMOTE_HOOK_AGENT}@${host}`;
+}
 
 function relativeTime(ts: number): string {
   const s = Math.floor((Date.now() - ts) / 1000);
@@ -187,7 +196,11 @@ function NotificationRow({
   );
 }
 
-export function NotificationBell({ onActivate, onActivateLocal }: Props) {
+export function NotificationBell({
+  onActivate,
+  onActivateLocal,
+  sshHosts = [],
+}: Props) {
   const [open, setOpen] = useState(false);
   const [hooks, setHooks] = useState<Record<string, boolean>>({});
   const [installing, setInstalling] = useState<string | null>(null);
@@ -210,13 +223,24 @@ export function NotificationBell({ onActivate, onActivateLocal }: Props) {
     (n) => !n.read && n.kind !== "attention",
   ).length;
   const badge = waitingCount + unreadDone;
-  const enabledCount = HOOK_AGENTS.filter((id) => hooks[id] === true).length;
+  const enabledCount =
+    HOOK_AGENTS.filter((id) => hooks[id] === true).length +
+    sshHosts.filter((host) => hooks[remoteHookKey(host)] === true).length;
 
   const refreshHooks = () => {
     for (const id of HOOK_AGENTS) {
       invoke<boolean>("agent_hooks_status", { agent: id })
         .then((ok) => setHooks((h) => ({ ...h, [id]: ok })))
         .catch(() => setHooks((h) => ({ ...h, [id]: false })));
+    }
+    for (const host of sshHosts) {
+      const key = remoteHookKey(host);
+      invoke<boolean>("agent_hooks_status", {
+        agent: REMOTE_HOOK_AGENT,
+        workspace: { kind: "ssh", host },
+      })
+        .then((ok) => setHooks((h) => ({ ...h, [key]: ok })))
+        .catch(() => setHooks((h) => ({ ...h, [key]: false })));
     }
   };
 
@@ -235,6 +259,22 @@ export function NotificationBell({ onActivate, onActivateLocal }: Props) {
       setHooks((h) => ({ ...h, [id]: true }));
     } catch {
       setHooks((h) => ({ ...h, [id]: false }));
+    } finally {
+      setInstalling(null);
+    }
+  };
+
+  const enableRemoteHooks = async (host: string) => {
+    const key = remoteHookKey(host);
+    setInstalling(key);
+    try {
+      await invoke("agent_enable_hooks", {
+        agent: REMOTE_HOOK_AGENT,
+        workspace: { kind: "ssh", host },
+      });
+      setHooks((h) => ({ ...h, [key]: true }));
+    } catch {
+      setHooks((h) => ({ ...h, [key]: false }));
     } finally {
       setInstalling(null);
     }
@@ -373,6 +413,18 @@ export function NotificationBell({ onActivate, onActivateLocal }: Props) {
                   ready={hooks[id] === true}
                   installing={installing === id}
                   onEnable={() => enableHooks(id)}
+                />
+              ))
+            : null}
+          {alertsOpen
+            ? sshHosts.map((host) => (
+                <HookAgentRow
+                  key={remoteHookKey(host)}
+                  id={REMOTE_HOOK_AGENT}
+                  label={`${displayAgent(REMOTE_HOOK_AGENT)} on ${host}`}
+                  ready={hooks[remoteHookKey(host)] === true}
+                  installing={installing === remoteHookKey(host)}
+                  onEnable={() => enableRemoteHooks(host)}
                 />
               ))
             : null}

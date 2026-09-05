@@ -41,4 +41,34 @@ describe("resolveAgentNotificationDelivery", () => {
       }),
     ).toBe("bell");
   });
+
+  it("promotes a hidden agent to a native alert when asked to notify while focused", () => {
+    expect(
+      resolveAgentNotificationDelivery({
+        focused: true,
+        visible: false,
+        allowToast: true,
+        notifyWhenFocused: true,
+      }),
+    ).toBe("native");
+    expect(
+      resolveAgentNotificationDelivery({
+        focused: true,
+        visible: false,
+        allowToast: false,
+        notifyWhenFocused: true,
+      }),
+    ).toBe("native");
+  });
+
+  it("never alerts for the agent on screen, even when notifying while focused", () => {
+    expect(
+      resolveAgentNotificationDelivery({
+        focused: true,
+        visible: true,
+        allowToast: true,
+        notifyWhenFocused: true,
+      }),
+    ).toBe("none");
+  });
 });

@@ -17,6 +17,7 @@ import {
   useEffect,
   useRef,
   useState,
+  useMemo,
 } from "react";
 import {
   SearchInline,
@@ -85,6 +86,15 @@ export function Header({
   searchTarget,
   searchRef,
 }: Props) {
+  // Hosts with an open SSH terminal, for the bell's remote hook rows.
+  const agentSshHosts = useMemo(() => {
+    const hosts: string[] = [];
+    for (const t of tabs) {
+      if (t.kind !== "terminal" || t.workspace?.kind !== "ssh") continue;
+      if (!hosts.includes(t.workspace.host)) hosts.push(t.workspace.host);
+    }
+    return hosts;
+  }, [tabs]);
   const rootRef = useRef<HTMLDivElement>(null);
   const [compact, setCompact] = useState(false);
 
@@ -144,6 +154,7 @@ export function Header({
           <NotificationBell
             onActivate={onActivateAgent}
             onActivateLocal={onActivateLocalAgent}
+            sshHosts={agentSshHosts}
           />
         )}
       </div>
@@ -196,6 +207,7 @@ export function Header({
           <NotificationBell
             onActivate={onActivateAgent}
             onActivateLocal={onActivateLocalAgent}
+            sshHosts={agentSshHosts}
           />
           {settingsButton}
         </>

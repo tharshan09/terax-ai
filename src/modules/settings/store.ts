@@ -193,6 +193,10 @@ export type Preferences = {
   trackpadTabSwipe: boolean;
   agentNotifications: boolean;
   agentNotificationSound: boolean;
+  /** Native alert even while Terax is frontmost, as long as the agent's tab is not the one on screen. */
+  agentNotifyWhenFocused: boolean;
+  /** Alert (not just the bell) when an agent finishes a turn. */
+  agentNotifyOnFinish: boolean;
   shortcuts: Record<ShortcutId, KeyBinding[]>;
   editorAutoSave: boolean;
   editorAutoSaveDelay: number;
@@ -260,6 +264,8 @@ const KEY_ZOOM_LEVEL = "zoomLevel";
 const KEY_TRACKPAD_TAB_SWIPE = "trackpadTabSwipe";
 const KEY_AGENT_NOTIFICATIONS = "agentNotifications";
 const KEY_AGENT_NOTIFICATION_SOUND = "agentNotificationSound";
+const KEY_AGENT_NOTIFY_WHEN_FOCUSED = "agentNotifyWhenFocused";
+const KEY_AGENT_NOTIFY_ON_FINISH = "agentNotifyOnFinish";
 const KEY_SHORTCUTS = "shortcuts";
 const KEY_EDITOR_AUTO_SAVE = "editorAutoSave";
 const KEY_EDITOR_AUTO_SAVE_DELAY = "editorAutoSaveDelay";
@@ -336,6 +342,8 @@ export const DEFAULT_PREFERENCES: Preferences = {
   trackpadTabSwipe: true,
   agentNotifications: true,
   agentNotificationSound: true,
+  agentNotifyWhenFocused: true,
+  agentNotifyOnFinish: true,
   shortcuts: {} as Record<ShortcutId, KeyBinding[]>,
   editorAutoSave: false,
   editorAutoSaveDelay: 1000,
@@ -521,6 +529,12 @@ export async function loadPreferences(): Promise<Preferences> {
     agentNotificationSound:
       get<boolean>(KEY_AGENT_NOTIFICATION_SOUND) ??
       DEFAULT_PREFERENCES.agentNotificationSound,
+    agentNotifyWhenFocused:
+      get<boolean>(KEY_AGENT_NOTIFY_WHEN_FOCUSED) ??
+      DEFAULT_PREFERENCES.agentNotifyWhenFocused,
+    agentNotifyOnFinish:
+      get<boolean>(KEY_AGENT_NOTIFY_ON_FINISH) ??
+      DEFAULT_PREFERENCES.agentNotifyOnFinish,
     shortcuts:
       get<Record<ShortcutId, KeyBinding[]>>(KEY_SHORTCUTS) ??
       DEFAULT_PREFERENCES.shortcuts,
@@ -870,6 +884,14 @@ export async function setAgentNotificationSound(value: boolean): Promise<void> {
   await writePref(KEY_AGENT_NOTIFICATION_SOUND, value);
 }
 
+export async function setAgentNotifyWhenFocused(value: boolean): Promise<void> {
+  await writePref(KEY_AGENT_NOTIFY_WHEN_FOCUSED, value);
+}
+
+export async function setAgentNotifyOnFinish(value: boolean): Promise<void> {
+  await writePref(KEY_AGENT_NOTIFY_ON_FINISH, value);
+}
+
 export async function setShortcuts(
   value: Record<ShortcutId, KeyBinding[]> | {},
 ): Promise<void> {
@@ -955,6 +977,8 @@ export async function onPreferencesChange(
     [KEY_TRACKPAD_TAB_SWIPE]: "trackpadTabSwipe",
     [KEY_AGENT_NOTIFICATIONS]: "agentNotifications",
     [KEY_AGENT_NOTIFICATION_SOUND]: "agentNotificationSound",
+    [KEY_AGENT_NOTIFY_WHEN_FOCUSED]: "agentNotifyWhenFocused",
+    [KEY_AGENT_NOTIFY_ON_FINISH]: "agentNotifyOnFinish",
     [KEY_SHORTCUTS]: "shortcuts",
     [KEY_EDITOR_AUTO_SAVE]: "editorAutoSave",
     [KEY_EDITOR_AUTO_SAVE_DELAY]: "editorAutoSaveDelay",

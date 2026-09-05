@@ -33,6 +33,8 @@ import {
   setInactivePaneStyle,
   setPaneHeaders,
   setAgentNotificationSound,
+  setAgentNotifyOnFinish,
+  setAgentNotifyWhenFocused,
   setAgentNotifications,
   setAutostart,
   setEditorWordWrap,
@@ -163,6 +165,10 @@ export function GeneralSection() {
   const agentNotificationSound = usePreferencesStore(
     (s) => s.agentNotificationSound,
   );
+  const agentNotifyWhenFocused = usePreferencesStore(
+    (s) => s.agentNotifyWhenFocused,
+  );
+  const agentNotifyOnFinish = usePreferencesStore((s) => s.agentNotifyOnFinish);
   const [notificationTest, setNotificationTest] =
     useState<NotificationTestState>("idle");
   const notificationTestPending =
@@ -640,7 +646,7 @@ export function GeneralSection() {
         <Label>Agents</Label>
         <SettingRow
           title="Coding agent notifications"
-          description="Alert when a coding agent needs your input or finishes. Native notification when Terax is unfocused, in-app otherwise."
+          description="Alert when a coding agent running in a terminal needs your input or finishes. Works inside tmux and over SSH once the agent's hooks are enabled from the bell menu."
         >
           <div className="flex items-center gap-2">
             <Button
@@ -662,6 +668,26 @@ export function GeneralSection() {
               }}
             />
           </div>
+        </SettingRow>
+        <SettingRow
+          title="Notify while Terax is focused"
+          description="Send a native notification even when Terax is the frontmost app, as long as the agent's tab is not the one on screen. Off: only an in-app toast."
+        >
+          <Switch
+            checked={agentNotifyWhenFocused}
+            disabled={!agentNotifications}
+            onCheckedChange={(v) => void setAgentNotifyWhenFocused(v)}
+          />
+        </SettingRow>
+        <SettingRow
+          title="Notify when an agent finishes"
+          description="Alert when an agent ends its turn, not only when it needs input. Off: finished turns only appear in the bell."
+        >
+          <Switch
+            checked={agentNotifyOnFinish}
+            disabled={!agentNotifications}
+            onCheckedChange={(v) => void setAgentNotifyOnFinish(v)}
+          />
         </SettingRow>
         <SettingRow
           title="Notification sound"

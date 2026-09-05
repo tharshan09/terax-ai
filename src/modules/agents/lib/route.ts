@@ -40,11 +40,16 @@ export function routeAgentNotification({
 }: RouteArgs): void {
   const preferences = usePreferencesStore.getState();
   if (!preferences.agentNotifications) return;
-  const delivery = resolveAgentNotificationDelivery({
+  // "finished" fires on every turn end; unless the user opted into finish
+  // alerts it only lands in the bell. Attention always alerts.
+  const alerts = kind !== "finished" || preferences.agentNotifyOnFinish;
+  let delivery = resolveAgentNotificationDelivery({
     focused,
     visible,
-    allowToast,
+    allowToast: allowToast && alerts,
+    notifyWhenFocused: preferences.agentNotifyWhenFocused,
   });
+  if (!alerts && delivery !== "none") delivery = "bell";
   if (delivery === "none") return;
   if (!shouldDeliver({ source, agent, kind, tabId, leafId })) return;
 
@@ -59,6 +64,9 @@ export function routeAgentNotification({
         playAgentNotificationSound();
       }
     });
+    // Terax itself is frontmost: the banner alone offers no way to jump to
+    // the agent, so pair it with the in-app toast when the caller allows one.
+    if (focused && allowToast) showAgentToast({ agent, title, body, onActivate });
     return;
   }
   if (delivery === "toast") {
