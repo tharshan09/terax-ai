@@ -62,6 +62,12 @@ pub fn handle_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
         return;
     };
 
+    // Settings is a child window ordered above main on macOS; hide it so the
+    // in-webview close-guard dialog (busy terminal / unsaved editor) is not
+    // covered by it.
+    if let Some(settings) = app.get_webview_window("settings") {
+        let _ = settings.hide();
+    }
     let _ = main.unminimize();
     let _ = main.show();
     let _ = main.set_focus();

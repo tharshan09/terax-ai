@@ -1467,8 +1467,13 @@ export default function App() {
               orientation="horizontal"
               className="min-h-0 flex-1"
               onLayoutChanged={(_, { isUserInteraction }) => {
-                const width = sidebarRef.current?.getSize().inPixels ?? 0;
-                persistSidebarWidth(width, isUserInteraction);
+                // Keyboard resizes fire this synchronously before the panel
+                // re-renders; measure after the commit so the persisted width
+                // is the new one, not the previous step.
+                requestAnimationFrame(() => {
+                  const width = sidebarRef.current?.getSize().inPixels ?? 0;
+                  persistSidebarWidth(width, isUserInteraction);
+                });
               }}
             >
               <ResizablePanel

@@ -215,7 +215,46 @@ pub fn disconnect_all() {
 /// envelope on stdout. Mirrors the local fs semantics (symlink-follow,
 /// dirs-first sort, 10 MB read cap, atomic write) so callers are
 /// local/remote-blind.
-const REMOTE_PYTHON: &str = r#"import sys, os, json, tempfile, shutil, base64
+const REMOTE_PYTHON: &str = r#"import sys, os, json, tempfile, shutil, base64, functools
+
+
+def _natcmp(a, b):
+    # Port of tree.rs natural_cmp so local and SSH explorers list identically:
+    # case-insensitive; ASCII digit runs compare by value (shorter stripped
+    # run first, then digits), leading zeros only break ties; anything else
+    # compares by code point.
+    a = a.lower(); b = b.lower(); ai = bi = 0
+    while True:
+        if ai >= len(a) and bi >= len(b):
+            return 0
+        if ai >= len(a):
+            return -1
+        if bi >= len(b):
+            return 1
+        ac = a[ai]; bc = b[bi]
+        if "0" <= ac <= "9" and "0" <= bc <= "9":
+            ae = ai
+            while ae < len(a) and "0" <= a[ae] <= "9":
+                ae += 1
+            be = bi
+            while be < len(b) and "0" <= b[be] <= "9":
+                be += 1
+            ar = a[ai:ae]; br = b[bi:be]
+            an = ar.lstrip("0"); bn = br.lstrip("0")
+            if len(an) != len(bn):
+                return -1 if len(an) < len(bn) else 1
+            if an != bn:
+                return -1 if an < bn else 1
+            if len(ar) != len(br):
+                return -1 if len(ar) < len(br) else 1
+            ai = ae; bi = be
+        else:
+            if ac != bc:
+                return -1 if ac < bc else 1
+            ai += 1; bi += 1
+
+
+_natkey = functools.cmp_to_key(_natcmp)
 from stat import S_ISDIR
 
 MAX_READ = 10 * 1024 * 1024
@@ -267,7 +306,7 @@ def read_dir(req):
             if len(out) >= MAX_ENTRIES:  # bound host memory + response size
                 break
     rank = {"dir": 0, "symlink": 1, "file": 2}
-    out.sort(key=lambda x: (rank[x["kind"]], x["name"].lower()))
+    out.sort(key=lambda x: (rank[x["kind"]], _natkey(x["name"])))
     return out
 
 
@@ -285,7 +324,7 @@ def list_subdirs(req):
                     out.append(e.name)
             except OSError:
                 pass
-    out.sort(key=str.lower)
+    out.sort(key=_natkey)
     return out
 
 

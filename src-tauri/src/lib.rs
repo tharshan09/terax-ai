@@ -294,9 +294,17 @@ pub fn run() {
     let builder = tauri::Builder::default();
     // macOS: replace the predefined Quit item so Cmd+Q closes the main window
     // (running the frontend close guard) instead of exiting immediately.
+    // The guarded menu introspects tauri's default app menu; if a future
+    // tauri/muda changes its shape, fall back to the stock menu (Cmd+Q then
+    // quits unguarded) instead of aborting startup.
     #[cfg(target_os = "macos")]
     let builder = builder
-        .menu(app_menu::build)
+        .menu(|app| {
+            app_menu::build(app).or_else(|error| {
+                log::warn!("guarded quit menu unavailable, using the default menu: {error}");
+                tauri::menu::Menu::default(app)
+            })
+        })
         .on_menu_event(app_menu::handle_event);
     builder
         // Skip restoring VISIBLE — frontend calls window.show() after first

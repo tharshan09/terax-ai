@@ -155,7 +155,10 @@ export function Header({
         onContextMenu={(e) => {
           // Empty chrome falls through to WebKit Reload, which reloads the
           // webview and pty_close_all's every shell (#1242). Per-tab menus
-          // still open: Radix handles the trigger before this bubbles.
+          // still open: Radix handles the trigger before this bubbles. The
+          // rename inputs keep their native Paste/spelling menu.
+          const target = e.target as Element | null;
+          if (target?.closest("input, textarea, [contenteditable]")) return;
           e.preventDefault();
         }}
       >
