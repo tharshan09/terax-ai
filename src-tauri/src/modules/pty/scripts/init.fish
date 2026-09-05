@@ -32,7 +32,9 @@ function __terax_urlencode_path
             set out $out ""
         end
     end
-    string join '/' $out
+    # `--`, or a directory whose name starts with a dash is read as an option
+    # and every prompt reports an error instead of the cwd.
+    string join -- '/' $out
 end
 
 function __terax_restore_status
@@ -50,16 +52,43 @@ function __terax_capture_user_prompt
     functions -c fish_prompt __terax_user_prompt
 end
 
+# Is our prompt still in the chain, reached through a copy someone put aside?
+#
+# Prompt frameworks that wrap rather than replace copy the current fish_prompt
+# under their own name and call that copy: Conda as __fish_prompt_orig, Python's
+# virtualenv and venv as _old_fish_prompt. Our markers keep being emitted, so
+# there is nothing to reinstall. Wrapping such a prompt again would capture the
+# framework's wrapper into __terax_user_prompt, which the copy of ours then
+# calls straight back into, and fish renders the prompt until its call-stack
+# limit trips.
+#
+# __terax_restore_status is only ever named by our own prompt, so a second
+# function carrying it is exactly such a copy. Matching on that instead of on
+# the framework's chosen name covers the ones we have not heard of.
+function __terax_prompt_wraps_us
+    if not functions -q fish_prompt
+        return 1
+    end
+    # Read the names out of the prompt body rather than walking every defined
+    # function: a prompt calls a handful of things, and fish defines hundreds.
+    for name in (functions fish_prompt | string match -ra -- '[A-Za-z_][A-Za-z0-9_-]*')
+        if test "$name" = fish_prompt
+            continue
+        end
+        if functions -q $name
+            and functions $name | string match -q '*__terax_restore_status*'
+            return 0
+        end
+    end
+    return 1
+end
+
 # Wrapped so `fish -C __terax_install_prompt` can re-run it AFTER config.fish,
 # where a framework prompt (starship etc.) would otherwise override fish_prompt
 # and drop our markers.
 function __terax_install_prompt
-    # ponytail: cover Conda's named wrapper; generalize if another prompt
-    # framework preserves Terax indirectly.
     if not set -q TERAX_BLOCKS
-        and functions -q __fish_prompt_orig
-        and functions fish_prompt | string match -q '*__fish_prompt_orig*'
-        and functions __fish_prompt_orig | string match -q '*__terax_user_prompt*'
+        and __terax_prompt_wraps_us
         return
     end
     __terax_capture_user_prompt
