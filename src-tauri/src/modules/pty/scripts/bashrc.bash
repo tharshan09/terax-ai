@@ -24,6 +24,12 @@ if [ -z "$__TERAX_HOOKS_LOADED" ]; then
   # on reload, guard with a flag.
   [ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc"
 
+  # This shell's own tty, for agent hooks that cannot reach the terminal
+  # themselves; re-evaluated per shell. See `agent::hook_command`.
+  _terax_tty="$(tty 2>/dev/null)"
+  case "$_terax_tty" in /dev/*) export TERAX_TTY="$_terax_tty" ;; esac
+  unset _terax_tty
+
   _terax_urlencode() {
     local LC_ALL=C s="$1" i c
     for (( i=0; i<${#s}; i++ )); do

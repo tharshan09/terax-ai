@@ -18,6 +18,14 @@ if [[ -z "$__TERAX_HOOKS_LOADED" ]]; then
   __TERAX_HOOKS_LOADED=1
   autoload -Uz add-zsh-hook 2>/dev/null
 
+  # Path to this shell's own tty, for agent hooks that cannot reach the
+  # terminal themselves (Claude Code relays its `terminalSequence` for only
+  # some hook events). Re-evaluated per shell, so a nested shell corrects a
+  # value inherited from an outer one. See `agent::hook_command`.
+  _terax_tty="$(tty 2>/dev/null)"
+  [[ "$_terax_tty" == /dev/* ]] && export TERAX_TTY="$_terax_tty"
+  unset _terax_tty
+
   # URL-encode $PWD byte-wise so multi-byte paths stay valid in the `file://`
   # URI emitted via OSC 7. `no_multibyte` forces ${s[i]} to index bytes (not
   # code points), and LC_ALL=C keeps the [a-zA-Z0-9...] class single-byte.
