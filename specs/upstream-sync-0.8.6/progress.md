@@ -44,3 +44,28 @@ Nebenbefunde: Fork-PRs #54 (README) und #9 (Linux IME) weiter offen, unberührt.
 4. fish-Nutzer mit venv: Prompt rendert normal.
 
 **Weiter offen aus der ursprünglichen Liste:** Remote-Hooks auf litha-claude neu enablen (User-Klick) · tmux-aware Alt-Screen-Key-Gating · Upstream-Tastatur-Pane-Swap d6e3491/460657a · Fokus-Dispatch in useTerminalSession bündeln · W2 (Tab/Editor-Features) und Block D weiter geparkt.
+
+
+---
+
+# Runde 2 der Follow-ups (Stand 2026-09-05 nachmittags, Session terax-ai-39)
+
+**main = `ea66a34`.**
+
+- [x] **Neue tmux-Session benennen (#79, `ea66a34`).** User-Wunsch: beim SSH-Verbinden fragt der Picker; „New session" vergab still `s1`, `s2` und man musste danach umbenennen. Jetzt oeffnet die Zeile einen Namensschritt, vorbelegt mit demselben Default, fokussiert und markiert. Enter nimmt die Vorbelegung, Tippen ersetzt sie. Ein in den Filter getippter Name legt weiter sofort an. `Cmd+Enter` (neuer Tab) laeuft durch dieselbe Frage.
+  - **Zwei Review-Findings mit echtem Biss.** (1) Escape im Namensfeld schloss den ganzen Picker: Radix haengt am `document` in der **Capture-Phase**, ein Feld im Dialog sieht die Taste also nie zuerst. Loesung: `CommandDialog` reicht `onEscapeKeyDown` an den Content durch, und der Picker verhindert das Schliessen, solange ein Feld (nicht das cmdk-Filterfeld, erkennbar an `data-slot="command-input"`) den Fokus hat. Das repariert nebenbei die vorbestehende Inline-Umbenennung. (2) Die Entscheidung „fragen oder sofort anlegen" haing an `query.trim()`, der Name kam aber aus `sanitizeSessionName`. `///` sanitisiert zu nichts, also wurde der erfundene Default doch wieder still angelegt. Beide lesen jetzt denselben Wert.
+  - Ausserdem: `tmux new-session -A` **attached**, wenn der Name existiert. Der Namensschritt sagt das jetzt und der Knopf heisst dann „Attach".
+  - **Gotcha fuer Live-Tests:** Ein per `new KeyboardEvent(...)` erzeugtes Event ist **nicht cancelable**, `preventDefault()` verpufft. Ohne `cancelable:true` sieht ein Escape-Test falsch negativ aus.
+  - **Gotcha:** `pnpm format` formatiert `./src` komplett und fasst ~131 Dateien an, das Repo ist nicht durchgehend biome-formatiert. Immer nur die eigenen Dateien formatieren (`npx biome format --write <pfade>`). `src/components/ui/*` ist von biome ausgenommen.
+- [x] **Flaky-Flush-Tests entschaerft (#80, `a3cc171`).** `flush_tests::{flip_to_visible,done,force_flush}_cuts_...` massen die Zeit ab **vor** dem Thread-Start und zahlten damit Spawn plus einen 10-ms-Schlaf aus dem 64-ms-Budget; auf dem macOS-Runner lief der letzte Fehlschlag 86 ms. Jetzt wird ab dem Signal gemessen. Lokal nicht reproduzierbar (Maschine zu schnell, 30 Laeufe unter Last gruen mit und ohne Fix), Beleg ist die CI-Messung.
+
+**Verifiziert (Runde 1 + 2), jeweils in der laufenden App bzw. mit echten Sitzungen:**
+- Plain-Tab-Notification e2e mit echter Claude-Sitzung im PTY: `TERAX_TTY=/dev/ttys005`, Marker `working` und `finished` kamen als rohe OSC-777-Bytes an.
+- Hooks in `~/.claude/settings.json` migriert; Schluesselreihenfolge bleibt (preserve_order).
+- Quit-Guard installiert, `osascript`-Quit ohne offene Arbeit beendet sauber (kein Haenger, also kam die aufgeschobene Antwort an). Dialog erscheint bei ungespeichertem Editor, „Cancel" haelt, Menue-Quit blendet Settings aus.
+- Namensschritt live: vorbelegt `s1` und markiert, Hinweis folgt dem bereinigten Namen, reserviertes Praefix und leerer Name sperren, Escape geht zurueck ohne anzulegen, Filter-Escape schliesst weiterhin.
+- fish: Projekt-Testdatei gruen mit echtem fish 4.9.1 inkl. venv- und Bindestrich-Fall.
+
+**Nebenbefund:** Die Busy-Terminal-Pruefung des Close-Guards greift bei tmux-Tabs **nie**. Der PTY-Prozess ist der tmux-Client (`exec tmux`), und `pgrep -P <client>` findet keine Kinder. Praktisch schuetzt der Guard nur ungespeicherte Editoren. Kandidat fuer eine eigene Runde.
+
+**Weiter offen:** Settings-Fenster kommt nach Abbruch zurueck (nicht abschliessend live geprueft) · Remote-Hooks auf litha-claude neu enablen (User-Klick) · tmux-aware Alt-Screen-Key-Gating · Upstream-Tastatur-Pane-Swap · Fokus-Dispatch buendeln · W2 und Block D geparkt.
