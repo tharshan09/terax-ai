@@ -1,4 +1,7 @@
+use crate::modules::ssh;
+use crate::modules::workspace::WorkspaceEnv;
 use serde_json::{json, Value};
+use std::path::Path;
 
 // How a given agent's hook delivers our OSC 777 marker into the terminal.
 #[derive(Clone, Copy)]
@@ -77,10 +80,22 @@ fn find(agent: &str) -> Result<&'static AgentSpec, String> {
         .ok_or_else(|| format!("unknown agent {agent}"))
 }
 
+// tmux swallows any OSC it does not understand, so a marker printed inside a
+// tmux pane never reaches Terax's PTY parser, and every restart-safe tab and
+// every SSH session runs under tmux. Inside tmux (`$TMUX` set) the hook wraps
+// the marker in a DCS passthrough, `ESC P tmux; <payload, ESCs doubled> ESC \`,
+// which tmux unwraps and forwards to the outer terminal when the pane's
+// `allow-passthrough` option permits. Terax turns that option on for every tmux
+// session it attaches (`shell_init::tmux_attach_command`); any other terminal
+// keeps tmux's default (off), so the tmux branch needs no TERAX_TERMINAL gate:
+// the option is the gate. Outside tmux the plain marker stays gated as before.
+// The substring proves an install already carries the tmux-aware form.
+const TMUX_NEEDLE: &str = "Ptmux;";
+
 fn hook_command(spec: &AgentSpec, event: &str) -> String {
     match spec.delivery {
         Delivery::TerminalSequence => format!(
-            r#"[ -n "$TERAX_TERMINAL" ] && printf '{{"terminalSequence":"\\u001b]777;notify;Terax;{event}\\u0007"}}' || true"#
+            r#"if [ -n "$TMUX" ]; then printf '{{"terminalSequence":"\\u001bPtmux;\\u001b\\u001b]777;notify;Terax;{event}\\u0007\\u001b\\\\"}}'; elif [ -n "$TERAX_TERMINAL" ]; then printf '{{"terminalSequence":"\\u001b]777;notify;Terax;{event}\\u0007"}}'; fi"#
         ),
         Delivery::Osc => osc_command(spec.agent, event),
     }
@@ -90,7 +105,7 @@ fn hook_command(spec: &AgentSpec, event: &str) -> String {
 #[cfg(unix)]
 fn osc_command(agent: &str, event: &str) -> String {
     format!(
-        r#"[ -n "$TERAX_TERMINAL" ] && printf '\033]777;notify;Terax;{agent};{event}\007' > /dev/tty; printf '{{}}'"#
+        r#"if [ -n "$TMUX" ]; then printf '\033Ptmux;\033\033]777;notify;Terax;{agent};{event}\007\033\\' > /dev/tty; elif [ -n "$TERAX_TERMINAL" ]; then printf '\033]777;notify;Terax;{agent};{event}\007' > /dev/tty; fi; printf '{{}}'"#
     )
 }
 
@@ -194,9 +209,52 @@ pub(crate) fn claude_settings_path() -> Result<std::path::PathBuf, String> {
     settings_path(find("claude")?)
 }
 
+/// Whether `content` (an agent's settings file) carries every hook we install,
+/// in the current tmux-aware form. An install from an older Terax that still
+/// writes the bare marker reports false so the UI offers a re-enable (and
+/// `agent_migrate_hooks` upgrades it silently at startup).
+fn hooks_installed(spec: &AgentSpec, content: &str) -> bool {
+    // Keyed on the marker: PreToolUse/PostToolUse reuse "working", so an install
+    // predating them still reports enabled (its UserPromptSubmit already carries
+    // that needle) and is not force-nagged to re-enable.
+    let all = spec
+        .events
+        .iter()
+        .all(|(_, m, _)| content.contains(&status_needle(spec, m)));
+    #[cfg(unix)]
+    {
+        all && content.contains(TMUX_NEEDLE)
+    }
+    #[cfg(windows)]
+    {
+        all
+    }
+}
+
+fn is_legacy_install(content: &str) -> bool {
+    OWNED_MARKERS.iter().any(|m| content.contains(m)) && !content.contains(TMUX_NEEDLE)
+}
+
+/// Install (or refresh) the agent's hooks. No `workspace` (or a local one)
+/// edits this machine's config; an SSH env edits the file on that host, where
+/// the user's remote agent actually runs, the same split as the Claude
+/// statusLine wrapper. Async + spawn_blocking so the remote round-trip never
+/// runs on the main thread.
 #[tauri::command]
-pub fn agent_enable_hooks(agent: String) -> Result<(), String> {
+pub async fn agent_enable_hooks(
+    agent: String,
+    workspace: Option<WorkspaceEnv>,
+) -> Result<(), String> {
     let spec = find(&agent)?;
+    tauri::async_runtime::spawn_blocking(move || match WorkspaceEnv::from_option(workspace) {
+        WorkspaceEnv::Ssh { host } => enable_ssh(spec, &host),
+        _ => enable_local(spec),
+    })
+    .await
+    .map_err(|e| format!("hook install task failed: {e}"))?
+}
+
+fn enable_local(spec: &AgentSpec) -> Result<(), String> {
     let path = settings_path(spec)?;
     let dir = path.parent().unwrap();
     std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
@@ -219,6 +277,80 @@ pub fn agent_enable_hooks(agent: String) -> Result<(), String> {
         format!("rename into {}: {e}", path.display())
     })?;
     Ok(())
+}
+
+fn remote_rel(spec: &AgentSpec) -> String {
+    format!("{}/{}", spec.dir, spec.file)
+}
+
+/// `cat` (not a stat+read) so a missing remote file reads as empty and starts a
+/// fresh config instead of erroring; invalid JSON still refuses to clobber.
+fn read_ssh(
+    spec: &AgentSpec,
+    host: &str,
+    timeout: Option<std::time::Duration>,
+) -> Result<Option<String>, String> {
+    let cmd = format!(
+        "cat ~/{} 2>/dev/null",
+        crate::modules::git::quote_remote_arg(&remote_rel(spec))
+    );
+    let cap = ssh::run_remote_capture(host, &cmd, timeout)?;
+    Ok(if cap.stdout.is_empty() {
+        None
+    } else {
+        Some(cap.stdout)
+    })
+}
+
+fn enable_ssh(spec: &AgentSpec, host: &str) -> Result<(), String> {
+    ssh::validate_ssh_host(host)?;
+    let rel = remote_rel(spec);
+    // Setup path (not a poll): wait indefinitely, like the statusLine install.
+    ssh::run_remote_capture(
+        host,
+        &format!("mkdir -p ~/{}", crate::modules::git::quote_remote_arg(spec.dir)),
+        None,
+    )?;
+    let raw = read_ssh(spec, host, None)?;
+    let existing = existing_config(raw.as_deref(), Path::new(&format!("the remote ~/{rel}")))?;
+    let merged = merge_hooks(existing, spec);
+    let out = serde_json::to_string_pretty(&merged).map_err(|e| e.to_string())?;
+    ssh::write_file(host, &format!("~/{rel}"), &out)
+}
+
+fn status_ssh(spec: &AgentSpec, host: &str) -> bool {
+    if ssh::validate_ssh_host(host).is_err() {
+        return false;
+    }
+    // A status probe is a poll: a wedged host must not hang the popover.
+    read_ssh(spec, host, Some(std::time::Duration::from_secs(8)))
+        .ok()
+        .flatten()
+        .is_some_and(|content| hooks_installed(spec, &content))
+}
+
+/// Upgrade hooks an older Terax installed without the tmux passthrough form.
+/// Only touches configs that already carry our markers: the user opted into
+/// hooks once, this just keeps them working under tmux. Returns the agents
+/// that were rewritten. Windows keeps the ConPTY helper and has nothing to do.
+#[tauri::command]
+pub fn agent_migrate_hooks() -> Vec<String> {
+    let mut migrated = Vec::new();
+    if cfg!(windows) {
+        return migrated;
+    }
+    for spec in AGENTS {
+        let Ok(path) = settings_path(spec) else {
+            continue;
+        };
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if is_legacy_install(&content) && enable_local(spec).is_ok() {
+            migrated.push(spec.agent.to_string());
+        }
+    }
+    migrated
 }
 
 // The raw OSC 777 bytes the detector parses. Kept in one place so the Windows
@@ -252,22 +384,23 @@ pub fn emit_conout_marker(agent: &str, event: &str) {
 }
 
 #[tauri::command]
-pub fn agent_hooks_status(agent: String) -> bool {
+pub async fn agent_hooks_status(agent: String, workspace: Option<WorkspaceEnv>) -> bool {
     let Ok(spec) = find(&agent) else {
         return false;
     };
-    let Some(content) = settings_path(spec)
+    tauri::async_runtime::spawn_blocking(move || match WorkspaceEnv::from_option(workspace) {
+        WorkspaceEnv::Ssh { host } => status_ssh(spec, &host),
+        _ => status_local(spec),
+    })
+    .await
+    .unwrap_or(false)
+}
+
+fn status_local(spec: &AgentSpec) -> bool {
+    settings_path(spec)
         .ok()
         .and_then(|p| std::fs::read_to_string(p).ok())
-    else {
-        return false;
-    };
-    // Keyed on the marker: PreToolUse/PostToolUse reuse "working", so an install
-    // predating them still reports enabled (its UserPromptSubmit already carries
-    // that needle) and is not force-nagged to re-enable.
-    spec.events
-        .iter()
-        .all(|(_, m, _)| content.contains(&status_needle(spec, m)))
+        .is_some_and(|content| hooks_installed(spec, &content))
 }
 
 #[cfg(test)]
@@ -454,5 +587,49 @@ mod tests {
             existing_config(Some(r#"{"permissions":{}}"#), p).unwrap(),
             json!({ "permissions": {} })
         );
+    }
+
+    #[test]
+    fn claude_hook_wraps_marker_in_tmux_passthrough() {
+        let cmd = hook_command(spec("claude"), "attention");
+        // Both branches: DCS-wrapped inside tmux, bare (gated) outside.
+        assert!(cmd.starts_with(r#"if [ -n "$TMUX" ]; then"#), "{cmd}");
+        assert!(cmd.contains(r#"\\u001bPtmux;\\u001b\\u001b]777;notify;Terax;attention\\u0007\\u001b\\\\"#), "{cmd}");
+        assert!(cmd.contains(r#"elif [ -n "$TERAX_TERMINAL" ]; then printf '{"terminalSequence":"\\u001b]777;notify;Terax;attention\\u0007"}'"#), "{cmd}");
+        assert!(cmd.contains(TMUX_NEEDLE));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_hook_wraps_marker_in_tmux_passthrough() {
+        let cmd = hook_command(spec("codex"), "finished");
+        assert!(cmd.contains(r#"printf '\033Ptmux;\033\033]777;notify;Terax;codex;finished\007\033\\' > /dev/tty"#), "{cmd}");
+        assert!(cmd.contains(r#"elif [ -n "$TERAX_TERMINAL" ]; then printf '\033]777;notify;Terax;codex;finished\007' > /dev/tty"#), "{cmd}");
+        assert!(cmd.ends_with("printf '{}'"), "{cmd}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_requires_tmux_aware_form() {
+        let fresh = serde_json::to_string(&merge_hooks(json!({}), spec("claude"))).unwrap();
+        assert!(hooks_installed(spec("claude"), &fresh));
+        assert!(!is_legacy_install(&fresh));
+
+        // An install from before the passthrough form: every needle present, no
+        // DCS wrapper → reports not installed and eligible for migration.
+        let legacy = fresh.replace("Ptmux;", "");
+        assert!(!hooks_installed(spec("claude"), &legacy));
+        assert!(is_legacy_install(&legacy));
+
+        // A foreign config without our markers is neither.
+        assert!(!hooks_installed(spec("claude"), "{}"));
+        assert!(!is_legacy_install("{}"));
+    }
+
+    #[test]
+    fn migration_rewrite_is_idempotent() {
+        let once = merge_hooks(json!({}), spec("claude"));
+        let twice = merge_hooks(once.clone(), spec("claude"));
+        assert_eq!(once, twice);
     }
 }

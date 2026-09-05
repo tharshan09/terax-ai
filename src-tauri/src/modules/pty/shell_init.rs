@@ -183,7 +183,16 @@ const MANAGED_SESSION_PREFIX: &str = "terax-rs-";
 /// skipped: tmux runs its own shells and does not reliably propagate it, so cwd
 /// tracking inside tmux is best-effort and simply absent rather than wrong.
 fn tmux_attach_command(session: &str, hide_status: bool) -> String {
-    let base = format!("exec tmux new-session -A -s '{session}'");
+    // `allow-passthrough all` lets the agent hooks' DCS-wrapped OSC 777 markers
+    // escape tmux to Terax's PTY parser (see `agent::hook_command`), from a
+    // window that is not current too (`all`, not `on`). `-q` keeps tmux < 3.3,
+    // which lacks the option, from printing an error into the fresh session.
+    // Set on the attached window, then re-applied to windows opened later via
+    // a session-scoped hook; both run on `-A` re-attach too, so sessions that
+    // predate this build pick it up.
+    let base = format!(
+        "exec tmux new-session -A -s '{session}' \\; set-option -wq allow-passthrough all \\; set-hook -t '{session}' after-new-window 'set-option -wq allow-passthrough all'"
+    );
     if hide_status {
         format!("{base} \\; set-option status off")
     } else {
@@ -1290,20 +1299,29 @@ mod tests {
     fn tmux_attach_command_single_quotes_the_name() {
         assert_eq!(
             tmux_attach_command("main", false),
-            "exec tmux new-session -A -s 'main'"
+            "exec tmux new-session -A -s 'main' \\; set-option -wq allow-passthrough all \\; set-hook -t 'main' after-new-window 'set-option -wq allow-passthrough all'"
         );
-        assert_eq!(
-            tmux_attach_command("review-pr_2", false),
-            "exec tmux new-session -A -s 'review-pr_2'"
-        );
+        assert!(tmux_attach_command("review-pr_2", false)
+            .starts_with("exec tmux new-session -A -s 'review-pr_2' \\; set-option -wq allow-passthrough all"));
     }
 
     #[test]
     fn tmux_attach_command_hides_status_when_requested() {
         assert_eq!(
             tmux_attach_command("terax-rs-abc", true),
-            "exec tmux new-session -A -s 'terax-rs-abc' \\; set-option status off"
+            "exec tmux new-session -A -s 'terax-rs-abc' \\; set-option -wq allow-passthrough all \\; set-hook -t 'terax-rs-abc' after-new-window 'set-option -wq allow-passthrough all' \\; set-option status off"
         );
+    }
+
+    #[test]
+    fn tmux_attach_command_enables_passthrough_for_every_session() {
+        // Managed, user-named and SSH sessions all go through here; the
+        // passthrough option is what lets agent hook markers reach Terax.
+        for s in ["main", "terax-rs-x", "litha-web"] {
+            let cmd = tmux_attach_command(s, false);
+            assert!(cmd.contains("set-option -wq allow-passthrough all"), "{cmd}");
+            assert!(cmd.contains(&format!("set-hook -t '{s}' after-new-window")), "{cmd}");
+        }
     }
 
     #[cfg(unix)]
@@ -1331,7 +1349,7 @@ mod tests {
             .map(|s| s.to_string_lossy().into_owned())
             .collect();
         assert!(
-            !user_argv.iter().any(|a| a.contains("set-option")),
+            !user_argv.iter().any(|a| a.contains("status off")),
             "user session must keep its status line: {user_argv:?}"
         );
     }
@@ -1349,11 +1367,13 @@ mod tests {
             .iter()
             .map(|s| s.to_string_lossy().into_owned())
             .collect();
-        // shell -l -c "exec tmux new-session -A -s 'main'"
+        // shell -l -c "exec tmux new-session -A -s 'main' \; set-option ..."
         assert!(argv.iter().any(|a| a == "-l"), "must be a login shell: {argv:?}");
         assert!(argv.iter().any(|a| a == "-c"));
         assert!(
-            argv.iter().any(|a| a == "exec tmux new-session -A -s 'main'"),
+            argv
+                .iter()
+                .any(|a| a.starts_with("exec tmux new-session -A -s 'main'")),
             "must exec tmux through the shell: {argv:?}"
         );
         // The bare-binary form that caused the bug must be gone.
