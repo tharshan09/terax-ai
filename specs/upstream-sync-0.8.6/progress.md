@@ -17,3 +17,30 @@
 Follow-ups (nicht in dieser Runde): serde_json preserve_order (Settings-Dateien werden beim Schreiben umsortiert) · Cmd+Q-Guard für Dock-Quit/osascript (applicationShouldTerminate) · fish-Prompt-Guard für venv · tmux-aware Variante des Alt-Screen-Key-Gatings (4634739) · Upstream-Tastatur-Pane-Swap (d6e3491/460657a) · Fokus-Dispatch in useTerminalSession auf eine Stelle ziehen · W2 (Tab/Editor-Features) und Block D weiter geparkt.
 
 Nebenbefunde: Fork-PRs #54 (README) und #9 (Linux IME) weiter offen, unberührt. Lokale ~/.claude/settings.json hat unsere Hooks in Legacy-Form → wird durch agent_migrate_hooks beim ersten Start des neuen Builds aktualisiert.
+
+
+---
+
+# Follow-ups nach Runde 3 (Stand 2026-09-05 mittags, Session terax-ai-39)
+
+**STATUS: alle 4 PRs gemergt, main = `e17e7db`.** Reihenfolge #77 -> #76 -> #78 -> #75.
+
+- [x] **CI wieder grün (#77, `d47685d`).** CI war seit dem ganzen 0.8.6-Sync auf main rot und damit als Gate wertlos. Zwei Ursachen, beide Altlast: (1) `cargo clippy --all-targets -- -D warnings` auf ubuntu-22.04 kippt an 5 Funden (asset.rs question_mark, 3x manual_strip in git/operations.rs, useless_vec in ssh.rs) - mechanisch behoben. (2) Size-Budget "total client JS" 1500 KB stammt aus dem Upstream, der Fork baut 1,56 MB; angehoben auf 1650 KB. Startup-Budget bleibt bei 357 von 540 KB. **Gotcha:** size-limit lehnt unbekannte Config-Keys ab, ein `_comment` geht nicht - Begründung steht im `name`.
+- [x] **serde_json preserve_order (#76, `120cd7e`).** `~/.claude/settings.json` wurde bei jedem Hook-/Statusline-Toggle alphabetisch umsortiert (BTreeMap). Feature `preserve_order`, indexmap war schon im Baum. Regressionstest schlägt ohne das Feature fehl.
+- [x] **fish: venv zerlegte den Prompt (#78, `79da58d`).** virtualenv/venv wrappen den Prompt wie Conda, nennen die Kopie aber `_old_fish_prompt` - und `functions -n` **verschweigt Namen mit führendem Unterstrich**. Also wurde erneut gewrappt, unser Capture nahm den venv-Wrapper, dessen Kopie unseres Prompts rief ihn zurück: Endlosrekursion bis zum Call-Stack-Limit. Guard liest jetzt die Namen aus dem Prompt-Body und sucht die Funktion, die `__terax_restore_status` nennt (das tut nur unser Prompt). Kosten 0,26 ms statt 4,5 ms für den Vollscan über alle 283 Funktionen. Nebenfund: `string join` las einen Pfadteil mit führendem `-` als Option, in so einem Verzeichnis meldete jeder Prompt einen Fehler statt der cwd - `--` ergänzt. Beide Fälle jetzt in `init.test.fish`, verifiziert mit fish 4.9.1 (lokal per brew nachinstalliert).
+- [x] **Notifications in Plain-Tabs + Dock-Quit-Guard (#75, `e17e7db`).**
+  - Shell-Integration exportiert `TERAX_TTY` (zsh/bash/fish + SSH-Remote-Init), der Hook schreibt den Marker dorthin, wenn kein tmux. Gate: `[ -z "$TMUX" ] && [ -w "$TERAX_TTY" ] && case "$TERAX_TTY" in *..*) false ;; /dev/*) true ;; *) false ;; esac`. Reihenfolge vor dem terminalSequence-Fallback. Status/Migration prüfen `TTY_NEEDLE`, bestehende Installs rüsten sich beim Start nach.
+  - macOS: `applicationShouldTerminate:` wird zur Laufzeit auf tao's Delegate gelegt (tao implementiert ihn nicht). Antwort ist **NSTerminateLater**, nicht Cancel - sonst bricht ein Logout ab, auch wenn nichts zu sichern war. Reply kommt aus dem Destroyed-Event (ja) bzw. dem neuen Command `app_close_declined` (nein). Zweites Quit bei ausstehender Antwort geht ungeguarded durch (Notausgang bei hängendem WebView).
+  - **Zwei Review-Runden, beide mit echten Funden.** Runde 1: NSTerminateCancel bricht Logout ab (HIGH), fehlender Notausgang, `extern "C"`-Panic reisst den Prozess ab, `/dev/`-Check fehlte im Hook, Settings-Fenster kam nach Abbruch nicht zurück. Runde 2: **Radix führt beim Action-Button erst onClick und dann onOpenChange aus**, "Quit Anyway" feuerte also confirm UND cancel - das Nein erreichte Rust zuerst und brach den gerade bestätigten Quit ab. Guard über den vorhandenen `forceClose`-Ref, Regressionstest in `useAppCloseGuard.test.tsx`.
+
+**Gotchas für die nächste Session:**
+- Die PTY-Flush-Tests (`flush_tests::force_flush_cuts_hidden_window_short`, `done_cuts_window_short`, `flip_to_visible_cuts_hidden_window_short`) sind auf dem macOS-CI-Runner **timing-flaky**; nextest meldet sie teils als FLAKY 2/3. Rerun hilft. Kandidat für eine eigene Härtungsrunde.
+- Der Doku-Commit `e02effd` ist versehentlich im Squash von #77 gelandet, weil er auf dem lokalen `main` lag, von dem der CI-Worktree abzweigte. Inhalt ist auf main, nur der Titel passt nicht.
+
+**OFFEN (User-Gate): In-App-e2e.** Beides braucht einen laufenden Build, die Produktions-App des Users lief durchgehend und wurde nicht beendet.
+1. Plain-Tab ohne tmux: Claude-Session starten, Frage/Stop provozieren -> Banner + Bell. Vorher in dem Tab `echo $TERAX_TTY` (muss `/dev/ttys*` zeigen) und prüfen, dass `~/.claude/settings.json` die neue Form enthält (`case "$TERAX_TTY"`), die Migration läuft beim Start.
+2. Dock-Quit mit laufendem Prozess -> Guard-Dialog; "Quit Anyway" beendet wirklich; "Cancel" lässt die App laufen und bringt ein offenes Settings-Fenster zurück.
+3. `osascript -e 'quit app "Terax"'` verhält sich wie Dock-Quit.
+4. fish-Nutzer mit venv: Prompt rendert normal.
+
+**Weiter offen aus der ursprünglichen Liste:** Remote-Hooks auf litha-claude neu enablen (User-Klick) · tmux-aware Alt-Screen-Key-Gating · Upstream-Tastatur-Pane-Swap d6e3491/460657a · Fokus-Dispatch in useTerminalSession bündeln · W2 (Tab/Editor-Features) und Block D weiter geparkt.
