@@ -63,4 +63,78 @@ describe("labelFor (terminal tabs)", () => {
       ),
     ).toBe("trade-insight");
   });
+
+  it("follows the focused pane's cwd in a split", () => {
+    const split = terminalTab({
+      cwd: "/Users/me/a",
+      paneTree: {
+        kind: "split",
+        id: 10,
+        dir: "row",
+        children: [
+          { kind: "leaf", id: 2, cwd: "/Users/me/a" },
+          { kind: "leaf", id: 3, cwd: "/Users/me/b/api" },
+        ],
+      },
+      activeLeafId: 3,
+    });
+    expect(labelFor(split)).toBe("api");
+    expect(labelFor({ ...split, activeLeafId: 2 })).toBe("a");
+  });
+
+  it("follows the focused pane's tmux session in a split", () => {
+    const split = terminalTab({
+      cwd: "~",
+      paneTree: {
+        kind: "split",
+        id: 10,
+        dir: "row",
+        children: [
+          { kind: "leaf", id: 2, cwd: "~", tmuxSession: "main" },
+          { kind: "leaf", id: 3, cwd: "/Users/me/proj" },
+        ],
+      },
+      activeLeafId: 2,
+    });
+    expect(labelFor(split)).toBe("main");
+    expect(labelFor({ ...split, activeLeafId: 3 })).toBe("proj");
+  });
+
+  it("does not borrow the tab-level session for a plain pane in a split", () => {
+    // newTmuxTab sets both tab.tmuxSession and the leaf's; Cmd+D adds a plain
+    // leaf without one. Focused on that plain pane the label is its cwd.
+    const split = terminalTab({
+      cwd: "~",
+      tmuxSession: "work",
+      paneTree: {
+        kind: "split",
+        id: 10,
+        dir: "row",
+        children: [
+          { kind: "leaf", id: 2, cwd: "~", tmuxSession: "work" },
+          { kind: "leaf", id: 3, cwd: "/Users/me/proj" },
+        ],
+      },
+      activeLeafId: 3,
+    });
+    expect(labelFor(split)).toBe("proj");
+    expect(labelFor({ ...split, activeLeafId: 2 })).toBe("work");
+  });
+
+  it("still lets a custom title win in a split", () => {
+    const split = terminalTab({
+      customTitle: "Server",
+      paneTree: {
+        kind: "split",
+        id: 10,
+        dir: "row",
+        children: [
+          { kind: "leaf", id: 2, cwd: "/Users/me/a" },
+          { kind: "leaf", id: 3, cwd: "/Users/me/b" },
+        ],
+      },
+      activeLeafId: 3,
+    });
+    expect(labelFor(split)).toBe("Server");
+  });
 });

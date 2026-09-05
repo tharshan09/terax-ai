@@ -71,6 +71,7 @@ import {
   enableClaudeStatusline,
 } from "@/modules/statusbar/lib/claudeStatusline";
 import {
+  MAX_PANES_PER_TAB,
   TabSwitcherHud,
   useTabs,
   useTabSwipe,
@@ -163,6 +164,7 @@ export default function App() {
     moveTabToSpace,
     reorderTab,
     reorderTabByGap,
+    mergeTabInto,
     newTabInSpace,
     removeTabsForSpace,
     markBooted,
@@ -1464,6 +1466,24 @@ export default function App() {
               onPin={pinTab}
               onRename={handleRenameTab}
               onReorder={reorderTabByGap}
+              onMergeInto={(fromId, intoId) => {
+                const source = tabsRef.current.find((t) => t.id === fromId);
+                const movedLeaves =
+                  source?.kind === "terminal" ? leafIds(source.paneTree) : [];
+                const refusal = mergeTabInto(fromId, intoId);
+                if (refusal === null && movedLeaves.length > 0) {
+                  useAgentStore.getState().moveLeavesToTab(movedLeaves, intoId);
+                }
+                if (refusal === "cap") {
+                  toast.error(
+                    `Cannot merge: a tab holds at most ${MAX_PANES_PER_TAB} panes`,
+                  );
+                } else if (refusal === "incompatible") {
+                  toast.error(
+                    "Cannot merge tabs with different environments, privacy or blocks mode",
+                  );
+                }
+              }}
               onToggleSidebar={toggleSidebar}
               onOpenCommandPalette={() => openCommandPalette("commands")}
               onActivateAgent={onActivateAgent}

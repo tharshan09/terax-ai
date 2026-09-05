@@ -43,6 +43,8 @@ type Props = {
   onRename: (id: number, title: string) => void;
   /** Move a dragged tab to a new position (insertion gap index). */
   onReorder: (fromId: number, toGapIndex: number) => void;
+  /** Drop a terminal tab onto another terminal tab to merge it in as a split. */
+  onMergeInto?: (fromId: number, intoId: number) => void;
   onOverrideLanguage?: (id: number, lang: string | null) => void;
   onToggleSidebar: () => void;
   onOpenCommandPalette: () => void;
@@ -72,6 +74,7 @@ export function Header({
   onPin,
   onRename,
   onReorder,
+  onMergeInto,
   onOverrideLanguage,
   onToggleSidebar,
   onOpenCommandPalette,
@@ -179,6 +182,7 @@ export function Header({
           onPin={onPin}
           onRename={onRename}
           onReorder={onReorder}
+          onMergeInto={onMergeInto}
           onOverrideLanguage={onOverrideLanguage}
           compact={compact}
         />

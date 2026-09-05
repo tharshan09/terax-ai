@@ -195,7 +195,7 @@ export function findLeafNode(
 function insertLeafBeside(
   tree: PaneNode,
   targetId: PaneId,
-  leaf: PaneNode,
+  node: PaneNode,
   newSplitId: PaneId,
   dir: SplitDir,
   before: boolean,
@@ -210,7 +210,7 @@ function insertLeafBeside(
         ...tree,
         children: [
           ...tree.children.slice(0, at),
-          leaf,
+          node,
           ...tree.children.slice(at),
         ],
       };
@@ -222,21 +222,58 @@ function insertLeafBeside(
       kind: "split",
       id: newSplitId,
       dir,
-      children: before ? [leaf, tree] : [tree, leaf],
+      children: before ? [node, tree] : [tree, node],
     };
   }
   return {
     ...tree,
     children: tree.children.map((c) =>
-      insertLeafBeside(c, targetId, leaf, newSplitId, dir, before),
+      insertLeafBeside(c, targetId, node, newSplitId, dir, before),
     ),
   };
 }
 
+// A split directly inside a split of the same direction renders as a nested
+// panel group with its own separators; splice it into the parent so the tree
+// stays as shallow as splitLeaf keeps it.
+function flattenSplits(node: PaneNode): PaneNode {
+  if (node.kind !== "split") return node;
+  const children = node.children.flatMap((c) => {
+    const n = flattenSplits(c);
+    return n.kind === "split" && n.dir === node.dir ? n.children : [n];
+  });
+  return { ...node, children };
+}
+
+/** Number of leaves in `n` (no intermediate arrays). */
+export function countLeaves(n: PaneNode): number {
+  return n.kind === "leaf"
+    ? 1
+    : n.children.reduce((sum, c) => sum + countLeaves(c), 0);
+}
+
+/** Attach `node` (a leaf, or a whole split coming from another tab) beside the
+ *  leaf `targetId` on `edge`. Leaf ids inside `node` are kept, so their live
+ *  sessions survive; the caller guarantees they do not collide with ids in
+ *  `tree`. Returns `tree` unchanged when the target is missing. */
+export function attachSubtree(
+  tree: PaneNode,
+  targetId: PaneId,
+  node: PaneNode,
+  edge: DropEdge,
+  newSplitId: PaneId,
+): PaneNode {
+  if (!hasLeaf(tree, targetId)) return tree;
+  const before = edge === "left" || edge === "top";
+  return flattenSplits(
+    insertLeafBeside(tree, targetId, node, newSplitId, EDGE_DIR[edge], before),
+  );
+}
+
 /**
  * Move an existing leaf next to `targetId` along `edge`, keeping the leaf's id
- * (so its live terminal session survives). Removes the source first — which
- * collapses any single-child split it leaves behind — then re-inserts it at the
+ * (so its live terminal session survives). Removes the source first, which
+ * collapses any single-child split it leaves behind, then re-inserts it at the
  * target. `newSplitId` is consumed only if a fresh split node is needed there.
  * Returns the original tree unchanged on a no-op (source === target, or either
  * id missing, or source is the only leaf).
@@ -252,14 +289,7 @@ export function moveLeaf(
   const moved = findLeafNode(tree, sourceId);
   if (!moved) return tree;
   const pruned = removeLeaf(tree, sourceId);
-  if (pruned === null || !hasLeaf(pruned, targetId)) return tree;
-  const before = edge === "left" || edge === "top";
-  return insertLeafBeside(
-    pruned,
-    targetId,
-    moved,
-    newSplitId,
-    EDGE_DIR[edge],
-    before,
-  );
+  if (pruned === null) return tree;
+  const next = attachSubtree(pruned, targetId, moved, edge, newSplitId);
+  return next === pruned ? tree : next;
 }
