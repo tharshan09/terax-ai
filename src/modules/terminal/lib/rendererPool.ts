@@ -17,7 +17,9 @@ import {
   terminalLineNavigationSequence,
   terminalWordNavigationSequence,
 } from "./keymap";
+import { pendingPtyResize } from "./rendererResize";
 import { findPathLinks } from "./terminalPathLinks";
+import { activateUnicode11 } from "./unicodeWidth";
 
 export const POOL_MAX_SIZE = 5;
 const FIT_DEBOUNCE_MS = 8;
@@ -241,6 +243,7 @@ function createSlot(): Slot {
   term.loadAddon(
     new WebLinksAddon((_e, uri) => openUrl(uri).catch(console.error)),
   );
+  activateUnicode11(term);
 
   const host = document.createElement("div");
   host.style.cssText = "width:100%;height:100%;";
@@ -536,7 +539,10 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
   cancelSlotReap(slot);
   unparkSlotHost(slot);
   if (!fast) {
-    slot.host.style.visibility = "hidden";
+    // opacity, not visibility: a visibility:hidden subtree refuses focus in
+    // Chromium, and the terminal must be focusable during the two-frame
+    // anti-flash window below or early focusSlot / keystrokes miss (#411, #857).
+    slot.host.style.opacity = "0";
     if (hadWebgl) disposeSlotWebgl(slot);
   }
 
@@ -545,6 +551,9 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
   }
 
   slot.term.options.disableStdin = p.shellExited;
+  // A blocks leaf at its prompt disables xterm's helper textarea; a plain
+  // leaf inheriting the slot must get a focusable terminal back.
+  if (slot.term.textarea) slot.term.textarea.disabled = false;
 
   if (!fast) {
     slot.term.clear();
@@ -619,6 +628,15 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
     }
     if (adapter?.isLeafFocused(p.leafId)) slot.term.focus();
   } else {
+    // Focus before the two-frame unhide: rAF can be throttled on activating
+    // windows, so deferred focus alone leaves the new tab unfocused (#411).
+    // Skip blocks leaves: at the prompt the shell-input bar owns focus.
+    if (
+      adapter?.isLeafFocused(p.leafId) &&
+      !adapter.isLeafBlocks(p.leafId)
+    ) {
+      slot.term.focus();
+    }
     scheduleUnhide(slot, stale || hadWebgl);
   }
 
@@ -629,7 +647,7 @@ function scheduleUnhide(slot: Slot, stale: boolean): void {
   slot.unhideRaf = requestAnimationFrame(() => {
     slot.unhideRaf = requestAnimationFrame(() => {
       slot.unhideRaf = null;
-      slot.host.style.visibility = "";
+      slot.host.style.opacity = "";
       if (stale) {
         if (!slot.webglAddon) attachWebgl(slot);
         try {
@@ -637,7 +655,11 @@ function scheduleUnhide(slot: Slot, stale: boolean): void {
         } catch {}
       }
       const leafId = slot.currentLeafId;
-      if (leafId !== null && adapter?.isLeafFocused(leafId)) {
+      if (
+        leafId !== null &&
+        adapter?.isLeafFocused(leafId) &&
+        !adapter.isLeafBlocks(leafId)
+      ) {
         slot.term.focus();
       }
     });
@@ -669,6 +691,21 @@ function rewireSlot(slot: Slot, p: AcquireParams): void {
   p.onSearchReady(slot.searchAddon);
 }
 
+// Push any grid/PTY size delta to the PTY now, keeping slot.lastCols/lastRows
+// as the source of truth for "what the PTY was last told". Called both when the
+// debounce timer fires and on every teardown path, so an interrupted debounce
+// can never leave the PTY winsize behind the rendered grid (tmux pane-bleed).
+function commitPendingResize(slot: Slot, leafId: number): void {
+  const pending = pendingPtyResize(
+    { cols: slot.term.cols, rows: slot.term.rows },
+    { cols: slot.lastCols, rows: slot.lastRows },
+  );
+  if (!pending) return;
+  slot.lastCols = pending.cols;
+  slot.lastRows = pending.rows;
+  adapter?.resolveLeaf(leafId)?.resizePty(pending.cols, pending.rows);
+}
+
 function setupResizeObserver(slot: Slot, p: AcquireParams): void {
   slot.observer?.disconnect();
   if (slot.fitTimer) clearTimeout(slot.fitTimer);
@@ -680,11 +717,7 @@ function setupResizeObserver(slot: Slot, p: AcquireParams): void {
   const flushPty = () => {
     slot.ptyTimer = null;
     if (slot.currentLeafId !== p.leafId) return;
-    if (slot.term.cols === slot.lastCols && slot.term.rows === slot.lastRows)
-      return;
-    slot.lastCols = slot.term.cols;
-    slot.lastRows = slot.term.rows;
-    adapter?.resolveLeaf(p.leafId)?.resizePty(slot.lastCols, slot.lastRows);
+    commitPendingResize(slot, p.leafId);
   };
 
   slot.observer = new ResizeObserver(() => {
@@ -742,6 +775,15 @@ function serializeSlot(slot: Slot): SerializeOutput {
 }
 
 function detachSlotFromLeaf(slot: Slot, retain: boolean): void {
+  // Commit any debounced-but-unsent resize before tearing down the timers.
+  // Dropping it here (the old behavior) left the PTY winsize behind the
+  // rendered grid, so tmux drew pane content into cells that no longer lined up
+  // with the grid and it bled across the pane dividers. releaseSlot reports
+  // slot.term.cols/rows as the session's size, so the PTY must already match.
+  if (slot.currentLeafId !== null) {
+    commitPendingResize(slot, slot.currentLeafId);
+  }
+
   if (retain && slot.currentLeafId !== null) {
     slot.retainedLeafId = slot.currentLeafId;
     parkSlotHost(slot);
@@ -761,7 +803,7 @@ function detachSlotFromLeaf(slot: Slot, retain: boolean): void {
   slot.ptyTimer = null;
 
   cancelPendingUnhide(slot);
-  slot.host.style.visibility = "";
+  slot.host.style.opacity = "";
 
   slot.currentLeafId = null;
   slot.lastUsedAt = performance.now();
