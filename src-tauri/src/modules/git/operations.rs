@@ -1197,7 +1197,7 @@ pub fn list_branches(
         let mut worktree_bare = false;
         let mut head_sha: Option<String> = None;
         for line in &lines {
-            if line.starts_with("worktree ") {
+            if let Some(rest) = line.strip_prefix("worktree ") {
                 if let Some(wt_path) = current_worktree.take() {
                     if !worktree_bare {
                         push_worktree(
@@ -1208,19 +1208,15 @@ pub fn list_branches(
                         );
                     }
                 }
-                current_worktree = Some(line[9..].trim().to_string());
+                current_worktree = Some(rest.trim().to_string());
                 worktree_branch = None;
                 worktree_bare = false;
                 head_sha = None;
-            } else if line.starts_with("HEAD ") {
-                head_sha = Some(line[5..].trim().to_string());
-            } else if line.starts_with("branch ") {
-                let raw = line[7..].trim();
-                worktree_branch = Some(
-                    raw.strip_prefix("refs/heads/")
-                        .unwrap_or(raw)
-                        .to_string(),
-                );
+            } else if let Some(rest) = line.strip_prefix("HEAD ") {
+                head_sha = Some(rest.trim().to_string());
+            } else if let Some(rest) = line.strip_prefix("branch ") {
+                let raw = rest.trim();
+                worktree_branch = Some(raw.strip_prefix("refs/heads/").unwrap_or(raw).to_string());
             } else if line.starts_with("bare") {
                 worktree_bare = true;
             }

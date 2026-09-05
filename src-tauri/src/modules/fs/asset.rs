@@ -10,9 +10,7 @@ use tauri::{AppHandle, Manager};
 pub fn asset_dir_target(path: &Path, home: Option<&Path>) -> Option<PathBuf> {
     let parent = path.parent()?;
     // `parent.parent()` is `None` only for the filesystem root.
-    if parent.parent().is_none() {
-        return None;
-    }
+    parent.parent()?;
     if home.is_some_and(|h| parent == h) {
         return None;
     }

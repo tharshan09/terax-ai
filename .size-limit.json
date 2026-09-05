@@ -12,9 +12,9 @@
     "gzip": true
   },
   {
-    "name": "total client JS",
+    "name": "total client JS (lazy chunks included; raised over upstream for the fork's SSH, panes and agent features)",
     "path": ["dist/assets/*.js"],
-    "limit": "1500 KB",
+    "limit": "1650 KB",
     "gzip": true
   }
 ]
