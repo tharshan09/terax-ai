@@ -100,6 +100,27 @@ describe("labelFor (terminal tabs)", () => {
     expect(labelFor({ ...split, activeLeafId: 3 })).toBe("proj");
   });
 
+  it("does not borrow the tab-level session for a plain pane in a split", () => {
+    // newTmuxTab sets both tab.tmuxSession and the leaf's; Cmd+D adds a plain
+    // leaf without one. Focused on that plain pane the label is its cwd.
+    const split = terminalTab({
+      cwd: "~",
+      tmuxSession: "work",
+      paneTree: {
+        kind: "split",
+        id: 10,
+        dir: "row",
+        children: [
+          { kind: "leaf", id: 2, cwd: "~", tmuxSession: "work" },
+          { kind: "leaf", id: 3, cwd: "/Users/me/proj" },
+        ],
+      },
+      activeLeafId: 3,
+    });
+    expect(labelFor(split)).toBe("proj");
+    expect(labelFor({ ...split, activeLeafId: 2 })).toBe("work");
+  });
+
   it("still lets a custom title win in a split", () => {
     const split = terminalTab({
       customTitle: "Server",

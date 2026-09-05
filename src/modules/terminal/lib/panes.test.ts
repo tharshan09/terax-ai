@@ -142,7 +142,7 @@ describe("attachSubtree (merge a tab's pane tree into another tab)", () => {
     expect(leafIds(before)).toEqual([2, 1]);
   });
 
-  it("keeps a whole incoming split intact, ids included", () => {
+  it("flattens an incoming split of the same direction, ids included", () => {
     const incoming: PaneNode = {
       kind: "split",
       id: 50,
@@ -150,12 +150,49 @@ describe("attachSubtree (merge a tab's pane tree into another tab)", () => {
       children: [leaf(7), leaf(8)],
     };
     const out = attachSubtree(leaf(1), 1, incoming, "bottom", 100);
-    expect(out.kind).toBe("split");
+    expect(out).toEqual({
+      kind: "split",
+      id: 100,
+      dir: "col",
+      children: [leaf(1), leaf(7), leaf(8)],
+    });
+  });
+
+  it("keeps an incoming split of the other direction nested", () => {
+    const incoming: PaneNode = {
+      kind: "split",
+      id: 50,
+      dir: "row",
+      children: [leaf(7), leaf(8)],
+    };
+    const out = attachSubtree(leaf(1), 1, incoming, "bottom", 100);
+    expect(out).toEqual({
+      kind: "split",
+      id: 100,
+      dir: "col",
+      children: [leaf(1), incoming],
+    });
     expect(leafIds(out)).toEqual([1, 7, 8]);
-    if (out.kind === "split") {
-      expect(out.dir).toBe("col");
-      expect(out.children[1]).toBe(incoming);
-    }
+  });
+
+  it("flattens when merging two same-direction splits (no row inside row)", () => {
+    const target: PaneNode = {
+      kind: "split",
+      id: 10,
+      dir: "row",
+      children: [leaf(1), leaf(2)],
+    };
+    const incoming: PaneNode = {
+      kind: "split",
+      id: 50,
+      dir: "row",
+      children: [leaf(7), leaf(8)],
+    };
+    const out = attachSubtree(target, 2, incoming, "right", 100);
+    expect(out).toEqual({
+      ...target,
+      children: [leaf(1), leaf(2), leaf(7), leaf(8)],
+    });
   });
 
   it("joins an existing split of the same direction instead of nesting", () => {

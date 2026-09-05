@@ -5,20 +5,21 @@ import {
   removedManagedSessions,
 } from "@/modules/terminal/lib/managedTmux";
 import {
-  type DropEdge,
-  findLeafCwd,
+  attachSubtree,
+  countLeaves,
+  findLeafNode,
   hasLeaf,
   leafIds,
-  attachSubtree,
   moveLeaf,
   nextLeafId,
-  type PaneNode,
   removeLeaf,
-  type SplitDir,
   setLeafCwd as setLeafCwdInTree,
   setLeafTmuxSession as setLeafTmuxSessionInTree,
   siblingLeafOf,
   splitLeaf,
+  type DropEdge,
+  type PaneNode,
+  type SplitDir,
 } from "@/modules/terminal/lib/panes";
 import { killTmuxSession } from "@/modules/terminal/lib/tmux";
 import { disposeSession } from "@/modules/terminal/lib/useTerminalSession";
@@ -221,6 +222,50 @@ export function pickTabBySpaceIndex(
 
 // Next active after close, scoped to the closing tab's space. null = last tab of
 // its space, which callers treat as "refuse to close".
+/** Point `tab` at `leafId` and re-derive the tab-level mirror fields from
+ *  that leaf: `cwd` (explorer / git follow, subtitles) and `tmuxSession`
+ *  (tmux cwd poll target, picker attach-vs-new, persistence). Every mutator
+ *  that changes the focused pane goes through here so the mirror never
+ *  describes a pane that is not focused. */
+export function syncTabToLeaf(tab: TerminalTab, leafId: number): TerminalTab {
+  const leaf = findLeafNode(tab.paneTree, leafId);
+  const next: TerminalTab = { ...tab, activeLeafId: leafId };
+  if (leaf?.cwd !== undefined) next.cwd = leaf.cwd;
+  if (leaf?.tmuxSession !== undefined) next.tmuxSession = leaf.tmuxSession;
+  else delete next.tmuxSession;
+  return next;
+}
+
+export type MergeRefusal = "cap" | "incompatible" | "invalid";
+
+function sameEnv(a: WorkspaceEnv | undefined, b: WorkspaceEnv | undefined): boolean {
+  const x = a ?? LOCAL_WORKSPACE;
+  const y = b ?? LOCAL_WORKSPACE;
+  if (x.kind !== y.kind) return false;
+  if (x.kind === "ssh" && y.kind === "ssh") return x.host === y.host;
+  if (x.kind === "wsl" && y.kind === "wsl") return x.distro === y.distro;
+  return true;
+}
+
+/** Whether `source` may be merged into `target` as a split. Panes inherit
+ *  the tab's workspace / private / blocks semantics, so both tabs must agree
+ *  on them, and the result must respect the per-tab pane cap. Shared by the
+ *  tab-strip hit-test (so an impossible drop is never offered) and the state
+ *  mutation. */
+export function canMergeTabs(
+  source: Tab | undefined,
+  target: Tab | undefined,
+): MergeRefusal | null {
+  if (source?.kind !== "terminal" || target?.kind !== "terminal") return "invalid";
+  if (source.id === target.id) return "invalid";
+  if (source.blocks || target.blocks) return "incompatible";
+  if (Boolean(source.private) !== Boolean(target.private)) return "incompatible";
+  if (!sameEnv(source.workspace, target.workspace)) return "incompatible";
+  if (countLeaves(source.paneTree) + countLeaves(target.paneTree) > MAX_PANES_PER_TAB)
+    return "cap";
+  return null;
+}
+
 export function nextActiveInSpace(
   tabs: Tab[],
   closingId: number,
@@ -1096,12 +1141,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         if (t.id !== tabId || t.kind !== "terminal") return t;
         if (!hasLeaf(t.paneTree, leafId)) return t;
         if (t.activeLeafId === leafId) return t;
-        const cwd = findLeafCwd(t.paneTree, leafId);
-        return {
-          ...t,
-          activeLeafId: leafId,
-          ...(cwd !== undefined && { cwd }),
-        };
+        return syncTabToLeaf(t, leafId);
       }),
     );
   }, []);
@@ -1112,8 +1152,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         if (t.id !== tabId || t.kind !== "terminal") return t;
         const next = nextLeafId(t.paneTree, t.activeLeafId, delta);
         if (next === t.activeLeafId) return t;
-        const cwd = findLeafCwd(t.paneTree, next);
-        return { ...t, activeLeafId: next, ...(cwd !== undefined && { cwd }) };
+        return syncTabToLeaf(t, next);
       }),
     );
   }, []);
@@ -1168,7 +1207,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
             newSplitId,
           );
           if (paneTree === t.paneTree) return t;
-          return { ...t, paneTree, activeLeafId: sourceLeafId };
+          return syncTabToLeaf({ ...t, paneTree }, sourceLeafId);
         }),
       );
     },
@@ -1181,36 +1220,41 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   // killed. Refused (false) when the result would exceed the per-tab pane cap
   // or either side is not a terminal tab.
   const mergeTabInto = useCallback(
-    (sourceTabId: number, targetTabId: number, edge: DropEdge = "right"): boolean => {
-      if (sourceTabId === targetTabId) return false;
-      let merged = false;
+    (sourceTabId: number, targetTabId: number): MergeRefusal | null => {
+      // Validate against the current tabs synchronously so the verdict is
+      // reliable (an updater may run later when React has pending work).
+      const current = tabsRef.current;
+      const refusal = canMergeTabs(
+        current.find((t) => t.id === sourceTabId),
+        current.find((t) => t.id === targetTabId),
+      );
+      if (refusal) return refusal;
+      const newSplitId = nextIdRef.current++;
       setTabs((curr) => {
         const source = curr.find((t) => t.id === sourceTabId);
         const target = curr.find((t) => t.id === targetTabId);
+        if (canMergeTabs(source, target) !== null) return curr;
         if (source?.kind !== "terminal" || target?.kind !== "terminal") return curr;
-        const total =
-          leafIds(source.paneTree).length + leafIds(target.paneTree).length;
-        if (total > MAX_PANES_PER_TAB) return curr;
-        const newSplitId = nextIdRef.current++;
         const paneTree = attachSubtree(
           target.paneTree,
           target.activeLeafId,
           source.paneTree,
-          edge,
+          "right",
           newSplitId,
         );
         if (paneTree === target.paneTree) return curr;
-        merged = true;
         setActiveId((active) => (active === sourceTabId ? targetTabId : active));
         return curr
           .filter((t) => t.id !== sourceTabId)
-          .map((t) =>
-            t.id === targetTabId
-              ? { ...t, paneTree, activeLeafId: source.activeLeafId }
-              : t,
-          );
+          .map((t) => {
+            if (t.id !== targetTabId || t.kind !== "terminal") return t;
+            // A live source wakes a still-cold (restored) target.
+            const { cold: _cold, ...rest } = t;
+            const cold = t.cold && source.cold ? { cold: true } : {};
+            return syncTabToLeaf({ ...rest, paneTree, ...cold }, source.activeLeafId);
+          });
       });
-      return merged;
+      return null;
     },
     [],
   );
@@ -1244,8 +1288,8 @@ export function useTabs(initial?: Partial<TerminalTab>) {
       }
       didRemove = true;
       return curr.map((x) =>
-        x.id === tab.id
-          ? { ...x, paneTree: newTree, activeLeafId: newActive }
+        x.id === tab.id && x.kind === "terminal"
+          ? syncTabToLeaf({ ...x, paneTree: newTree }, newActive)
           : x,
       );
     });
@@ -1276,8 +1320,8 @@ export function useTabs(initial?: Partial<TerminalTab>) {
       const newActive = sib && remaining.includes(sib) ? sib : remaining[0];
       removedLeaf = target;
       return curr.map((x) =>
-        x.id === tabId
-          ? { ...x, paneTree: newTree, activeLeafId: newActive }
+        x.id === tabId && x.kind === "terminal"
+          ? syncTabToLeaf({ ...x, paneTree: newTree }, newActive)
           : x,
       );
     });

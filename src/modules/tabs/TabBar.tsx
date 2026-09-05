@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import type { SshHost } from "@/modules/workspace/sshHosts";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { canMergeTabs } from "./lib/useTabs";
 import { fmtShortcut, MOD_KEY, SHIFT_KEY } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import {
@@ -45,11 +46,19 @@ import {
   useEffect,
   useLayoutEffect,
   useRef,
-  useState,
-} from "react";
+  useState, useMemo } from "react";
 import { labelFor } from "./lib/tabLabel";
 import type { EditorTab, Tab, TerminalTab } from "./lib/useTabs";
 import { TabActivityIndicator } from "./TabActivityIndicator";
+
+type DropTarget =
+  | { kind: "gap"; index: number }
+  | { kind: "merge"; id: number }
+  | null;
+
+/** How far above/below the tab strip a merge drop still counts; further away
+ *  the gesture falls back to a (reversible) reorder, never a merge. */
+const MERGE_Y_SLACK = 8;
 
 type Props = {
   tabs: Tab[];
@@ -102,17 +111,27 @@ export function TabBar({
   const listRef = useRef<HTMLDivElement>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [draggingId, setDraggingId] = useState<number | null>(null);
-  const [dropGap, setDropGap] = useState<number | null>(null);
-  // Terminal tab under the pointer (its middle band) while dragging another
-  // terminal tab: dropping merges the two into one split tab.
-  const [mergeTargetId, setMergeTargetId] = useState<number | null>(null);
+  // Visual only; the release handler reads the ref so it is never a frame
+  // behind the last pointermove.
+  const [dropTarget, setDropTargetState] = useState<DropTarget>(null);
+  const dropGap = dropTarget?.kind === "gap" ? dropTarget.index : null;
+  const mergeTargetId = dropTarget?.kind === "merge" ? dropTarget.id : null;
+  const tabById = useMemo(() => new Map(tabs.map((t) => [t.id, t])), [tabs]);
   const [showAllLanguages, setShowAllLanguages] = useState(false);
   const drag = useRef<{
     pointerId: number;
     startX: number;
     fromId: number;
     active: boolean;
+    /** Source is a terminal tab and a merge handler exists. */
+    canMerge: boolean;
+    target: DropTarget;
   } | null>(null);
+
+  const setDropTarget = (next: DropTarget) => {
+    if (drag.current) drag.current.target = next;
+    setDropTargetState(next);
+  };
 
   // Play the enter animation only for tabs opened after the first paint, never
   // the restored set and never on switch/reorder (triggers are keyed, so they
@@ -164,36 +183,40 @@ export function TabBar({
     }
   }, [pill, pillReady]);
 
-  // The inner half of a tab counts as "onto" it (merge), the outer quarters
-  // as the gaps beside it (reorder), so both gestures stay reachable.
-  const mergeTargetAtX = (clientX: number, fromId: number): number | null => {
-    if (!onMergeInto) return null;
-    const from = tabs.find((t) => t.id === fromId);
-    if (from?.kind !== "terminal") return null;
-    const els = Array.from(
-      scrollRef.current?.querySelectorAll<HTMLElement>("[data-tab-id]") ?? [],
-    );
-    for (const el of els) {
+  // One pass over the tab rects decides both gestures: the inner half of a
+  // mergeable terminal tab (pointer still on the strip vertically) is "onto"
+  // it, everything else resolves to the insertion gap by the half-width rule.
+  const dropTargetAt = (
+    clientX: number,
+    clientY: number,
+    fromId: number,
+    canMerge: boolean,
+  ): DropTarget => {
+    const els =
+      scrollRef.current?.querySelectorAll<HTMLElement>("[data-tab-id]") ?? [];
+    let gap = els.length;
+    let gapFound = false;
+    for (let i = 0; i < els.length; i++) {
+      const el = els[i];
+      const r = el.getBoundingClientRect();
+      if (!gapFound && clientX < r.left + r.width / 2) {
+        gap = i;
+        gapFound = true;
+      }
+      if (!canMerge) continue;
       const id = Number(el.dataset.tabId);
       if (id === fromId) continue;
-      const r = el.getBoundingClientRect();
-      if (clientX < r.left + r.width / 4 || clientX > r.right - r.width / 4)
-        continue;
-      const tab = tabs.find((t) => t.id === id);
-      return tab?.kind === "terminal" ? id : null;
+      const inner =
+        clientX >= r.left + r.width / 4 &&
+        clientX <= r.right - r.width / 4 &&
+        clientY >= r.top - MERGE_Y_SLACK &&
+        clientY <= r.bottom + MERGE_Y_SLACK;
+      if (!inner) continue;
+      if (canMergeTabs(tabById.get(fromId), tabById.get(id)) === null) {
+        return { kind: "merge", id };
+      }
     }
-    return null;
-  };
-
-  const gapAtX = (clientX: number) => {
-    const els = Array.from(
-      scrollRef.current?.querySelectorAll<HTMLElement>("[data-tab-id]") ?? [],
-    );
-    for (let i = 0; i < els.length; i++) {
-      const r = els[i].getBoundingClientRect();
-      if (clientX < r.left + r.width / 2) return i;
-    }
-    return els.length;
+    return { kind: "gap", index: gap };
   };
 
   const endDrag = (currentTarget: HTMLElement) => {
@@ -201,8 +224,7 @@ export function TabBar({
     if (st) currentTarget.releasePointerCapture?.(st.pointerId);
     drag.current = null;
     setDraggingId(null);
-    setDropGap(null);
-    setMergeTargetId(null);
+    setDropTargetState(null);
     document.body.style.userSelect = "";
   };
 
@@ -331,6 +353,8 @@ export function TabBar({
                       startX: e.clientX,
                       fromId: t.id,
                       active: false,
+                      canMerge: Boolean(onMergeInto) && t.kind === "terminal",
+                      target: null,
                     };
                     e.currentTarget.setPointerCapture(e.pointerId);
                   }}
@@ -344,16 +368,17 @@ export function TabBar({
                       document.body.style.userSelect = "none";
                     }
                     e.preventDefault();
-                    const merge = mergeTargetAtX(e.clientX, st.fromId);
-                    setMergeTargetId(merge);
-                    setDropGap(merge === null ? gapAtX(e.clientX) : null);
+                    setDropTarget(
+                      dropTargetAt(e.clientX, e.clientY, st.fromId, st.canMerge),
+                    );
                   }}
                   onPointerUp={(e) => {
                     const st = drag.current;
-                    if (st?.active && mergeTargetId !== null && onMergeInto) {
-                      onMergeInto(st.fromId, mergeTargetId);
-                    } else if (st?.active && dropGap !== null) {
-                      onReorder(st.fromId, dropGap);
+                    const target = st?.target ?? null;
+                    if (st?.active && target?.kind === "merge" && onMergeInto) {
+                      onMergeInto(st.fromId, target.id);
+                    } else if (st?.active && target?.kind === "gap") {
+                      onReorder(st.fromId, target.index);
                     } else if (st && !st.active) {
                       onSelect(t.id);
                     }

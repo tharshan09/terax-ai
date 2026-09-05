@@ -70,6 +70,7 @@ import {
   enableClaudeStatusline,
 } from "@/modules/statusbar/lib/claudeStatusline";
 import {
+  MAX_PANES_PER_TAB,
   TabSwitcherHud,
   useTabs,
   useTabSwipe,
@@ -1452,8 +1453,15 @@ export default function App() {
               onRename={handleRenameTab}
               onReorder={reorderTabByGap}
               onMergeInto={(fromId, intoId) => {
-                if (!mergeTabInto(fromId, intoId)) {
-                  toast.error("Cannot merge: a tab holds at most 4 panes");
+                const refusal = mergeTabInto(fromId, intoId);
+                if (refusal === "cap") {
+                  toast.error(
+                    `Cannot merge: a tab holds at most ${MAX_PANES_PER_TAB} panes`,
+                  );
+                } else if (refusal === "incompatible") {
+                  toast.error(
+                    "Cannot merge tabs with different environments, privacy or blocks mode",
+                  );
                 }
               }}
               onToggleSidebar={toggleSidebar}

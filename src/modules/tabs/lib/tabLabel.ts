@@ -24,8 +24,13 @@ export function labelFor(t: Tab): string {
   // session name instead of an indistinguishable "~" for every such tab. A
   // managed restart-safe session's random name is noise, so those keep the
   // cwd-derived label (they are a plain terminal that merely runs in tmux).
+  // The focused leaf is the truth. The tab-level session only stands in for a
+  // single-pane tab (older persisted shapes); in a split, a plain pane must not
+  // borrow a sibling's session name.
   const leaf = findLeafNode(t.paneTree, t.activeLeafId);
-  const session = leaf?.tmuxSession ?? t.tmuxSession;
+  const session =
+    leaf?.tmuxSession ??
+    (t.paneTree.kind === "leaf" ? t.tmuxSession : undefined);
   if (session && !isManagedSession(session)) return session;
   const cwd = leaf?.cwd ?? t.cwd;
   if (!cwd) return t.title;
