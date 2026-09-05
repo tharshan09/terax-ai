@@ -91,10 +91,31 @@ const TMUX_GATE: &str =
     r#"if [ -n "$TMUX" ] && [ -e "${TMUX%%,*}.terax" ] && [ -n "$TMUX_PANE" ]; then"#;
 const TMUX_PANE_TTY: &str = r#""$(tmux display -p -t "$TMUX_PANE" '#{pane_tty}')""#;
 
+// Outside tmux the same problem remains for Claude: only some hook events
+// carry a `terminalSequence`, so "attention"/"finished" would never reach a
+// plain tab. Our shell integration exports the shell's own tty as $TERAX_TTY
+// (see pty::shell_init), which the hook writes the bare marker to.
+//
+// `-z "$TMUX"` keeps this out of tmux entirely: a tmux server started from a
+// plain tab hands its panes that tab's tty, which after a detach or a closed
+// tab would address the wrong terminal. The `/dev/` prefix is re-checked here
+// and not just where we export it, because this command lives in the global
+// ~/.claude/settings.json and runs wherever Claude does: `>` on a value naming
+// a regular file would truncate it. A `..` anywhere is refused first, since
+// `/dev/../etc/passwd` matches the prefix and leaves the directory. `-w` then
+// rejects a device that is gone.
+//
+// What none of that catches is a recycled device name: a process that outlives
+// its tab (a detached `claude`, say) still holds the old path, and a later tab
+// on the same name would see its marker. The marker is an invisible OSC, so
+// the cost is a notification on the wrong tab, not damage.
+const TTY_NEEDLE: &str = "$TERAX_TTY";
+const TTY_GATE: &str = r#"elif [ -z "$TMUX" ] && [ -w "$TERAX_TTY" ] && case "$TERAX_TTY" in *..*) false ;; /dev/*) true ;; *) false ;; esac; then"#;
+
 fn hook_command(spec: &AgentSpec, event: &str) -> String {
     match spec.delivery {
         Delivery::TerminalSequence => format!(
-            r#"{TMUX_GATE} printf '\033Ptmux;\033\033]777;notify;Terax;{event}\007\033\\' > {TMUX_PANE_TTY} 2>/dev/null; elif [ -n "$TERAX_TERMINAL" ]; then printf '{{"terminalSequence":"\\u001b]777;notify;Terax;{event}\\u0007"}}'; fi"#
+            r#"{TMUX_GATE} printf '\033Ptmux;\033\033]777;notify;Terax;{event}\007\033\\' > {TMUX_PANE_TTY} 2>/dev/null; {TTY_GATE} printf '\033]777;notify;Terax;{event}\007' > "$TERAX_TTY" 2>/dev/null; elif [ -n "$TERAX_TERMINAL" ]; then printf '{{"terminalSequence":"\\u001b]777;notify;Terax;{event}\\u0007"}}'; fi"#
         ),
         Delivery::Osc => osc_command(spec.agent, event),
     }
@@ -104,7 +125,7 @@ fn hook_command(spec: &AgentSpec, event: &str) -> String {
 #[cfg(unix)]
 fn osc_command(agent: &str, event: &str) -> String {
     format!(
-        r#"{TMUX_GATE} printf '\033Ptmux;\033\033]777;notify;Terax;{agent};{event}\007\033\\' > {TMUX_PANE_TTY} 2>/dev/null; elif [ -n "$TERAX_TERMINAL" ]; then printf '\033]777;notify;Terax;{agent};{event}\007' > /dev/tty; fi; printf '{{}}'"#
+        r#"{TMUX_GATE} printf '\033Ptmux;\033\033]777;notify;Terax;{agent};{event}\007\033\\' > {TMUX_PANE_TTY} 2>/dev/null; {TTY_GATE} printf '\033]777;notify;Terax;{agent};{event}\007' > "$TERAX_TTY" 2>/dev/null; elif [ -n "$TERAX_TERMINAL" ]; then printf '\033]777;notify;Terax;{agent};{event}\007' > /dev/tty; fi; printf '{{}}'"#
     )
 }
 
@@ -208,7 +229,8 @@ pub(crate) fn claude_settings_path() -> Result<std::path::PathBuf, String> {
     settings_path(find("claude")?)
 }
 
-/// Every hook present in its current (tmux-aware) form; an older install
+/// Every hook present in its current (tmux- and tty-aware) form; an older
+/// install
 /// reports false so the UI offers a re-enable and startup migration runs.
 fn hooks_installed(spec: &AgentSpec, content: &str) -> bool {
     // Keyed on the marker: PreToolUse/PostToolUse reuse "working", so an install
@@ -220,7 +242,7 @@ fn hooks_installed(spec: &AgentSpec, content: &str) -> bool {
         .all(|(_, m, _)| content.contains(&status_needle(spec, m)));
     #[cfg(unix)]
     {
-        all && content.contains(TMUX_NEEDLE)
+        all && content.contains(TMUX_NEEDLE) && content.contains(TTY_NEEDLE)
     }
     #[cfg(windows)]
     {
@@ -229,7 +251,8 @@ fn hooks_installed(spec: &AgentSpec, content: &str) -> bool {
 }
 
 fn is_legacy_install(content: &str) -> bool {
-    OWNED_MARKERS.iter().any(|m| content.contains(m)) && !content.contains(TMUX_NEEDLE)
+    OWNED_MARKERS.iter().any(|m| content.contains(m))
+        && !(content.contains(TMUX_NEEDLE) && content.contains(TTY_NEEDLE))
 }
 
 /// Rewrite the commands of hook groups that are ours to the current form,
@@ -669,11 +692,36 @@ mod tests {
         let cmd = hook_command(spec("claude"), "attention");
         // Inside tmux the hook writes the DCS-wrapped marker onto the pane tty
         // itself (gated on the socket-side marker file + $TMUX_PANE); outside,
-        // the bare marker rides Claude's terminalSequence, env-gated.
+        // it writes the bare marker to the shell's own tty ($TERAX_TTY), and
+        // only failing that falls back to Claude's terminalSequence.
         assert!(cmd.starts_with(TMUX_GATE), "{cmd}");
         assert!(cmd.contains(r#"printf '\033Ptmux;\033\033]777;notify;Terax;attention\007\033\\' > "$(tmux display -p -t "$TMUX_PANE" '#{pane_tty}')" 2>/dev/null"#), "{cmd}");
+        assert!(cmd.contains(r#"elif [ -z "$TMUX" ] && [ -w "$TERAX_TTY" ] && case "$TERAX_TTY" in *..*) false ;; /dev/*) true ;; *) false ;; esac; then printf '\033]777;notify;Terax;attention\007' > "$TERAX_TTY" 2>/dev/null"#), "{cmd}");
         assert!(cmd.contains(r#"elif [ -n "$TERAX_TERMINAL" ]; then printf '{"terminalSequence":"\\u001b]777;notify;Terax;attention\\u0007"}'"#), "{cmd}");
         assert!(cmd.contains(TMUX_NEEDLE));
+        assert!(cmd.contains(TTY_NEEDLE));
+    }
+
+    #[test]
+    fn plain_tab_branch_refuses_a_path_outside_dev() {
+        // `>` on a regular file truncates it, and this command runs wherever
+        // Claude does, not only where we exported the variable. The traversal
+        // arm earns its place: /dev/../etc/passwd matches the prefix.
+        let cmd = hook_command(spec("claude"), "finished");
+        assert!(
+            cmd.contains(r#"case "$TERAX_TTY" in *..*) false ;; /dev/*) true ;; *) false ;; esac"#),
+            "{cmd}"
+        );
+    }
+
+    #[test]
+    fn plain_tab_branch_precedes_the_terminal_sequence_fallback() {
+        // Order matters: Claude relays a terminalSequence for only some hook
+        // events, so the direct tty write has to be tried first.
+        let cmd = hook_command(spec("claude"), "finished");
+        let tty = cmd.find(TTY_GATE).expect("tty branch");
+        let fallback = cmd.find(r#"elif [ -n "$TERAX_TERMINAL" ]"#).expect("fallback");
+        assert!(tty < fallback, "{cmd}");
     }
 
     #[cfg(unix)]
@@ -681,6 +729,7 @@ mod tests {
     fn codex_hook_wraps_marker_in_tmux_passthrough() {
         let cmd = hook_command(spec("codex"), "finished");
         assert!(cmd.contains(r#"printf '\033Ptmux;\033\033]777;notify;Terax;codex;finished\007\033\\' > "$(tmux display -p -t "$TMUX_PANE" '#{pane_tty}')" 2>/dev/null"#), "{cmd}");
+        assert!(cmd.contains(r#"elif [ -z "$TMUX" ] && [ -w "$TERAX_TTY" ] && case "$TERAX_TTY" in *..*) false ;; /dev/*) true ;; *) false ;; esac; then printf '\033]777;notify;Terax;codex;finished\007' > "$TERAX_TTY" 2>/dev/null"#), "{cmd}");
         assert!(cmd.contains(r#"elif [ -n "$TERAX_TERMINAL" ]; then printf '\033]777;notify;Terax;codex;finished\007' > /dev/tty"#), "{cmd}");
         assert!(cmd.ends_with("printf '{}'"), "{cmd}");
     }
@@ -697,6 +746,11 @@ mod tests {
         let legacy = fresh.replace(TMUX_NEEDLE, "");
         assert!(!hooks_installed(spec("claude"), &legacy));
         assert!(is_legacy_install(&legacy));
+
+        // Same for a tmux-aware install that predates the plain-tab tty branch.
+        let no_tty = fresh.replace(TTY_NEEDLE, "");
+        assert!(!hooks_installed(spec("claude"), &no_tty));
+        assert!(is_legacy_install(&no_tty));
 
         // A foreign config without our markers is neither.
         assert!(!hooks_installed(spec("claude"), "{}"));

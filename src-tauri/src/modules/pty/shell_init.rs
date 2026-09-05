@@ -100,7 +100,12 @@ fn validate_tmux_session(name: Option<String>) -> Result<Option<String>, String>
 /// drives session selection through the in-app switcher instead. It is a
 /// dedicated marker, kept distinct from `TERAX_TERMINAL` so it cannot trip the
 /// Claude Code agent-notification hooks that gate on the latter.
+///
+/// `TERAX_TTY` gives the remote agent hooks a path to write their marker to
+/// when the session is not inside tmux (see `agent::hook_command`).
 const REMOTE_SHELL_INIT: &str = r#"export TERAX_REMOTE=1
+__terax_tty="$(tty 2>/dev/null)"
+case "$__terax_tty" in /dev/*) export TERAX_TTY="$__terax_tty" ;; esac
 __terax_dir="$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/.terax-$$")"
 mkdir -p "$__terax_dir" 2>/dev/null
 __terax_shell="${SHELL:-/bin/bash}"

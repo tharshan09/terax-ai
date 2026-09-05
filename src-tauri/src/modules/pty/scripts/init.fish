@@ -14,6 +14,13 @@ if set -q __TERAX_HOOKS_LOADED
 end
 set -g __TERAX_HOOKS_LOADED 1
 
+# This shell's own tty, for agent hooks that cannot reach the terminal
+# themselves; re-evaluated per shell. See `agent::hook_command`.
+set -l __terax_tty (tty 2>/dev/null)
+if string match -q -- '/dev/*' "$__terax_tty"
+    set -gx TERAX_TTY "$__terax_tty"
+end
+
 # Terax is a clean terminal; drop fish's default startup greeting. A user who
 # sets their own in config.fish (sourced after this) keeps it.
 function fish_greeting
