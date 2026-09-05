@@ -72,6 +72,8 @@ type Props = {
   onRename: (id: number, title: string) => void;
   /** Move a dragged tab to a new position (insertion gap index 0..tabs.length). */
   onReorder: (fromId: number, toGapIndex: number) => void;
+  /** Drop a terminal tab onto another terminal tab: merge it in as a split pane. */
+  onMergeInto?: (fromId: number, intoId: number) => void;
   onOverrideLanguage?: (id: number, lang: string | null) => void;
   compact?: boolean;
 };
@@ -92,6 +94,7 @@ export function TabBar({
   onPin,
   onRename,
   onReorder,
+  onMergeInto,
   onOverrideLanguage,
   compact,
 }: Props) {
@@ -100,6 +103,9 @@ export function TabBar({
   const [editingId, setEditingId] = useState<number | null>(null);
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const [dropGap, setDropGap] = useState<number | null>(null);
+  // Terminal tab under the pointer (its middle band) while dragging another
+  // terminal tab: dropping merges the two into one split tab.
+  const [mergeTargetId, setMergeTargetId] = useState<number | null>(null);
   const [showAllLanguages, setShowAllLanguages] = useState(false);
   const drag = useRef<{
     pointerId: number;
@@ -158,6 +164,27 @@ export function TabBar({
     }
   }, [pill, pillReady]);
 
+  // The inner half of a tab counts as "onto" it (merge), the outer quarters
+  // as the gaps beside it (reorder), so both gestures stay reachable.
+  const mergeTargetAtX = (clientX: number, fromId: number): number | null => {
+    if (!onMergeInto) return null;
+    const from = tabs.find((t) => t.id === fromId);
+    if (from?.kind !== "terminal") return null;
+    const els = Array.from(
+      scrollRef.current?.querySelectorAll<HTMLElement>("[data-tab-id]") ?? [],
+    );
+    for (const el of els) {
+      const id = Number(el.dataset.tabId);
+      if (id === fromId) continue;
+      const r = el.getBoundingClientRect();
+      if (clientX < r.left + r.width / 4 || clientX > r.right - r.width / 4)
+        continue;
+      const tab = tabs.find((t) => t.id === id);
+      return tab?.kind === "terminal" ? id : null;
+    }
+    return null;
+  };
+
   const gapAtX = (clientX: number) => {
     const els = Array.from(
       scrollRef.current?.querySelectorAll<HTMLElement>("[data-tab-id]") ?? [],
@@ -175,6 +202,7 @@ export function TabBar({
     drag.current = null;
     setDraggingId(null);
     setDropGap(null);
+    setMergeTargetId(null);
     document.body.style.userSelect = "";
   };
 
@@ -316,11 +344,15 @@ export function TabBar({
                       document.body.style.userSelect = "none";
                     }
                     e.preventDefault();
-                    setDropGap(gapAtX(e.clientX));
+                    const merge = mergeTargetAtX(e.clientX, st.fromId);
+                    setMergeTargetId(merge);
+                    setDropGap(merge === null ? gapAtX(e.clientX) : null);
                   }}
                   onPointerUp={(e) => {
                     const st = drag.current;
-                    if (st?.active && dropGap !== null) {
+                    if (st?.active && mergeTargetId !== null && onMergeInto) {
+                      onMergeInto(st.fromId, mergeTargetId);
+                    } else if (st?.active && dropGap !== null) {
                       onReorder(st.fromId, dropGap);
                     } else if (st && !st.active) {
                       onSelect(t.id);
@@ -357,6 +389,8 @@ export function TabBar({
                       ? "text-foreground dark:text-foreground"
                       : "text-muted-foreground hover:text-foreground/80 dark:text-muted-foreground",
                     draggingId === t.id && "opacity-50",
+                    mergeTargetId === t.id &&
+                      "ring-1 ring-primary/70 bg-primary/10",
                     compact
                       ? "px-1.5!"
                       : tabs.length === 1

@@ -241,6 +241,30 @@ function insertLeafBeside(
  * Returns the original tree unchanged on a no-op (source === target, or either
  * id missing, or source is the only leaf).
  */
+/** Attach `subtree` (a leaf or a whole split from another tab) beside the
+ *  leaf `targetId` on `edge`. Leaf ids inside `subtree` are kept, so their
+ *  live sessions survive the move; the caller guarantees they do not collide
+ *  with ids already in `tree`. Returns `tree` unchanged when the target is
+ *  missing. */
+export function attachSubtree(
+  tree: PaneNode,
+  targetId: PaneId,
+  subtree: PaneNode,
+  edge: DropEdge,
+  newSplitId: PaneId,
+): PaneNode {
+  if (!hasLeaf(tree, targetId)) return tree;
+  const before = edge === "left" || edge === "top";
+  return insertLeafBeside(
+    tree,
+    targetId,
+    subtree,
+    newSplitId,
+    EDGE_DIR[edge],
+    before,
+  );
+}
+
 export function moveLeaf(
   tree: PaneNode,
   sourceId: PaneId,

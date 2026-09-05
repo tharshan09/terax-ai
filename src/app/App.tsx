@@ -162,6 +162,7 @@ export default function App() {
     moveTabToSpace,
     reorderTab,
     reorderTabByGap,
+    mergeTabInto,
     newTabInSpace,
     removeTabsForSpace,
     markBooted,
@@ -1450,6 +1451,11 @@ export default function App() {
               onPin={pinTab}
               onRename={handleRenameTab}
               onReorder={reorderTabByGap}
+              onMergeInto={(fromId, intoId) => {
+                if (!mergeTabInto(fromId, intoId)) {
+                  toast.error("Cannot merge: a tab holds at most 4 panes");
+                }
+              }}
               onToggleSidebar={toggleSidebar}
               onOpenCommandPalette={() => openCommandPalette("commands")}
               onActivateAgent={onActivateAgent}

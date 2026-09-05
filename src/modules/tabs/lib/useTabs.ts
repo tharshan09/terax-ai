@@ -9,6 +9,7 @@ import {
   findLeafCwd,
   hasLeaf,
   leafIds,
+  attachSubtree,
   moveLeaf,
   nextLeafId,
   type PaneNode,
@@ -1174,6 +1175,46 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     [],
   );
 
+  // Drop a terminal tab onto another one: its whole pane tree becomes a split
+  // next to the target's focused pane and the source tab disappears. Leaf ids
+  // (and so PTYs / tmux sessions) move untouched, so nothing is disposed or
+  // killed. Refused (false) when the result would exceed the per-tab pane cap
+  // or either side is not a terminal tab.
+  const mergeTabInto = useCallback(
+    (sourceTabId: number, targetTabId: number, edge: DropEdge = "right"): boolean => {
+      if (sourceTabId === targetTabId) return false;
+      let merged = false;
+      setTabs((curr) => {
+        const source = curr.find((t) => t.id === sourceTabId);
+        const target = curr.find((t) => t.id === targetTabId);
+        if (source?.kind !== "terminal" || target?.kind !== "terminal") return curr;
+        const total =
+          leafIds(source.paneTree).length + leafIds(target.paneTree).length;
+        if (total > MAX_PANES_PER_TAB) return curr;
+        const newSplitId = nextIdRef.current++;
+        const paneTree = attachSubtree(
+          target.paneTree,
+          target.activeLeafId,
+          source.paneTree,
+          edge,
+          newSplitId,
+        );
+        if (paneTree === target.paneTree) return curr;
+        merged = true;
+        setActiveId((active) => (active === sourceTabId ? targetTabId : active));
+        return curr
+          .filter((t) => t.id !== sourceTabId)
+          .map((t) =>
+            t.id === targetTabId
+              ? { ...t, paneTree, activeLeafId: source.activeLeafId }
+              : t,
+          );
+      });
+      return merged;
+    },
+    [],
+  );
+
   // Driven by a PTY exit (handleLeafExit), which includes a tmux DETACH: the
   // client exits while the session lives. So this path must NOT kill a managed
   // session (that would defeat restart-safety); an actual `exit` already ended
@@ -1316,6 +1357,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     focusNextPaneInTab,
     splitActivePane,
     movePane,
+    mergeTabInto,
     closeActivePane,
     closePaneByLeaf,
     resetWorkspace,
