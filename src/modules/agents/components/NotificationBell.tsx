@@ -6,6 +6,8 @@ import {
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 import {
+  ArrowDown01Icon,
+  ArrowUp01Icon,
   Cancel01Icon,
   CheckmarkCircle02Icon,
   Loading03Icon,
@@ -14,7 +16,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AgentIcon } from "../lib/agentIcon";
 import { displayAgent } from "../lib/format";
 import type { AgentNotification, AgentStatus } from "../lib/types";
@@ -23,7 +25,16 @@ import { useAgentStore } from "../store/agentStore";
 type Props = {
   onActivate: (tabId: number, leafId: number) => void;
   onActivateLocal: () => void;
+  /** SSH hosts with an open terminal tab; each gets a "Claude on <host>" hook
+   *  row so notifications also work for agents running remotely. */
+  sshHosts?: string[];
 };
+
+const REMOTE_HOOK_AGENT = "claude";
+
+function remoteHookKey(host: string): string {
+  return `${REMOTE_HOOK_AGENT}@${host}`;
+}
 
 function relativeTime(ts: number): string {
   const s = Math.floor((Date.now() - ts) / 1000);
@@ -185,10 +196,15 @@ function NotificationRow({
   );
 }
 
-export function NotificationBell({ onActivate, onActivateLocal }: Props) {
+export function NotificationBell({
+  onActivate,
+  onActivateLocal,
+  sshHosts = [],
+}: Props) {
   const [open, setOpen] = useState(false);
   const [hooks, setHooks] = useState<Record<string, boolean>>({});
   const [installing, setInstalling] = useState<string | null>(null);
+  const [alertsOpen, setAlertsOpen] = useState(false);
   const sessions = useAgentStore((s) => s.sessions);
   const localAgent = useAgentStore((s) => s.localAgent);
   const notifications = useAgentStore((s) => s.notifications);
@@ -207,6 +223,9 @@ export function NotificationBell({ onActivate, onActivateLocal }: Props) {
     (n) => !n.read && n.kind !== "attention",
   ).length;
   const badge = waitingCount + unreadDone;
+  const enabledCount =
+    HOOK_AGENTS.filter((id) => hooks[id] === true).length +
+    sshHosts.filter((host) => hooks[remoteHookKey(host)] === true).length;
 
   const refreshHooks = () => {
     for (const id of HOOK_AGENTS) {
@@ -215,6 +234,21 @@ export function NotificationBell({ onActivate, onActivateLocal }: Props) {
         .catch(() => setHooks((h) => ({ ...h, [id]: false })));
     }
   };
+
+  // Remote probes cost an SSH round-trip per host: only when the rows show.
+  const sshHostsKey = sshHosts.join("\u0000");
+  useEffect(() => {
+    if (!alertsOpen) return;
+    for (const host of sshHostsKey ? sshHostsKey.split("\u0000") : []) {
+      const key = remoteHookKey(host);
+      invoke<boolean>("agent_hooks_status", {
+        agent: REMOTE_HOOK_AGENT,
+        workspace: { kind: "ssh", host },
+      })
+        .then((ok) => setHooks((h) => ({ ...h, [key]: ok })))
+        .catch(() => setHooks((h) => ({ ...h, [key]: false })));
+    }
+  }, [alertsOpen, sshHostsKey]);
 
   const onOpenChange = (next: boolean) => {
     setOpen(next);
@@ -231,6 +265,22 @@ export function NotificationBell({ onActivate, onActivateLocal }: Props) {
       setHooks((h) => ({ ...h, [id]: true }));
     } catch {
       setHooks((h) => ({ ...h, [id]: false }));
+    } finally {
+      setInstalling(null);
+    }
+  };
+
+  const enableRemoteHooks = async (host: string) => {
+    const key = remoteHookKey(host);
+    setInstalling(key);
+    try {
+      await invoke("agent_enable_hooks", {
+        agent: REMOTE_HOOK_AGENT,
+        workspace: { kind: "ssh", host },
+      });
+      setHooks((h) => ({ ...h, [key]: true }));
+    } catch {
+      setHooks((h) => ({ ...h, [key]: false }));
     } finally {
       setInstalling(null);
     }
@@ -339,20 +389,51 @@ export function NotificationBell({ onActivate, onActivateLocal }: Props) {
         )}
 
         <div className="border-t border-border/60 p-1">
-          <div className="flex items-center gap-1.5 px-2 pt-1 pb-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+          <button
+            type="button"
+            onClick={() => setAlertsOpen((v) => !v)}
+            aria-expanded={alertsOpen}
+            className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70 transition-colors hover:text-foreground"
+          >
             <HugeiconsIcon icon={Notification03Icon} size={11} strokeWidth={2} />
             Agent alerts
-          </div>
-          {HOOK_AGENTS.map((id) => (
-            <HookAgentRow
-              key={id}
-              id={id}
-              label={displayAgent(id)}
-              ready={hooks[id] === true}
-              installing={installing === id}
-              onEnable={() => enableHooks(id)}
-            />
-          ))}
+            <span className="ml-auto flex items-center gap-1.5 normal-case tracking-normal">
+              {enabledCount > 0 ? (
+                <span className="text-[10px] text-muted-foreground/60">
+                  {enabledCount} on
+                </span>
+              ) : null}
+              <HugeiconsIcon
+                icon={alertsOpen ? ArrowUp01Icon : ArrowDown01Icon}
+                size={13}
+                strokeWidth={2}
+              />
+            </span>
+          </button>
+          {alertsOpen
+            ? HOOK_AGENTS.map((id) => (
+                <HookAgentRow
+                  key={id}
+                  id={id}
+                  label={displayAgent(id)}
+                  ready={hooks[id] === true}
+                  installing={installing === id}
+                  onEnable={() => enableHooks(id)}
+                />
+              ))
+            : null}
+          {alertsOpen
+            ? sshHosts.map((host) => (
+                <HookAgentRow
+                  key={remoteHookKey(host)}
+                  id={REMOTE_HOOK_AGENT}
+                  label={`${displayAgent(REMOTE_HOOK_AGENT)} on ${host}`}
+                  ready={hooks[remoteHookKey(host)] === true}
+                  installing={installing === remoteHookKey(host)}
+                  onEnable={() => enableRemoteHooks(host)}
+                />
+              ))
+            : null}
         </div>
       </PopoverContent>
     </Popover>

@@ -438,6 +438,7 @@ pub fn run() {
             open_settings_window,
             agent::agent_enable_hooks,
             agent::agent_hooks_status,
+            agent::agent_migrate_hooks,
             claude::claude_enable_statusline,
             claude::claude_disable_statusline,
             claude::claude_statusline_enabled,

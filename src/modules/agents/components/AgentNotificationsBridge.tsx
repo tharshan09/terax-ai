@@ -1,5 +1,7 @@
 import type { Tab } from "@/modules/tabs";
 import { hasLeaf, leafIdForPty } from "@/modules/terminal";
+import { usePreferencesStore } from "@/modules/settings/preferences";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef } from "react";
 import { displayAgent } from "../lib/format";
@@ -52,8 +54,9 @@ function route(
     body: info?.title,
     focused: ctx.focused,
     visible: ctx.activeId === session.tabId,
-    // Stop fires every turn, so finished only updates the bell; attention toasts.
-    allowToast: kind === "attention",
+    // Whether a finished turn alerts at all is the router's call (the
+    // "notify when an agent finishes" preference); attention always may.
+    allowToast: true,
     tabId: session.tabId,
     leafId: session.leafId,
     onActivate: () => ctx.onActivate(session.tabId, session.leafId),
@@ -121,6 +124,19 @@ export function AgentNotificationsBridge({
       useAgentStore.getState().setStatus(leafId, status),
     );
   }
+
+  // Hooks installed by an older Terax print a bare OSC marker that tmux
+  // swallows; upgrade them once per launch to the passthrough-wrapped form.
+  useEffect(() => {
+    if (!usePreferencesStore.getState().agentNotifications) return;
+    invoke<string[]>("agent_migrate_hooks")
+      .then((agents) => {
+        if (agents.length > 0) {
+          console.info("[terax] upgraded agent hooks for tmux:", agents.join(", "));
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     const scheduler = schedulerRef.current;

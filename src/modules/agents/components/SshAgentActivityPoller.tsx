@@ -220,6 +220,11 @@ function applyActions(actions: SshAgentAction[]): void {
           store.finish(action.leafId);
         }
         break;
+      case "exit-osc":
+        if (store.sessions[action.leafId]?.origin === "osc") {
+          store.finish(action.leafId);
+        }
+        break;
     }
   }
 }

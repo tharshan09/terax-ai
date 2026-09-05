@@ -41,6 +41,17 @@ export const useAgentStore = create<AgentStoreState>((set) => ({
   start: (leafId, tabId, agent, origin = "osc") =>
     set((s) => {
       const now = Date.now();
+      // A poller-tracked session handed to the OSC detector keeps its status
+      // instead of flashing back to idle on the first marker.
+      const prev = s.sessions[leafId];
+      if (prev) {
+        return {
+          sessions: {
+            ...s.sessions,
+            [leafId]: { ...prev, tabId, agent, origin, lastActivityAt: now },
+          },
+        };
+      }
       return {
         sessions: {
           ...s.sessions,

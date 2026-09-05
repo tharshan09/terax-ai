@@ -119,7 +119,13 @@ export type LeafAgentState = {
   lastTs: number | null;
   workingUntilMs: number;
   inStore: boolean;
+  /** Consecutive polls an OSC-owned leaf showed neither presence nor work. */
+  absentPolls?: number;
 };
+
+/** Polls without presence before an OSC-owned session is declared exited.
+ *  Under tmux nothing else can emit "exited" (no OSC 133, no PTY EOF). */
+export const OSC_EXIT_ABSENT_POLLS = 2;
 
 export type SshAgentAction =
   | {
@@ -131,7 +137,10 @@ export type SshAgentAction =
     }
   | { kind: "working"; leafId: number }
   | { kind: "idle"; leafId: number }
-  | { kind: "finish"; leafId: number };
+  | { kind: "finish"; leafId: number }
+  /** An OSC-owned session whose agent left the pane: finish it regardless of
+   *  owner (the detector cannot see the exit under tmux). */
+  | { kind: "exit-osc"; leafId: number };
 
 export type SshAgentPlan = {
   actions: SshAgentAction[];
@@ -160,14 +169,27 @@ export function planHostAgentUpdates(
   for (const leaf of leaves) {
     const before = prev.get(leaf.leafId);
 
-    // The OSC path owns this leaf: relinquish our tracking without finishing
-    // its session (that would delete the OSC-owned entry).
-    if (oscOwned.has(leaf.leafId)) continue;
-
     const agent = agentByLeaf.get(leaf.leafId) ?? null;
     const ts = tsByLeaf.get(leaf.leafId) ?? null;
     const changed =
       ts !== null && before?.lastTs != null && ts !== before.lastTs;
+
+    // The OSC path owns this leaf: never drive its status, but watch for the
+    // agent leaving the pane, which only this poll can see under tmux.
+    if (oscOwned.has(leaf.leafId)) {
+      const absent = agent === null && !changed;
+      const absentPolls = absent ? (before?.absentPolls ?? 0) + 1 : 0;
+      if (absentPolls >= OSC_EXIT_ABSENT_POLLS) {
+        actions.push({ kind: "exit-osc", leafId: leaf.leafId });
+      }
+      state.set(leaf.leafId, {
+        lastTs: ts ?? before?.lastTs ?? null,
+        workingUntilMs: 0,
+        inStore: false,
+        absentPolls,
+      });
+      continue;
+    }
 
     const workingUntilMs = changed
       ? nowMs + WORKING_HOLD_MS

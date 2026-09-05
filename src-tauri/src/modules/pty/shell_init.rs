@@ -177,13 +177,20 @@ const MANAGED_SESSION_PREFIX: &str = "terax-rs-";
 /// `$SHELL -l`), so `tmux` is resolved against the full interactive PATH: a
 /// GUI-launched macOS app otherwise gets a minimal PATH that misses Homebrew and
 /// a bare `tmux` fails to spawn. When `hide_status`, tmux's own status line is
-/// disabled for the session (`set-option status off`, chained with `\;`).
+/// disabled for the session (`set-option status off`, chained with `\\;`).
 /// `session` is allowlist-validated upstream (`[A-Za-z0-9_-]`), so single-quoting
 /// is injection-safe with no escaping. The OSC 7 rc bootstrap is intentionally
 /// skipped: tmux runs its own shells and does not reliably propagate it, so cwd
 /// tracking inside tmux is best-effort and simply absent rather than wrong.
+/// Run after attach: mark the server as Terax-attached (the agent hooks gate
+/// on `<socket>.terax`, see `agent::hook_command`) and let DCS passthrough
+/// reach the client from every window, present and future (`-gw`). `all` needs
+/// tmux 3.4; older servers fall back to `on`, inside run-shell so a rejected
+/// value cannot abort the rest of the chain.
+const TMUX_ATTACH_SETUP: &str = "run-shell 'touch \"#{socket_path}.terax\" 2>/dev/null; tmux set-option -gwq allow-passthrough all 2>/dev/null || tmux set-option -gwq allow-passthrough on 2>/dev/null; true'";
+
 fn tmux_attach_command(session: &str, hide_status: bool) -> String {
-    let base = format!("exec tmux new-session -A -s '{session}'");
+    let base = format!("exec tmux new-session -A -s '{session}' \\; {TMUX_ATTACH_SETUP}");
     if hide_status {
         format!("{base} \\; set-option status off")
     } else {
@@ -1236,7 +1243,9 @@ fn which_in_path(name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{sanitize_shell_override, tmux_attach_command, validate_tmux_session};
+    use super::{
+        sanitize_shell_override, tmux_attach_command, validate_tmux_session, TMUX_ATTACH_SETUP,
+    };
 
     #[test]
     fn rejects_non_enumerated_override() {
@@ -1290,20 +1299,35 @@ mod tests {
     fn tmux_attach_command_single_quotes_the_name() {
         assert_eq!(
             tmux_attach_command("main", false),
-            "exec tmux new-session -A -s 'main'"
+            format!("exec tmux new-session -A -s 'main' \\; {TMUX_ATTACH_SETUP}")
         );
-        assert_eq!(
-            tmux_attach_command("review-pr_2", false),
-            "exec tmux new-session -A -s 'review-pr_2'"
-        );
+        assert!(tmux_attach_command("review-pr_2", false)
+            .starts_with("exec tmux new-session -A -s 'review-pr_2' \\; run-shell"));
     }
 
     #[test]
     fn tmux_attach_command_hides_status_when_requested() {
         assert_eq!(
             tmux_attach_command("terax-rs-abc", true),
-            "exec tmux new-session -A -s 'terax-rs-abc' \\; set-option status off"
+            format!(
+                "exec tmux new-session -A -s 'terax-rs-abc' \\; {TMUX_ATTACH_SETUP} \\; set-option status off"
+            )
         );
+    }
+
+    #[test]
+    fn tmux_attach_setup_marks_server_and_enables_passthrough_without_hooks() {
+        // Marker file next to the socket gates the agent hooks; passthrough is
+        // a global window option (all windows, no per-session hook that would
+        // shadow the user's own after-new-window hooks); 3.4's `all` first,
+        // `on` as the fallback for older servers, never aborting the chain.
+        assert!(TMUX_ATTACH_SETUP.contains(r##"touch "#{socket_path}.terax""##));
+        assert!(TMUX_ATTACH_SETUP.contains("set-option -gwq allow-passthrough all"));
+        assert!(TMUX_ATTACH_SETUP.contains("|| tmux set-option -gwq allow-passthrough on"));
+        assert!(!TMUX_ATTACH_SETUP.contains("set-hook"));
+        for s in ["main", "terax-rs-x", "litha-web"] {
+            assert!(tmux_attach_command(s, false).contains(TMUX_ATTACH_SETUP));
+        }
     }
 
     #[cfg(unix)]
@@ -1331,7 +1355,7 @@ mod tests {
             .map(|s| s.to_string_lossy().into_owned())
             .collect();
         assert!(
-            !user_argv.iter().any(|a| a.contains("set-option")),
+            !user_argv.iter().any(|a| a.contains("status off")),
             "user session must keep its status line: {user_argv:?}"
         );
     }
@@ -1349,11 +1373,13 @@ mod tests {
             .iter()
             .map(|s| s.to_string_lossy().into_owned())
             .collect();
-        // shell -l -c "exec tmux new-session -A -s 'main'"
+        // shell -l -c "exec tmux new-session -A -s 'main' \\; set-option ..."
         assert!(argv.iter().any(|a| a == "-l"), "must be a login shell: {argv:?}");
         assert!(argv.iter().any(|a| a == "-c"));
         assert!(
-            argv.iter().any(|a| a == "exec tmux new-session -A -s 'main'"),
+            argv
+                .iter()
+                .any(|a| a.starts_with("exec tmux new-session -A -s 'main'")),
             "must exec tmux through the shell: {argv:?}"
         );
         // The bare-binary form that caused the bug must be gone.

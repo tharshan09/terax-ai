@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
@@ -15,6 +16,10 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import {
+  type OsNotificationResult,
+  testAgentOsNotification,
+} from "@/modules/agents/lib/notify";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type {
   ActivePaneMarker,
@@ -27,6 +32,9 @@ import {
   setActivePaneMarker,
   setInactivePaneStyle,
   setPaneHeaders,
+  setAgentNotificationSound,
+  setAgentNotifyOnFinish,
+  setAgentNotifyWhenFocused,
   setAgentNotifications,
   setAutostart,
   setEditorWordWrap,
@@ -104,6 +112,13 @@ const ZOOM_STEP = 0.05;
 const AUTO_SAVE_STEP = 100;
 const AUTO_SAVE_MIN = 100;
 const AUTO_SAVE_MAX = 60000;
+const NOTIFICATION_TEST_DELAY_MS = 2_000;
+
+type NotificationTestState =
+  | OsNotificationResult
+  | "idle"
+  | "waiting"
+  | "sending";
 
 export function GeneralSection() {
   const { mode, setMode } = useTheme();
@@ -147,6 +162,26 @@ export function GeneralSection() {
   const zoomLevel = usePreferencesStore((s) => s.zoomLevel);
   const trackpadTabSwipe = usePreferencesStore((s) => s.trackpadTabSwipe);
   const agentNotifications = usePreferencesStore((s) => s.agentNotifications);
+  const agentNotificationSound = usePreferencesStore(
+    (s) => s.agentNotificationSound,
+  );
+  const agentNotifyWhenFocused = usePreferencesStore(
+    (s) => s.agentNotifyWhenFocused,
+  );
+  const agentNotifyOnFinish = usePreferencesStore((s) => s.agentNotifyOnFinish);
+  const [notificationTest, setNotificationTest] =
+    useState<NotificationTestState>("idle");
+  const notificationTestPending =
+    notificationTest === "waiting" || notificationTest === "sending";
+
+  const testNotification = async () => {
+    setNotificationTest("waiting");
+    await new Promise((resolve) =>
+      setTimeout(resolve, NOTIFICATION_TEST_DELAY_MS),
+    );
+    setNotificationTest("sending");
+    setNotificationTest(await testAgentOsNotification(agentNotificationSound));
+  };
 
   useEffect(() => {
     let alive = true;
@@ -611,11 +646,57 @@ export function GeneralSection() {
         <Label>Agents</Label>
         <SettingRow
           title="Coding agent notifications"
-          description="Alert when Claude Code or Codex running in a terminal needs your input or finishes. Desktop notification when Terax is unfocused, in-app otherwise."
+          description="Alert when a coding agent running in a terminal needs your input or finishes. Works inside tmux and over SSH once the agent's hooks are enabled from the bell menu."
+        >
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              disabled={!agentNotifications || notificationTestPending}
+              title={notificationTestTitle(notificationTest)}
+              onClick={() => void testNotification()}
+            >
+              {notificationTestLabel(notificationTest)}
+            </Button>
+            <Switch
+              checked={agentNotifications}
+              disabled={notificationTestPending}
+              onCheckedChange={(v) => {
+                setNotificationTest("idle");
+                void setAgentNotifications(v);
+              }}
+            />
+          </div>
+        </SettingRow>
+        <SettingRow
+          title="Notify while Terax is focused"
+          description="Send a native notification even when Terax is the frontmost app, as long as the agent's tab is not the one on screen. Off: only an in-app toast."
         >
           <Switch
-            checked={agentNotifications}
-            onCheckedChange={(v) => void setAgentNotifications(v)}
+            checked={agentNotifyWhenFocused}
+            disabled={!agentNotifications}
+            onCheckedChange={(v) => void setAgentNotifyWhenFocused(v)}
+          />
+        </SettingRow>
+        <SettingRow
+          title="Notify when an agent finishes"
+          description="Alert when an agent ends its turn, not only when it needs input. Off: finished turns only appear in the bell."
+        >
+          <Switch
+            checked={agentNotifyOnFinish}
+            disabled={!agentNotifications}
+            onCheckedChange={(v) => void setAgentNotifyOnFinish(v)}
+          />
+        </SettingRow>
+        <SettingRow
+          title="Notification sound"
+          description="Play a sound with agent notifications and in-app alerts."
+        >
+          <Switch
+            checked={agentNotificationSound}
+            disabled={!agentNotifications || notificationTestPending}
+            onCheckedChange={(v) => void setAgentNotificationSound(v)}
           />
         </SettingRow>
       </div>
@@ -653,6 +734,40 @@ function Label({ children }: { children: React.ReactNode }) {
       {children}
     </span>
   );
+}
+
+function notificationTestLabel(status: NotificationTestState): string {
+  switch (status) {
+    case "waiting":
+      return "Switch apps...";
+    case "sending":
+      return "Sending...";
+    case "requested":
+      return "Requested";
+    case "denied":
+      return "Blocked";
+    case "failed":
+      return "Failed";
+    default:
+      return "Test in 2s";
+  }
+}
+
+function notificationTestTitle(status: NotificationTestState): string {
+  switch (status) {
+    case "waiting":
+      return "Switch to another app to verify native delivery";
+    case "sending":
+      return "Requesting the native notification";
+    case "requested":
+      return "The native notification was requested";
+    case "denied":
+      return "Notifications are disabled by the system";
+    case "failed":
+      return "Terax could not request a native notification";
+    default:
+      return "Send a native test notification after two seconds";
+  }
 }
 
 function FontFamilyInput({

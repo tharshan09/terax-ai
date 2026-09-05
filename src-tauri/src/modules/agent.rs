@@ -1,4 +1,7 @@
+use crate::modules::ssh;
+use crate::modules::workspace::WorkspaceEnv;
 use serde_json::{json, Value};
+use std::path::Path;
 
 // How a given agent's hook delivers our OSC 777 marker into the terminal.
 #[derive(Clone, Copy)]
@@ -77,10 +80,17 @@ fn find(agent: &str) -> Result<&'static AgentSpec, String> {
         .ok_or_else(|| format!("unknown agent {agent}"))
 }
 
+// tmux drops unknown OSCs, so inside tmux the marker is DCS-passthrough
+// wrapped (ESCs doubled) and gated on the marker file Terax touches next to
+// the tmux socket on attach (`${TMUX%%,*}.terax`, see shell_init), which
+// reaches panes that predate the attach, unlike an env var.
+const TMUX_NEEDLE: &str = "${TMUX%%,*}.terax";
+const TMUX_GATE: &str = r#"if [ -n "$TMUX" ] && [ -e "${TMUX%%,*}.terax" ]; then"#;
+
 fn hook_command(spec: &AgentSpec, event: &str) -> String {
     match spec.delivery {
         Delivery::TerminalSequence => format!(
-            r#"[ -n "$TERAX_TERMINAL" ] && printf '{{"terminalSequence":"\\u001b]777;notify;Terax;{event}\\u0007"}}' || true"#
+            r#"{TMUX_GATE} printf '{{"terminalSequence":"\\u001bPtmux;\\u001b\\u001b]777;notify;Terax;{event}\\u0007\\u001b\\\\"}}'; elif [ -n "$TERAX_TERMINAL" ]; then printf '{{"terminalSequence":"\\u001b]777;notify;Terax;{event}\\u0007"}}'; fi"#
         ),
         Delivery::Osc => osc_command(spec.agent, event),
     }
@@ -90,7 +100,7 @@ fn hook_command(spec: &AgentSpec, event: &str) -> String {
 #[cfg(unix)]
 fn osc_command(agent: &str, event: &str) -> String {
     format!(
-        r#"[ -n "$TERAX_TERMINAL" ] && printf '\033]777;notify;Terax;{agent};{event}\007' > /dev/tty; printf '{{}}'"#
+        r#"{TMUX_GATE} printf '\033Ptmux;\033\033]777;notify;Terax;{agent};{event}\007\033\\' > /dev/tty; elif [ -n "$TERAX_TERMINAL" ]; then printf '\033]777;notify;Terax;{agent};{event}\007' > /dev/tty; fi; printf '{{}}'"#
     )
 }
 
@@ -194,21 +204,100 @@ pub(crate) fn claude_settings_path() -> Result<std::path::PathBuf, String> {
     settings_path(find("claude")?)
 }
 
+/// Every hook present in its current (tmux-aware) form; an older install
+/// reports false so the UI offers a re-enable and startup migration runs.
+fn hooks_installed(spec: &AgentSpec, content: &str) -> bool {
+    // Keyed on the marker: PreToolUse/PostToolUse reuse "working", so an install
+    // predating them still reports enabled (its UserPromptSubmit already carries
+    // that needle) and is not force-nagged to re-enable.
+    let all = spec
+        .events
+        .iter()
+        .all(|(_, m, _)| content.contains(&status_needle(spec, m)));
+    #[cfg(unix)]
+    {
+        all && content.contains(TMUX_NEEDLE)
+    }
+    #[cfg(windows)]
+    {
+        all
+    }
+}
+
+fn is_legacy_install(content: &str) -> bool {
+    OWNED_MARKERS.iter().any(|m| content.contains(m)) && !content.contains(TMUX_NEEDLE)
+}
+
+/// Rewrite the commands of hook groups that are ours to the current form,
+/// touching nothing else: events the user removed stay removed. Returns the
+/// updated config and whether anything changed.
+fn upgrade_owned_commands(mut root: Value, spec: &AgentSpec) -> (Value, bool) {
+    let mut changed = false;
+    let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) else {
+        return (root, false);
+    };
+    for (event, marker, _) in spec.events {
+        let Some(groups) = hooks.get_mut(*event).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let wanted = hook_command(spec, marker);
+        for group in groups.iter_mut() {
+            if !is_ours(group) {
+                continue;
+            }
+            let Some(entries) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            for entry in entries.iter_mut() {
+                let current = entry.get("command").and_then(Value::as_str);
+                let ours = current.is_some_and(|c| OWNED_MARKERS.iter().any(|m| c.contains(m)));
+                if ours && current != Some(wanted.as_str()) {
+                    entry["command"] = json!(wanted);
+                    changed = true;
+                }
+            }
+        }
+    }
+    (root, changed)
+}
+
+/// Install (or refresh) the agent's hooks locally, or on the SSH host of
+/// `workspace` (where the remote agent runs); off the main thread.
 #[tauri::command]
-pub fn agent_enable_hooks(agent: String) -> Result<(), String> {
+pub async fn agent_enable_hooks(
+    agent: String,
+    workspace: Option<WorkspaceEnv>,
+) -> Result<(), String> {
     let spec = find(&agent)?;
+    tauri::async_runtime::spawn_blocking(move || match WorkspaceEnv::from_option(workspace) {
+        WorkspaceEnv::Ssh { host } => enable_ssh(spec, &host),
+        _ => enable_local(spec),
+    })
+    .await
+    .map_err(|e| format!("hook install task failed: {e}"))?
+}
+
+fn enable_local(spec: &AgentSpec) -> Result<(), String> {
     let path = settings_path(spec)?;
     let dir = path.parent().unwrap();
     std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-
-    let existing = match std::fs::read_to_string(&path) {
-        Ok(s) => existing_config(Some(&s), &path)?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
-        Err(e) => return Err(format!("read {}: {e}", path.display())),
-    };
-
+    let existing = read_local(spec)?;
     let merged = merge_hooks(existing, spec);
-    let out = serde_json::to_string_pretty(&merged).map_err(|e| e.to_string())?;
+    write_local(spec, &merged)
+}
+
+fn read_local(spec: &AgentSpec) -> Result<Value, String> {
+    let path = settings_path(spec)?;
+    match std::fs::read_to_string(&path) {
+        Ok(s) => existing_config(Some(&s), &path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(json!({})),
+        Err(e) => Err(format!("read {}: {e}", path.display())),
+    }
+}
+
+fn write_local(spec: &AgentSpec, root: &Value) -> Result<(), String> {
+    let path = settings_path(spec)?;
+    let out = serde_json::to_string_pretty(root).map_err(|e| e.to_string())?;
 
     // Write to a sibling temp file then rename so a crash mid-write can't leave
     // a truncated config.
@@ -219,6 +308,106 @@ pub fn agent_enable_hooks(agent: String) -> Result<(), String> {
         format!("rename into {}: {e}", path.display())
     })?;
     Ok(())
+}
+
+fn remote_rel(spec: &AgentSpec) -> String {
+    format!("{}/{}", spec.dir, spec.file)
+}
+
+const ABSENT_MARKER: &str = "__terax_absent__";
+
+/// A missing remote file must read as "absent" (start fresh) but a FAILED
+/// read must never: an empty stdout from a dropped connection would otherwise
+/// let the merge overwrite the user's config with hooks only.
+fn remote_read_command(rel: &str) -> String {
+    let q = crate::modules::git::quote_remote_arg(rel);
+    format!("if [ -e ~/{q} ]; then cat ~/{q}; else printf {ABSENT_MARKER}; fi")
+}
+
+fn read_ssh(
+    spec: &AgentSpec,
+    host: &str,
+    timeout: Option<std::time::Duration>,
+) -> Result<Option<String>, String> {
+    let cap = ssh::run_remote_capture(host, &remote_read_command(&remote_rel(spec)), timeout)?;
+    if cap.code != Some(0) {
+        return Err(format!(
+            "reading the remote config on {host} failed (exit {:?}): {}",
+            cap.code,
+            cap.stderr.trim()
+        ));
+    }
+    Ok(if cap.stdout.trim() == ABSENT_MARKER {
+        None
+    } else {
+        Some(cap.stdout)
+    })
+}
+
+fn enable_ssh(spec: &AgentSpec, host: &str) -> Result<(), String> {
+    ssh::validate_ssh_host(host)?;
+    let rel = remote_rel(spec);
+    // Setup path (not a poll): wait indefinitely, like the statusLine install.
+    let mk = ssh::run_remote_capture(
+        host,
+        &format!("mkdir -p ~/{}", crate::modules::git::quote_remote_arg(spec.dir)),
+        None,
+    )?;
+    if mk.code != Some(0) {
+        return Err(format!("mkdir on {host} failed: {}", mk.stderr.trim()));
+    }
+    let raw = read_ssh(spec, host, None)?;
+    let existing = existing_config(raw.as_deref(), Path::new(&format!("the remote ~/{rel}")))?;
+    let merged = merge_hooks(existing, spec);
+    let out = serde_json::to_string_pretty(&merged).map_err(|e| e.to_string())?;
+    ssh::write_file(host, &format!("~/{rel}"), &out)
+}
+
+fn status_ssh(spec: &AgentSpec, host: &str) -> bool {
+    if ssh::validate_ssh_host(host).is_err() {
+        return false;
+    }
+    // A status probe is a poll: a wedged host must not hang the popover.
+    read_ssh(spec, host, Some(std::time::Duration::from_secs(8)))
+        .ok()
+        .flatten()
+        .is_some_and(|content| hooks_installed(spec, &content))
+}
+
+/// Upgrade hooks an older Terax installed without the tmux passthrough form:
+/// only the commands of groups that are ours are rewritten, so events the user
+/// removed stay removed. Returns the agents touched.
+#[tauri::command]
+pub async fn agent_migrate_hooks() -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(migrate_hooks_blocking)
+        .await
+        .unwrap_or_default()
+}
+
+fn migrate_hooks_blocking() -> Vec<String> {
+    let mut migrated = Vec::new();
+    if cfg!(windows) {
+        return migrated;
+    }
+    for spec in AGENTS {
+        let Ok(path) = settings_path(spec) else {
+            continue;
+        };
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if !is_legacy_install(&content) {
+            continue;
+        }
+        let Ok(root) = existing_config(Some(&content), &path) else {
+            continue;
+        };
+        let (next, changed) = upgrade_owned_commands(root, spec);
+        if changed && write_local(spec, &next).is_ok() {
+            migrated.push(spec.agent.to_string());
+        }
+    }
+    migrated
 }
 
 // The raw OSC 777 bytes the detector parses. Kept in one place so the Windows
@@ -252,22 +441,23 @@ pub fn emit_conout_marker(agent: &str, event: &str) {
 }
 
 #[tauri::command]
-pub fn agent_hooks_status(agent: String) -> bool {
+pub async fn agent_hooks_status(agent: String, workspace: Option<WorkspaceEnv>) -> bool {
     let Ok(spec) = find(&agent) else {
         return false;
     };
-    let Some(content) = settings_path(spec)
+    tauri::async_runtime::spawn_blocking(move || match WorkspaceEnv::from_option(workspace) {
+        WorkspaceEnv::Ssh { host } => status_ssh(spec, &host),
+        _ => status_local(spec),
+    })
+    .await
+    .unwrap_or(false)
+}
+
+fn status_local(spec: &AgentSpec) -> bool {
+    settings_path(spec)
         .ok()
         .and_then(|p| std::fs::read_to_string(p).ok())
-    else {
-        return false;
-    };
-    // Keyed on the marker: PreToolUse/PostToolUse reuse "working", so an install
-    // predating them still reports enabled (its UserPromptSubmit already carries
-    // that needle) and is not force-nagged to re-enable.
-    spec.events
-        .iter()
-        .all(|(_, m, _)| content.contains(&status_needle(spec, m)))
+        .is_some_and(|content| hooks_installed(spec, &content))
 }
 
 #[cfg(test)]
@@ -453,6 +643,89 @@ mod tests {
         assert_eq!(
             existing_config(Some(r#"{"permissions":{}}"#), p).unwrap(),
             json!({ "permissions": {} })
+        );
+    }
+
+    #[test]
+    fn claude_hook_wraps_marker_in_tmux_passthrough() {
+        let cmd = hook_command(spec("claude"), "attention");
+        // Both branches: DCS-wrapped inside tmux (gated on the socket-side
+        // marker file Terax touches on attach), bare (env-gated) outside.
+        assert!(cmd.starts_with(r#"if [ -n "$TMUX" ] && [ -e "${TMUX%%,*}.terax" ]; then"#), "{cmd}");
+        assert!(cmd.contains(r#"\\u001bPtmux;\\u001b\\u001b]777;notify;Terax;attention\\u0007\\u001b\\\\"#), "{cmd}");
+        assert!(cmd.contains(r#"elif [ -n "$TERAX_TERMINAL" ]; then printf '{"terminalSequence":"\\u001b]777;notify;Terax;attention\\u0007"}'"#), "{cmd}");
+        assert!(cmd.contains(TMUX_NEEDLE));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_hook_wraps_marker_in_tmux_passthrough() {
+        let cmd = hook_command(spec("codex"), "finished");
+        assert!(cmd.contains(r#"printf '\033Ptmux;\033\033]777;notify;Terax;codex;finished\007\033\\' > /dev/tty"#), "{cmd}");
+        assert!(cmd.contains(r#"elif [ -n "$TERAX_TERMINAL" ]; then printf '\033]777;notify;Terax;codex;finished\007' > /dev/tty"#), "{cmd}");
+        assert!(cmd.ends_with("printf '{}'"), "{cmd}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_requires_tmux_aware_form() {
+        let fresh = serde_json::to_string(&merge_hooks(json!({}), spec("claude"))).unwrap();
+        assert!(hooks_installed(spec("claude"), &fresh));
+        assert!(!is_legacy_install(&fresh));
+
+        // An install from before the passthrough form: every needle present, no
+        // DCS wrapper → reports not installed and eligible for migration.
+        let legacy = fresh.replace(TMUX_NEEDLE, "");
+        assert!(!hooks_installed(spec("claude"), &legacy));
+        assert!(is_legacy_install(&legacy));
+
+        // A foreign config without our markers is neither.
+        assert!(!hooks_installed(spec("claude"), "{}"));
+        assert!(!is_legacy_install("{}"));
+    }
+
+    #[test]
+    fn migration_rewrite_is_idempotent() {
+        let once = merge_hooks(json!({}), spec("claude"));
+        let twice = merge_hooks(once.clone(), spec("claude"));
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn migration_upgrades_only_the_groups_that_exist() {
+        // A user kept Notification + Stop but deleted the tool events and added
+        // a foreign hook: migration must rewrite exactly the two owned commands.
+        let legacy = json!({
+            "model": "opus",
+            "hooks": {
+                "Notification": [
+                    { "hooks": [ { "type": "command", "command": r#"[ -n "$TERAX_TERMINAL" ] && printf '{"terminalSequence":"\u001b]777;notify;Terax;attention\u0007"}' || true"# } ] },
+                    { "hooks": [ { "type": "command", "command": "say hi" } ] }
+                ],
+                "Stop": [
+                    { "hooks": [ { "type": "command", "command": r#"[ -n "$TERAX_TERMINAL" ] && printf '{"terminalSequence":"\u001b]777;notify;Terax;finished\u0007"}' || true"# } ] }
+                ]
+            }
+        });
+        let (out, changed) = upgrade_owned_commands(legacy, spec("claude"));
+        assert!(changed);
+        assert_eq!(out["model"], "opus");
+        assert_eq!(hook_count(&out, "Notification"), 2);
+        assert_eq!(hook_count(&out, "Stop"), 1);
+        assert_eq!(hook_count(&out, "PreToolUse"), 0, "removed events stay removed");
+        assert!(command(&out, "Notification", 0).contains(TMUX_NEEDLE));
+        assert!(command(&out, "Notification", 0).contains("notify;Terax;attention"));
+        assert_eq!(command(&out, "Notification", 1), "say hi");
+        assert!(command(&out, "Stop", 0).contains(TMUX_NEEDLE));
+        let (_, again) = upgrade_owned_commands(out.clone(), spec("claude"));
+        assert!(!again, "second pass is a no-op");
+    }
+
+    #[test]
+    fn remote_read_command_distinguishes_absent_from_failed() {
+        assert_eq!(
+            remote_read_command(".claude/settings.json"),
+            "if [ -e ~/'.claude/settings.json' ]; then cat ~/'.claude/settings.json'; else printf __terax_absent__; fi"
         );
     }
 }
