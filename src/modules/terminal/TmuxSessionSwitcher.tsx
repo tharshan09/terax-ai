@@ -17,7 +17,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useMemo, useState } from "react";
-import { isManagedSession } from "./lib/managedTmux";
+import { isManagedSession, newSessionNameError } from "./lib/managedTmux";
 import {
   autoSessionName,
   isValidSessionName,
@@ -72,6 +72,12 @@ export function TmuxSessionSwitcher({
   const refresh = useTmuxSessions((s) => s.refresh);
 
   const [query, setQuery] = useState("");
+  /** Non-null while the picker asks what to call a session it is about to
+   *  create, and remembers which action asked. */
+  const [naming, setNaming] = useState<{
+    name: string;
+    mode: "here" | "newTab";
+  } | null>(null);
 
   // Refresh on every open so the list reflects the host's current state.
   useEffect(() => {
@@ -79,7 +85,10 @@ export function TmuxSessionSwitcher({
   }, [open, workspace, refresh]);
 
   useEffect(() => {
-    if (!open) setQuery("");
+    if (!open) {
+      setQuery("");
+      setNaming(null);
+    }
   }, [open]);
 
   const attachHere = (name: string) => {
@@ -132,6 +141,25 @@ export function TmuxSessionSwitcher({
   // mistaken for (and reaped as) a managed one.
   const canCreate = isValidSessionName(newName) && !isManagedSession(newName);
 
+  // A typed name is already a decision, so Enter creates it straight away.
+  // Without one we would silently invent s1, s2, ... and leave the user to
+  // rename it afterwards; ask for the name instead, prefilled with that same
+  // default so Enter still gets them a session in one keystroke.
+  const startCreate = (mode: "here" | "newTab") => {
+    if (!canCreate) return;
+    if (query.trim()) {
+      if (mode === "here") attachHere(newName);
+      else openInNewTab(newName);
+      return;
+    }
+    setNaming({ name: newName, mode });
+  };
+
+  const commitNewName = (name: string) => {
+    if (naming?.mode === "newTab") openInNewTab(name);
+    else attachHere(name);
+  };
+
   // Cmd/Ctrl+Enter opens the highlighted session in a NEW tab instead of
   // attaching here. cmdk marks the active item with aria-selected; we stash the
   // session name on a data attribute (cmdk lowercases its own value).
@@ -141,10 +169,13 @@ export function TmuxSessionSwitcher({
       const el = document.querySelector<HTMLElement>(
         '[cmdk-item][aria-selected="true"]',
       );
-      const name = el?.getAttribute("data-tmux-session");
-      if (name && el?.getAttribute("data-disabled") !== "true") {
-        openInNewTab(name);
+      if (el?.getAttribute("data-disabled") === "true") return;
+      if (el?.getAttribute("data-tmux-create") === "true") {
+        startCreate("newTab");
+        return;
       }
+      const name = el?.getAttribute("data-tmux-session");
+      if (name) openInNewTab(name);
     }
   };
 
@@ -169,13 +200,23 @@ export function TmuxSessionSwitcher({
             Refresh
           </button>
         </div>
-        <CommandInput
-          value={query}
-          onValueChange={setQuery}
-          onKeyDown={onInputKeyDown}
-          placeholder="Filter or name a session..."
-          autoFocus
-        />
+        {naming ? (
+          <NewSessionName
+            initial={naming.name}
+            host={host}
+            mode={naming.mode}
+            onCancel={() => setNaming(null)}
+            onConfirm={commitNewName}
+          />
+        ) : (
+          <>
+            <CommandInput
+              value={query}
+              onValueChange={setQuery}
+              onKeyDown={onInputKeyDown}
+              placeholder="Filter or name a session..."
+              autoFocus
+            />
         <ScrollArea className="max-h-[360px]">
           <CommandList className="max-h-none overflow-visible">
             {error ? (
@@ -209,8 +250,9 @@ export function TmuxSessionSwitcher({
                   <CommandItem
                     value={`__create__:${newName}`}
                     data-tmux-session={canCreate ? newName : undefined}
+                    data-tmux-create="true"
                     disabled={!canCreate}
-                    onSelect={() => canCreate && attachHere(newName)}
+                    onSelect={() => startCreate("here")}
                     className="text-[12.5px]"
                   >
                     <HugeiconsIcon
@@ -228,11 +270,11 @@ export function TmuxSessionSwitcher({
                           </span>
                         </>
                       ) : (
-                        "New session (auto)"
+                        "New session..."
                       )}
                     </span>
                     <CommandShortcut className="normal-case tracking-normal">
-                      attach
+                      {query.trim() ? "attach" : "name it"}
                     </CommandShortcut>
                   </CommandItem>
                 </CommandGroup>
@@ -240,16 +282,103 @@ export function TmuxSessionSwitcher({
             )}
           </CommandList>
         </ScrollArea>
-        <div className="flex items-center justify-between border-t border-border/50 px-3 py-2 text-[11px] text-muted-foreground/70">
-          <span className="flex items-center gap-1.5">
-            <Kbd>Enter</Kbd> attach here
-          </span>
-          <span className="flex items-center gap-1.5">
-            <Kbd>{MOD}+Enter</Kbd> new tab
-          </span>
-        </div>
+            <div className="flex items-center justify-between border-t border-border/50 px-3 py-2 text-[11px] text-muted-foreground/70">
+              <span className="flex items-center gap-1.5">
+                <Kbd>Enter</Kbd> attach here
+              </span>
+              <span className="flex items-center gap-1.5">
+                <Kbd>{MOD}+Enter</Kbd> new tab
+              </span>
+            </div>
+          </>
+        )}
       </Command>
     </CommandDialog>
+  );
+}
+
+/** Asks what to call a session about to be created, prefilled with the name the
+ *  picker would have invented. The field starts selected, so Enter takes the
+ *  default and typing replaces it: naming costs nothing, but is finally
+ *  possible before the session exists rather than only as a rename after. */
+function NewSessionName({
+  initial,
+  host,
+  mode,
+  onCancel,
+  onConfirm,
+}: {
+  initial: string;
+  host?: string;
+  mode: "here" | "newTab";
+  onCancel: () => void;
+  onConfirm: (name: string) => void;
+}) {
+  const [draft, setDraft] = useState(initial);
+  const name = sanitizeSessionName(draft);
+  const error = newSessionNameError(draft);
+
+  const commit = () => {
+    if (!error) onConfirm(name);
+  };
+
+  return (
+    <div className="px-3 pb-3">
+      <label
+        htmlFor="terax-new-tmux-session"
+        className="mb-1.5 block text-[11px] font-medium text-muted-foreground"
+      >
+        Name the new session{host ? ` on ${host}` : ""}
+      </label>
+      <input
+        id="terax-new-tmux-session"
+        // biome-ignore lint/a11y/noAutofocus: naming the session is the step
+        autoFocus
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onFocus={(e) => e.currentTarget.select()}
+        onKeyDown={(e) => {
+          // cmdk owns these keys for the list; here the field does.
+          e.stopPropagation();
+          if (e.key === "Enter") {
+            e.preventDefault();
+            commit();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            onCancel();
+          }
+        }}
+        className="h-8 w-full rounded border border-border/70 bg-background px-2 text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+      />
+      <p
+        className={cn(
+          "mt-1.5 text-[11px]",
+          error ? "text-destructive/80" : "text-muted-foreground/70",
+        )}
+      >
+        {error ??
+          (mode === "newTab"
+            ? `Opens ${name} in a new tab.`
+            : `Opens ${name} in this tab.`)}
+      </p>
+      <div className="mt-2.5 flex items-center justify-end gap-2">
+        <button
+          type="button"
+          onClick={onCancel}
+          className="rounded px-2 py-1 text-[12px] text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:text-foreground"
+        >
+          Back
+        </button>
+        <button
+          type="button"
+          onClick={commit}
+          disabled={error !== null}
+          className="rounded bg-primary px-2.5 py-1 text-[12px] font-medium text-primary-foreground outline-none transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:ring-primary/40 disabled:opacity-40"
+        >
+          Create
+        </button>
+      </div>
+    </div>
   );
 }
 

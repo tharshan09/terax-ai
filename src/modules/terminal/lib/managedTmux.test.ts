@@ -4,6 +4,7 @@ import {
   collectManagedSessions,
   isManagedSession,
   newManagedSession,
+  newSessionNameError,
   orphanedManagedSessions,
   removedManagedSessions,
 } from "./managedTmux";
@@ -148,5 +149,34 @@ describe("orphanedManagedSessions", () => {
     expect(
       orphanedManagedSessions(["terax-rs-a", "terax-rs-b", "s1"], referenced),
     ).toEqual([]);
+  });
+});
+
+describe("newSessionNameError", () => {
+  it("accepts a plain name", () => {
+    expect(newSessionNameError("deploy")).toBeNull();
+    expect(newSessionNameError("s1")).toBeNull();
+    expect(newSessionNameError("build_2-x")).toBeNull();
+  });
+
+  it("accepts input that sanitizes into a usable name", () => {
+    // The field takes what people type; spaces and dots become hyphens rather
+    // than an error the user has to decode.
+    expect(newSessionNameError("my app")).toBeNull();
+    expect(newSessionNameError("api.v2")).toBeNull();
+  });
+
+  it("refuses input that survives as nothing", () => {
+    expect(newSessionNameError("")).not.toBeNull();
+    expect(newSessionNameError("   ")).not.toBeNull();
+    expect(newSessionNameError("///")).not.toBeNull();
+  });
+
+  it("refuses the prefix reserved for Terax-managed sessions", () => {
+    // A user session named into it would be killed with its tab by the
+    // managed-session cleanup.
+    const err = newSessionNameError("terax-rs-mine");
+    expect(err).not.toBeNull();
+    expect(err).toMatch(/reserved/i);
   });
 });
