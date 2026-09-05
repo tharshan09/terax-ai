@@ -338,6 +338,10 @@ pub fn run() {
                     }
                 });
             }
+            // Dock Quit / `osascript quit` / logout reach AppKit directly, so
+            // they need the same close guard the menu's Quit item runs.
+            #[cfg(target_os = "macos")]
+            app_menu::install_terminate_guard(_app.handle());
             // Native two-finger trackpad swipe -> tab switch (macOS only).
             #[cfg(target_os = "macos")]
             install_tab_swipe_monitor(_app.handle());
