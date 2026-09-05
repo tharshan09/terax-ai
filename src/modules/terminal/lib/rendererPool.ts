@@ -19,6 +19,7 @@ import {
 } from "./keymap";
 import { pendingPtyResize } from "./rendererResize";
 import { findPathLinks } from "./terminalPathLinks";
+import { activateUnicode11 } from "./unicodeWidth";
 
 export const POOL_MAX_SIZE = 5;
 const FIT_DEBOUNCE_MS = 8;
@@ -242,6 +243,7 @@ function createSlot(): Slot {
   term.loadAddon(
     new WebLinksAddon((_e, uri) => openUrl(uri).catch(console.error)),
   );
+  activateUnicode11(term);
 
   const host = document.createElement("div");
   host.style.cssText = "width:100%;height:100%;";
