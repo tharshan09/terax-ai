@@ -382,6 +382,11 @@ export function TabBar({
                             role="button"
                             tabIndex={-1}
                             data-no-drag
+                            onPointerDown={(e) => e.stopPropagation()}
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                            }}
                             className="inline-flex shrink-0 cursor-pointer items-center justify-center rounded-sm p-1 -m-1 transition-all hover:bg-accent hover:text-accent-foreground hover:ring-1 hover:ring-primary/30 hover:shadow-[0_0_4px_var(--color-popover-foreground)]"
                           >
                             <TabIcon tab={t} />
@@ -487,6 +492,14 @@ export function TabBar({
                         role="button"
                         aria-label="Close tab"
                         data-no-drag
+                        onPointerDown={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                        }}
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                        }}
                         onClick={(e) => {
                           e.stopPropagation();
                           onClose(t.id);
