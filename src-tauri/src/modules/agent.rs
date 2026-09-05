@@ -80,17 +80,21 @@ fn find(agent: &str) -> Result<&'static AgentSpec, String> {
         .ok_or_else(|| format!("unknown agent {agent}"))
 }
 
-// tmux drops unknown OSCs, so inside tmux the marker is DCS-passthrough
-// wrapped (ESCs doubled) and gated on the marker file Terax touches next to
-// the tmux socket on attach (`${TMUX%%,*}.terax`, see shell_init), which
+// Inside tmux the hook writes the marker itself, DCS-passthrough wrapped
+// (ESCs doubled), straight onto the pane's tty (tmux resolves it from
+// $TMUX_PANE): Claude Code only relays a `terminalSequence` for some hook
+// events, and tmux would drop a bare OSC anyway. Gated on the marker file
+// Terax touches next to the tmux socket on attach (see shell_init), which
 // reaches panes that predate the attach, unlike an env var.
-const TMUX_NEEDLE: &str = "${TMUX%%,*}.terax";
-const TMUX_GATE: &str = r#"if [ -n "$TMUX" ] && [ -e "${TMUX%%,*}.terax" ]; then"#;
+const TMUX_NEEDLE: &str = "#{pane_tty}";
+const TMUX_GATE: &str =
+    r#"if [ -n "$TMUX" ] && [ -e "${TMUX%%,*}.terax" ] && [ -n "$TMUX_PANE" ]; then"#;
+const TMUX_PANE_TTY: &str = r#""$(tmux display -p -t "$TMUX_PANE" '#{pane_tty}')""#;
 
 fn hook_command(spec: &AgentSpec, event: &str) -> String {
     match spec.delivery {
         Delivery::TerminalSequence => format!(
-            r#"{TMUX_GATE} printf '{{"terminalSequence":"\\u001bPtmux;\\u001b\\u001b]777;notify;Terax;{event}\\u0007\\u001b\\\\"}}'; elif [ -n "$TERAX_TERMINAL" ]; then printf '{{"terminalSequence":"\\u001b]777;notify;Terax;{event}\\u0007"}}'; fi"#
+            r#"{TMUX_GATE} printf '\033Ptmux;\033\033]777;notify;Terax;{event}\007\033\\' > {TMUX_PANE_TTY} 2>/dev/null; elif [ -n "$TERAX_TERMINAL" ]; then printf '{{"terminalSequence":"\\u001b]777;notify;Terax;{event}\\u0007"}}'; fi"#
         ),
         Delivery::Osc => osc_command(spec.agent, event),
     }
@@ -100,7 +104,7 @@ fn hook_command(spec: &AgentSpec, event: &str) -> String {
 #[cfg(unix)]
 fn osc_command(agent: &str, event: &str) -> String {
     format!(
-        r#"{TMUX_GATE} printf '\033Ptmux;\033\033]777;notify;Terax;{agent};{event}\007\033\\' > /dev/tty; elif [ -n "$TERAX_TERMINAL" ]; then printf '\033]777;notify;Terax;{agent};{event}\007' > /dev/tty; fi; printf '{{}}'"#
+        r#"{TMUX_GATE} printf '\033Ptmux;\033\033]777;notify;Terax;{agent};{event}\007\033\\' > {TMUX_PANE_TTY} 2>/dev/null; elif [ -n "$TERAX_TERMINAL" ]; then printf '\033]777;notify;Terax;{agent};{event}\007' > /dev/tty; fi; printf '{{}}'"#
     )
 }
 
@@ -649,10 +653,11 @@ mod tests {
     #[test]
     fn claude_hook_wraps_marker_in_tmux_passthrough() {
         let cmd = hook_command(spec("claude"), "attention");
-        // Both branches: DCS-wrapped inside tmux (gated on the socket-side
-        // marker file Terax touches on attach), bare (env-gated) outside.
-        assert!(cmd.starts_with(r#"if [ -n "$TMUX" ] && [ -e "${TMUX%%,*}.terax" ]; then"#), "{cmd}");
-        assert!(cmd.contains(r#"\\u001bPtmux;\\u001b\\u001b]777;notify;Terax;attention\\u0007\\u001b\\\\"#), "{cmd}");
+        // Inside tmux the hook writes the DCS-wrapped marker onto the pane tty
+        // itself (gated on the socket-side marker file + $TMUX_PANE); outside,
+        // the bare marker rides Claude's terminalSequence, env-gated.
+        assert!(cmd.starts_with(TMUX_GATE), "{cmd}");
+        assert!(cmd.contains(r#"printf '\033Ptmux;\033\033]777;notify;Terax;attention\007\033\\' > "$(tmux display -p -t "$TMUX_PANE" '#{pane_tty}')" 2>/dev/null"#), "{cmd}");
         assert!(cmd.contains(r#"elif [ -n "$TERAX_TERMINAL" ]; then printf '{"terminalSequence":"\\u001b]777;notify;Terax;attention\\u0007"}'"#), "{cmd}");
         assert!(cmd.contains(TMUX_NEEDLE));
     }
@@ -661,7 +666,7 @@ mod tests {
     #[test]
     fn codex_hook_wraps_marker_in_tmux_passthrough() {
         let cmd = hook_command(spec("codex"), "finished");
-        assert!(cmd.contains(r#"printf '\033Ptmux;\033\033]777;notify;Terax;codex;finished\007\033\\' > /dev/tty"#), "{cmd}");
+        assert!(cmd.contains(r#"printf '\033Ptmux;\033\033]777;notify;Terax;codex;finished\007\033\\' > "$(tmux display -p -t "$TMUX_PANE" '#{pane_tty}')" 2>/dev/null"#), "{cmd}");
         assert!(cmd.contains(r#"elif [ -n "$TERAX_TERMINAL" ]; then printf '\033]777;notify;Terax;codex;finished\007' > /dev/tty"#), "{cmd}");
         assert!(cmd.ends_with("printf '{}'"), "{cmd}");
     }
