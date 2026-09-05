@@ -10,12 +10,16 @@ export type GridSize = { cols: number; rows: number };
 // A multiplexer like tmux positions every pane by absolute coordinates against
 // the size it was told, so a stale winsize makes it draw pane content into
 // cells that no longer line up with the grid: content bleeds across the pane
-// dividers. Degenerate (<= 0) dimensions never produce a resize.
+// dividers. A collapsed grid never produces a resize: @xterm/addon-fit clamps
+// a zero-size container to 2x1, which would squash tmux's layout.
+export const MIN_PTY_COLS = 3;
+export const MIN_PTY_ROWS = 2;
+
 export function pendingPtyResize(
   grid: GridSize,
   committed: GridSize,
 ): GridSize | null {
-  if (grid.cols <= 0 || grid.rows <= 0) return null;
+  if (grid.cols < MIN_PTY_COLS || grid.rows < MIN_PTY_ROWS) return null;
   if (grid.cols === committed.cols && grid.rows === committed.rows) return null;
   return { cols: grid.cols, rows: grid.rows };
 }

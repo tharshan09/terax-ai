@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { useSpaces } from "@/modules/spaces/lib/useSpaces";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import type { Tab } from "./useTabs";
 
@@ -25,40 +24,54 @@ export function envsMatch(
   return true;
 }
 
-/** The tabs that belong to `spaceId`; every tab when no space is active
- *  (single-space setups, tests). Explorer and source-control follow the
- *  *active space* only, so a space switch never shows another space's last
- *  terminal cwd (upstream #1159). */
-export function tabsInSpace(tabs: Tab[], spaceId: string | null): Tab[] {
-  return spaceId ? tabs.filter((t) => t.spaceId === spaceId) : tabs;
-}
-
 type CachedCwd = { cwd: string; env: WorkspaceEnv | undefined };
 
 export function useWorkspaceCwd(
   activeTab: Tab | undefined,
-  tabs: Tab[],
+  /** Tabs of the active space only (App already scopes them): explorer and
+   *  source-control never follow another space's terminal (upstream #1159). */
+  spaceTabs: Tab[],
   home: string | null,
   /** Ambient env (== file-tree / AI env). cwds from a different env are skipped. */
   workspaceEnv: WorkspaceEnv,
+  activeSpaceId: string | null,
 ): Result {
-  const activeSpaceId = useSpaces((s) => s.activeId);
-  const spaceTabs = useMemo(
-    () => tabsInSpace(tabs, activeSpaceId),
-    [tabs, activeSpaceId],
-  );
-  // The active tab is the active space's by construction; guard anyway so a
-  // stale activeTab during a switch cannot leak its cwd into the new space.
-  const spaceActiveTab =
-    activeTab && (!activeSpaceId || activeTab.spaceId === activeSpaceId)
-      ? activeTab
-      : undefined;
+  // The active tab belongs to the active space by construction; during the
+  // one commit where the space id flips before the tab does, keep the previous
+  // root instead of clearing the tree.
+  const switching =
+    activeTab !== undefined &&
+    activeSpaceId !== null &&
+    activeTab.spaceId !== activeSpaceId;
+  const spaceActiveTab = switching ? undefined : activeTab;
+  const lastRoot = useRef<string | null>(null);
 
-  // Cache the last terminal cwd per space, *with* its env so it's never reused
-  // under a different env (handing a local /Users/... path to the remote fs
-  // yields ENOENT). Per space so switching back restores that space's cwd.
+  // Last terminal cwd per space, *with* its env so it is never reused under a
+  // different env (a local /Users path against the remote fs yields ENOENT).
   const cwdBySpace = useRef(new Map<string, CachedCwd>());
   const cacheKey = activeSpaceId ?? "*";
+
+  // A cache hit only counts while a terminal of this space still sits there;
+  // a tab moved to another space or closed must not pin its old cwd here.
+  const cachedCwd = useCallback((): string | null => {
+    const last = cwdBySpace.current.get(cacheKey);
+    if (!last || !envsMatch(last.env, workspaceEnv)) return null;
+    const alive = spaceTabs.some(
+      (t) =>
+        t.kind === "terminal" &&
+        t.cwd === last.cwd &&
+        envsMatch(t.workspace, workspaceEnv),
+    );
+    return alive ? last.cwd : null;
+  }, [cacheKey, spaceTabs, workspaceEnv]);
+
+  const anyTerminalCwd = useCallback((): string | null => {
+    const term = spaceTabs.find(
+      (t) =>
+        t.kind === "terminal" && t.cwd && envsMatch(t.workspace, workspaceEnv),
+    );
+    return term?.kind === "terminal" && term.cwd ? term.cwd : null;
+  }, [spaceTabs, workspaceEnv]);
 
   useEffect(() => {
     if (
@@ -85,24 +98,26 @@ export function useWorkspaceCwd(
   }, [spaceActiveTab, spaceTabs, workspaceEnv, cacheKey]);
 
   const explorerRoot = useMemo<string | null>(() => {
+    if (switching) return lastRoot.current;
+    let root: string | null;
     if (
       spaceActiveTab?.kind === "terminal" &&
       spaceActiveTab.cwd &&
       envsMatch(spaceActiveTab.workspace, workspaceEnv)
-    )
-      return spaceActiveTab.cwd;
-    const last = cwdBySpace.current.get(cacheKey);
-    if (last && envsMatch(last.env, workspaceEnv)) return last.cwd;
-    const anyTerm = spaceTabs.find(
-      (t) =>
-        t.kind === "terminal" && t.cwd && envsMatch(t.workspace, workspaceEnv),
-    );
-    if (anyTerm?.kind === "terminal" && anyTerm.cwd) return anyTerm.cwd;
-    // `home` is a LOCAL path: only a fallback for the local env. A remote env
-    // with no known cwd yet shows nothing rather than reading the local home
-    // path against the remote host.
-    return workspaceEnv.kind === "local" ? home : null;
-  }, [spaceActiveTab, spaceTabs, home, workspaceEnv, cacheKey]);
+    ) {
+      root = spaceActiveTab.cwd;
+    } else {
+      // `home` is a LOCAL path: only a fallback for the local env. A remote env
+      // with no known cwd yet shows nothing rather than reading the local home
+      // path against the remote host.
+      root =
+        cachedCwd() ??
+        anyTerminalCwd() ??
+        (workspaceEnv.kind === "local" ? home : null);
+    }
+    lastRoot.current = root;
+    return root;
+  }, [switching, spaceActiveTab, home, workspaceEnv, cachedCwd, anyTerminalCwd]);
 
   const inheritedCwdForNewTab = useCallback((): string | undefined => {
     if (
@@ -111,10 +126,12 @@ export function useWorkspaceCwd(
       envsMatch(spaceActiveTab.workspace, workspaceEnv)
     )
       return spaceActiveTab.cwd;
-    const last = cwdBySpace.current.get(cacheKey);
-    if (last && envsMatch(last.env, workspaceEnv)) return last.cwd;
-    return workspaceEnv.kind === "local" ? (home ?? undefined) : undefined;
-  }, [spaceActiveTab, home, workspaceEnv, cacheKey]);
+    return (
+      cachedCwd() ??
+      anyTerminalCwd() ??
+      (workspaceEnv.kind === "local" ? (home ?? undefined) : undefined)
+    );
+  }, [spaceActiveTab, home, workspaceEnv, cachedCwd, anyTerminalCwd]);
 
   return { explorerRoot, inheritedCwdForNewTab };
 }

@@ -551,6 +551,9 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
   }
 
   slot.term.options.disableStdin = p.shellExited;
+  // A blocks leaf at its prompt disables xterm's helper textarea; a plain
+  // leaf inheriting the slot must get a focusable terminal back.
+  if (slot.term.textarea) slot.term.textarea.disabled = false;
 
   if (!fast) {
     slot.term.clear();
@@ -627,7 +630,7 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
   } else {
     // Focus before the two-frame unhide: rAF can be throttled on activating
     // windows, so deferred focus alone leaves the new tab unfocused (#411).
-    // Skip blocks leaves — at the prompt the shell-input bar owns focus.
+    // Skip blocks leaves: at the prompt the shell-input bar owns focus.
     if (
       adapter?.isLeafFocused(p.leafId) &&
       !adapter.isLeafBlocks(p.leafId)

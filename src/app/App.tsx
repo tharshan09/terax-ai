@@ -389,9 +389,10 @@ export default function App() {
 
   const { explorerRoot, inheritedCwdForNewTab } = useWorkspaceCwd(
     activeTab,
-    tabs,
+    spaceTabs,
     launchCwd ?? home,
     workspaceEnv,
+    activeSpaceId,
   );
 
   useWindowTitle(activeTab, explorerRoot);

@@ -16,6 +16,21 @@ export type TerminalTabLike = {
  * deferred focus (same timing as `cdInNewTab`) so typing works immediately
  * without an extra click (#411).
  */
+/** The user reached an input (inline search, chat composer, rename) within
+ *  the delay: the deferred terminal focus must not steal it. */
+export function editableOutsideTerminalFocused(
+  active: Element | null = typeof document === "undefined"
+    ? null
+    : document.activeElement,
+): boolean {
+  if (!active || active.closest(".xterm")) return false;
+  return (
+    active.closest(
+      'input, textarea, [contenteditable]:not([contenteditable="false"])',
+    ) !== null
+  );
+}
+
 export function scheduleFocusNewTerminalTab(
   tabId: number,
   opts: {
@@ -29,6 +44,7 @@ export function scheduleFocusNewTerminalTab(
   const delayMs = opts.delayMs ?? FOCUS_NEW_TERMINAL_DELAY_MS;
   return setTimeout(() => {
     if (opts.isActive && !opts.isActive()) return;
+    if (editableOutsideTerminalFocused()) return;
     const tab = opts.getTab(tabId);
     if (!tab || tab.kind !== "terminal" || tab.activeLeafId == null) return;
     opts.getHandle(tab.activeLeafId)?.focus();

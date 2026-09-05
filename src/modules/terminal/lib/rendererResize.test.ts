@@ -27,6 +27,10 @@ describe("pendingPtyResize", () => {
   });
 
   it("never emits a degenerate (zero/negative) resize during teardown", () => {
+    // FitAddon clamps a zero-size container to 2x1, which must not reach tmux.
+    expect(
+      pendingPtyResize({ cols: 2, rows: 1 }, { cols: 80, rows: 24 }),
+    ).toBeNull();
     expect(
       pendingPtyResize({ cols: 0, rows: 24 }, { cols: 80, rows: 24 }),
     ).toBeNull();

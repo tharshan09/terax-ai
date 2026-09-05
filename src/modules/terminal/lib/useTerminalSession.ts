@@ -425,7 +425,8 @@ configureRendererPool({
       resizePty: (cols, rows) => {
         s.cols = cols;
         s.rows = rows;
-        s.pty?.resize(cols, rows);
+        // Teardown commits can race a respawn's pty_close; nothing to do then.
+        s.pty?.resize(cols, rows).catch(() => {});
       },
       kickPty: (cols, rows) => {
         const pty = s.pty;
@@ -1033,7 +1034,7 @@ export function useTerminalSession({
         onCwd: (c) => cbRef.current.onCwd?.(c),
       });
       // Slot exists after attach when visible; focus now (not before bind).
-      // Blocks skip — shell-input registers its own focus path (#411).
+      // Blocks skip: shell-input registers its own focus path (#411).
       if (s.visibleNow && s.focusedNow && !s.blocks) focusSlot(leafId);
     });
     return () => {
@@ -1141,7 +1142,7 @@ export function useTerminalSession({
 
   const focus = useCallback(() => {
     const s = sessions.get(leafId);
-    // Blocks at the prompt: shell-input owns keyboard focus — never steal it
+    // Blocks at the prompt: shell-input owns keyboard focus, never steal it
     // via xterm (#411).
     if (s?.blocks && s.blockMode === "prompt") {
       s.inputFocus?.();
