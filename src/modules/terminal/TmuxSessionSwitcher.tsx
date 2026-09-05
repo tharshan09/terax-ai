@@ -135,8 +135,11 @@ export function TmuxSessionSwitcher({
     [sorted, q],
   );
 
-  const newName =
-    sanitizeSessionName(query) || autoSessionName(sessions.map((s) => s.name));
+  // What the filter yields as a name, if anything: "///" sanitizes away, so
+  // it is a filter and not a name. Both the row's wording and whether
+  // creating asks for a name key on this, so the two cannot disagree.
+  const typedName = sanitizeSessionName(query);
+  const newName = typedName || autoSessionName(sessions.map((s) => s.name));
   // The reserved prefix also blocks CREATE, so a user session can never be
   // mistaken for (and reaped as) a managed one.
   const canCreate = isValidSessionName(newName) && !isManagedSession(newName);
@@ -147,7 +150,7 @@ export function TmuxSessionSwitcher({
   // default so Enter still gets them a session in one keystroke.
   const startCreate = (mode: "here" | "newTab") => {
     if (!canCreate) return;
-    if (query.trim()) {
+    if (typedName) {
       if (mode === "here") attachHere(newName);
       else openInNewTab(newName);
       return;
@@ -183,6 +186,20 @@ export function TmuxSessionSwitcher({
     <CommandDialog
       open={open}
       onOpenChange={onOpenChange}
+      onEscapeKeyDown={(e) => {
+        // Radix dismisses on a document capture listener, so a field inside
+        // the dialog never sees Escape first. While one has focus it owns the
+        // key: leaving the naming step or an inline rename must not also tear
+        // down the picker. The filter input is not a field in that sense, so
+        // Escape there still closes, as before.
+        const el = document.activeElement;
+        if (
+          el instanceof HTMLInputElement &&
+          el.dataset.slot !== "command-input"
+        ) {
+          e.preventDefault();
+        }
+      }}
       title="tmux sessions"
       description="Attach, switch, or create a tmux session."
       className="w-[min(560px,calc(100vw-32px))]"
@@ -205,6 +222,7 @@ export function TmuxSessionSwitcher({
             initial={naming.name}
             host={host}
             mode={naming.mode}
+            existing={sessions.map((x) => x.name)}
             onCancel={() => setNaming(null)}
             onConfirm={commitNewName}
           />
@@ -217,71 +235,71 @@ export function TmuxSessionSwitcher({
               placeholder="Filter or name a session..."
               autoFocus
             />
-        <ScrollArea className="max-h-[360px]">
-          <CommandList className="max-h-none overflow-visible">
-            {error ? (
-              <StatusRow label={error} tone="error" />
-            ) : loading && sessions.length === 0 ? (
-              <StatusRow label="Loading sessions..." />
-            ) : (
-              <>
-                <CommandGroup heading="Sessions">
-                  {filtered.length === 0 ? (
-                    <StatusRow
-                      label={
-                        sessions.length === 0
-                          ? "No sessions on this host yet"
-                          : "No match"
-                      }
-                    />
-                  ) : (
-                    filtered.map((s) => (
-                      <SessionItem
-                        key={s.name}
-                        session={s}
-                        onAttach={() => attachHere(s.name)}
-                        onKill={() => killSession(s.name)}
-                        onRename={(to) => renameSession(s.name, to)}
-                      />
-                    ))
-                  )}
-                </CommandGroup>
-                <CommandGroup heading="Create">
-                  <CommandItem
-                    value={`__create__:${newName}`}
-                    data-tmux-session={canCreate ? newName : undefined}
-                    data-tmux-create="true"
-                    disabled={!canCreate}
-                    onSelect={() => startCreate("here")}
-                    className="text-[12.5px]"
-                  >
-                    <HugeiconsIcon
-                      icon={PlusSignIcon}
-                      size={14}
-                      strokeWidth={1.75}
-                      className="text-muted-foreground"
-                    />
-                    <span className="min-w-0 flex-1 truncate">
-                      {query.trim() ? (
-                        <>
-                          Create{" "}
-                          <span className="font-medium text-foreground">
-                            {newName}
-                          </span>
-                        </>
+            <ScrollArea className="max-h-[360px]">
+              <CommandList className="max-h-none overflow-visible">
+                {error ? (
+                  <StatusRow label={error} tone="error" />
+                ) : loading && sessions.length === 0 ? (
+                  <StatusRow label="Loading sessions..." />
+                ) : (
+                  <>
+                    <CommandGroup heading="Sessions">
+                      {filtered.length === 0 ? (
+                        <StatusRow
+                          label={
+                            sessions.length === 0
+                              ? "No sessions on this host yet"
+                              : "No match"
+                          }
+                        />
                       ) : (
-                        "New session..."
+                        filtered.map((s) => (
+                          <SessionItem
+                            key={s.name}
+                            session={s}
+                            onAttach={() => attachHere(s.name)}
+                            onKill={() => killSession(s.name)}
+                            onRename={(to) => renameSession(s.name, to)}
+                          />
+                        ))
                       )}
-                    </span>
-                    <CommandShortcut className="normal-case tracking-normal">
-                      {query.trim() ? "attach" : "name it"}
-                    </CommandShortcut>
-                  </CommandItem>
-                </CommandGroup>
-              </>
-            )}
-          </CommandList>
-        </ScrollArea>
+                    </CommandGroup>
+                    <CommandGroup heading="Create">
+                      <CommandItem
+                        value={`__create__:${newName}`}
+                        data-tmux-session={canCreate ? newName : undefined}
+                        data-tmux-create="true"
+                        disabled={!canCreate}
+                        onSelect={() => startCreate("here")}
+                        className="text-[12.5px]"
+                      >
+                        <HugeiconsIcon
+                          icon={PlusSignIcon}
+                          size={14}
+                          strokeWidth={1.75}
+                          className="text-muted-foreground"
+                        />
+                        <span className="min-w-0 flex-1 truncate">
+                          {typedName ? (
+                            <>
+                              Create{" "}
+                              <span className="font-medium text-foreground">
+                                {newName}
+                              </span>
+                            </>
+                          ) : (
+                            "New session..."
+                          )}
+                        </span>
+                        <CommandShortcut className="normal-case tracking-normal">
+                          {typedName ? "attach" : "name it"}
+                        </CommandShortcut>
+                      </CommandItem>
+                    </CommandGroup>
+                  </>
+                )}
+              </CommandList>
+            </ScrollArea>
             <div className="flex items-center justify-between border-t border-border/50 px-3 py-2 text-[11px] text-muted-foreground/70">
               <span className="flex items-center gap-1.5">
                 <Kbd>Enter</Kbd> attach here
@@ -305,18 +323,24 @@ function NewSessionName({
   initial,
   host,
   mode,
+  existing,
   onCancel,
   onConfirm,
 }: {
   initial: string;
   host?: string;
   mode: "here" | "newTab";
+  existing: string[];
   onCancel: () => void;
   onConfirm: (name: string) => void;
 }) {
   const [draft, setDraft] = useState(initial);
   const name = sanitizeSessionName(draft);
   const error = newSessionNameError(draft);
+  // `tmux new-session -A` attaches when the name is taken. That is a fine
+  // outcome, but not what a panel headed "Create" implies, so say so rather
+  // than dropping the user into someone else's running work unannounced.
+  const taken = !error && existing.includes(name);
 
   const commit = () => {
     if (!error) onConfirm(name);
@@ -357,9 +381,13 @@ function NewSessionName({
         )}
       >
         {error ??
-          (mode === "newTab"
-            ? `Opens ${name} in a new tab.`
-            : `Opens ${name} in this tab.`)}
+          (taken
+            ? `${name} already exists. This attaches to it${
+                mode === "newTab" ? " in a new tab" : ""
+              }.`
+            : mode === "newTab"
+              ? `Opens ${name} in a new tab.`
+              : `Opens ${name} in this tab.`)}
       </p>
       <div className="mt-2.5 flex items-center justify-end gap-2">
         <button
@@ -375,7 +403,7 @@ function NewSessionName({
           disabled={error !== null}
           className="rounded bg-primary px-2.5 py-1 text-[12px] font-medium text-primary-foreground outline-none transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:ring-primary/40 disabled:opacity-40"
         >
-          Create
+          {taken ? "Attach" : "Create"}
         </button>
       </div>
     </div>

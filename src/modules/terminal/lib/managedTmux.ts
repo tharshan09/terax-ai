@@ -28,9 +28,14 @@ const MANAGED_PREFIX = "terax-rs-";
  *  would be picked up by the managed-session cleanup and killed with its tab. */
 export function newSessionNameError(input: string): string | null {
   const name = sanitizeSessionName(input);
-  if (!name) return "Enter a name using letters, digits, - or _.";
-  if (!isValidSessionName(name)) return "Enter a name using letters, digits, - or _.";
-  if (isManagedSession(name)) return "That prefix is reserved for Terax sessions.";
+  // One check, not two: sanitizing already drops everything outside the
+  // allowlist, so the only way past it is input that survives as nothing.
+  if (!isValidSessionName(name)) {
+    return "Enter a name using letters, digits, - or _.";
+  }
+  if (isManagedSession(name)) {
+    return "That prefix is reserved for Terax sessions.";
+  }
   return null;
 }
 
