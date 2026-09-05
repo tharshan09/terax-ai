@@ -22,7 +22,11 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` keeps the key order of JSON we read and write back.
+# Terax rewrites files it does not own (~/.claude/settings.json), and the
+# default BTreeMap would re-sort the user's settings alphabetically on
+# every hook or statusline toggle.
+serde_json = { version = "1", features = ["preserve_order"] }
 portable-pty = "0.9"
 dirs = "6"
 log = "0.4"
