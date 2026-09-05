@@ -38,12 +38,19 @@ function CommandDialog({
   children,
   className,
   showCloseButton = false,
+  onEscapeKeyDown,
   ...props
 }: React.ComponentProps<typeof Dialog> & {
   title?: string
   description?: string
   className?: string
   showCloseButton?: boolean
+  /** Radix listens for Escape on `document` in the capture phase, so a field
+   *  inside the dialog can never handle it first. Forwarded to the content
+   *  layer so a caller can preventDefault and keep the dialog open. */
+  onEscapeKeyDown?: React.ComponentProps<
+    typeof DialogContent
+  >["onEscapeKeyDown"]
 }) {
   return (
     <Dialog {...props}>
@@ -57,6 +64,7 @@ function CommandDialog({
           className
         )}
         showCloseButton={showCloseButton}
+        onEscapeKeyDown={onEscapeKeyDown}
       >
         {children}
       </DialogContent>

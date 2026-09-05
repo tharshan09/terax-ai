@@ -1,6 +1,11 @@
 import { LOCAL_WORKSPACE } from "@/modules/workspace";
 import { findLeafNode, isLeaf, type PaneNode } from "./panes";
-import { killTmuxSession, listTmuxSessions } from "./tmux";
+import {
+  isValidSessionName,
+  killTmuxSession,
+  listTmuxSessions,
+  sanitizeSessionName,
+} from "./tmux";
 
 /**
  * Restart-safe local terminals (opt-in). When the preference is on, a new local
@@ -15,6 +20,24 @@ import { killTmuxSession, listTmuxSessions } from "./tmux";
  * own tmux tab (Cmd+Shift+M) is left untouched because it lacks the prefix.
  */
 const MANAGED_PREFIX = "terax-rs-";
+
+/** Why the name the user typed for a NEW session cannot be used, or null when
+ *  it can. Sanitizing runs first, so "my app" is accepted and becomes "my-app";
+ *  only input that survives as nothing, or that lands in our reserved prefix,
+ *  is refused. The prefix is reserved because a user session named into it
+ *  would be picked up by the managed-session cleanup and killed with its tab. */
+export function newSessionNameError(input: string): string | null {
+  const name = sanitizeSessionName(input);
+  // One check, not two: sanitizing already drops everything outside the
+  // allowlist, so the only way past it is input that survives as nothing.
+  if (!isValidSessionName(name)) {
+    return "Enter a name using letters, digits, - or _.";
+  }
+  if (isManagedSession(name)) {
+    return "That prefix is reserved for Terax sessions.";
+  }
+  return null;
+}
 
 export function isManagedSession(
   name: string | null | undefined,
