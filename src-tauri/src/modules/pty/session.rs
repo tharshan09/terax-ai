@@ -662,13 +662,17 @@ mod flush_tests {
         let done = Arc::new(AtomicBool::new(false));
         let ctrl_t = ctrl.clone();
         let done_t = done.clone();
-        let t0 = Instant::now();
         let h = thread::spawn(move || ctrl_t.coalesce(&done_t));
-        // Let the flusher enter its hidden wait, then flip visible.
+        // Let the flusher enter its hidden wait, then flip visible. Timing the
+        // budget from the flip, not from the spawn: what is under test is that
+        // the wait ends early, and a loaded machine can otherwise spend the
+        // whole window getting the thread started. Flipping before the wait is
+        // entered is harmless, since coalesce then picks the short window.
         thread::sleep(Duration::from_millis(10));
+        let flipped = Instant::now();
         ctrl.set_visible(true);
         h.join().unwrap();
-        let elapsed = t0.elapsed();
+        let elapsed = flipped.elapsed();
         assert!(
             elapsed < FLUSH_HIDDEN_COALESCE,
             "flush-on-visible did not cut the hidden window short: {elapsed:?}",
@@ -684,14 +688,15 @@ mod flush_tests {
         let done = Arc::new(AtomicBool::new(false));
         let ctrl_t = ctrl.clone();
         let done_t = done.clone();
-        let t0 = Instant::now();
         let h = thread::spawn(move || ctrl_t.coalesce(&done_t));
         thread::sleep(Duration::from_millis(10));
+        // From the signal, for the same reason as the visibility flip above.
+        let signalled = Instant::now();
         done.store(true, Ordering::Release);
         ctrl.wake();
         h.join().unwrap();
         assert!(
-            t0.elapsed() < FLUSH_HIDDEN_COALESCE,
+            signalled.elapsed() < FLUSH_HIDDEN_COALESCE,
             "child exit did not cut the coalesce short",
         );
     }
@@ -824,13 +829,14 @@ mod flush_tests {
         let done = Arc::new(AtomicBool::new(false));
         let ctrl_t = ctrl.clone();
         let done_t = done.clone();
-        let t0 = Instant::now();
         let h = thread::spawn(move || ctrl_t.coalesce(&done_t));
         thread::sleep(Duration::from_millis(10));
+        // From the signal, for the same reason as the visibility flip above.
+        let signalled = Instant::now();
         ctrl.signal_force_flush();
         h.join().unwrap();
         assert!(
-            t0.elapsed() < FLUSH_HIDDEN_COALESCE,
+            signalled.elapsed() < FLUSH_HIDDEN_COALESCE,
             "force-flush did not cut the hidden coalescing window short",
         );
     }
