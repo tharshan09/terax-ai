@@ -597,6 +597,20 @@ mod tests {
     }
 
     #[test]
+    fn keeps_the_users_key_order_when_rewriting_settings() {
+        // We rewrite a file we do not own. serde_json's `preserve_order` keeps
+        // the user's keys where they put them; the default map would re-sort
+        // the whole file alphabetically on every enable.
+        let raw = r#"{"model":"opus","permissions":{"allow":["Bash"]},"env":{"FOO":"1"}}"#;
+        let root = existing_config(Some(raw), Path::new("settings.json")).unwrap();
+        let out = serde_json::to_string(&merge_hooks(root, spec("claude"))).unwrap();
+        let model = out.find("\"model\"").expect("model");
+        let permissions = out.find("\"permissions\"").expect("permissions");
+        let env = out.find("\"env\"").expect("env");
+        assert!(model < permissions && permissions < env, "{out}");
+    }
+
+    #[test]
     fn preserves_unrelated_settings_and_foreign_hooks() {
         let input = json!({
             "permissions": { "allow": ["Bash"] },
