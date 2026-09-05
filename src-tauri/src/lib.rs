@@ -162,6 +162,10 @@ async fn clipboard_write_text(_text: String) -> Result<(), String> {
     Err("unsupported platform".into())
 }
 
+const fn settings_always_on_top(is_macos: bool) -> bool {
+    !is_macos
+}
+
 #[tauri::command]
 async fn open_settings_window(app: tauri::AppHandle, tab: Option<String>) -> Result<(), String> {
     let url_path = match tab.as_deref() {
@@ -170,6 +174,7 @@ async fn open_settings_window(app: tauri::AppHandle, tab: Option<String>) -> Res
     };
 
     if let Some(window) = app.get_webview_window("settings") {
+        #[cfg(not(target_os = "macos"))]
         let _ = window.set_always_on_top(true);
         let _ = window.show();
         let _ = window.set_focus();
@@ -187,14 +192,11 @@ async fn open_settings_window(app: tauri::AppHandle, tab: Option<String>) -> Res
         .min_inner_size(820.0, 620.0)
         .resizable(true)
         .visible(false)
-        // Keep settings above the main app window so it doesn't get hidden
-        // when the user clicks back into the editor or terminal (#33).
-        .always_on_top(true);
+        .always_on_top(settings_always_on_top(cfg!(target_os = "macos")));
 
-    // Tie lifecycle to the main window so settings minimizes/closes with it.
-    // macOS: skip parent() — child + always_on_top leaves the settings webview
-    // behind the main window except while the parent is being dragged (#33).
-    #[cfg(not(target_os = "macos"))]
+    // A normal-level child stays above Terax but recedes with the app on macOS.
+    // Never combine the macOS parent with always_on_top; that breaks WebView
+    // compositing and can hide Settings behind the main window (#33, #957).
     let builder = if let Some(main) = app.get_webview_window("main") {
         builder.parent(&main).map_err(|e| e.to_string())?
     } else {
@@ -307,18 +309,14 @@ pub fn run() {
         )
         .plugin(tauri_plugin_opener::init())
         .setup(|_app| {
-            // macOS skips parent() for the settings window, so tie its lifecycle
-            // to the main window here instead. Other platforms keep parent().
             #[cfg(target_os = "macos")]
             if let Some(main) = _app.get_webview_window("main") {
                 let handle = _app.handle().clone();
                 main.on_window_event(move |event| {
-                    if matches!(
-                        event,
-                        WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed
-                    ) {
+                    // CloseRequested can be cancelled by the frontend guard.
+                    if matches!(event, WindowEvent::Destroyed) {
                         if let Some(settings) = handle.get_webview_window("settings") {
-                            let _ = settings.close();
+                            let _ = settings.destroy();
                         }
                     }
                 });
@@ -451,4 +449,15 @@ pub fn run() {
                 ssh::disconnect_all();
             }
         });
+}
+
+#[cfg(test)]
+mod settings_window_tests {
+    use super::settings_always_on_top;
+
+    #[test]
+    fn settings_float_only_outside_macos() {
+        assert!(!settings_always_on_top(true));
+        assert!(settings_always_on_top(false));
+    }
 }
