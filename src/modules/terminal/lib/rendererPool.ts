@@ -539,7 +539,10 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
   cancelSlotReap(slot);
   unparkSlotHost(slot);
   if (!fast) {
-    slot.host.style.visibility = "hidden";
+    // opacity, not visibility: a visibility:hidden subtree refuses focus in
+    // Chromium, and the terminal must be focusable during the two-frame
+    // anti-flash window below or early focusSlot / keystrokes miss (#411, #857).
+    slot.host.style.opacity = "0";
     if (hadWebgl) disposeSlotWebgl(slot);
   }
 
@@ -622,6 +625,15 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
     }
     if (adapter?.isLeafFocused(p.leafId)) slot.term.focus();
   } else {
+    // Focus before the two-frame unhide: rAF can be throttled on activating
+    // windows, so deferred focus alone leaves the new tab unfocused (#411).
+    // Skip blocks leaves — at the prompt the shell-input bar owns focus.
+    if (
+      adapter?.isLeafFocused(p.leafId) &&
+      !adapter.isLeafBlocks(p.leafId)
+    ) {
+      slot.term.focus();
+    }
     scheduleUnhide(slot, stale || hadWebgl);
   }
 
@@ -632,7 +644,7 @@ function scheduleUnhide(slot: Slot, stale: boolean): void {
   slot.unhideRaf = requestAnimationFrame(() => {
     slot.unhideRaf = requestAnimationFrame(() => {
       slot.unhideRaf = null;
-      slot.host.style.visibility = "";
+      slot.host.style.opacity = "";
       if (stale) {
         if (!slot.webglAddon) attachWebgl(slot);
         try {
@@ -640,7 +652,11 @@ function scheduleUnhide(slot: Slot, stale: boolean): void {
         } catch {}
       }
       const leafId = slot.currentLeafId;
-      if (leafId !== null && adapter?.isLeafFocused(leafId)) {
+      if (
+        leafId !== null &&
+        adapter?.isLeafFocused(leafId) &&
+        !adapter.isLeafBlocks(leafId)
+      ) {
         slot.term.focus();
       }
     });
@@ -784,7 +800,7 @@ function detachSlotFromLeaf(slot: Slot, retain: boolean): void {
   slot.ptyTimer = null;
 
   cancelPendingUnhide(slot);
-  slot.host.style.visibility = "";
+  slot.host.style.opacity = "";
 
   slot.currentLeafId = null;
   slot.lastUsedAt = performance.now();
