@@ -397,7 +397,9 @@ export function swapLeaves(tree: PaneNode, a: PaneId, b: PaneId): PaneNode {
     }
     // Keep the identity of every branch the pair is not in, like setLeafCwd
     // does: PaneTreeView is memoized on the node, so cloning the whole spine
-    // would re-render every pane in the tab instead of the two that moved.
+    // would re-render every pane in the tab. It only pays off when the dragged
+    // pane was already the focused one, mind: otherwise `syncTabToLeaf` moves
+    // `activeLeafId`, and that prop reaches every pane anyway.
     let changed = false;
     const children = n.children.map((c) => {
       const u = put(c);

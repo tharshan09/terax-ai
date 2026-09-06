@@ -1,4 +1,10 @@
-import { findLeafCwd, type PaneNode } from "@/modules/terminal/lib/panes";
+import {
+  findLeafCwd,
+  leafIds,
+  type PaneNode,
+  slotOf,
+  swapLeaves,
+} from "@/modules/terminal/lib/panes";
 import { describe, expect, it } from "vitest";
 import {
   breakOutPaneFromTabs,
@@ -341,5 +347,57 @@ describe("canBreakOutPane", () => {
         breakOutPaneFromTabs(tabs, id, 7, 0) !== null,
       );
     }
+  });
+});
+
+describe("slot bookkeeping across the whole grammar", () => {
+  const allSlots = (n: PaneNode): number[] =>
+    n.kind === "leaf" ? [slotOf(n)] : n.children.flatMap(allSlots);
+  const allLeaves = (n: PaneNode): number[] => leafIds(n);
+
+  // The pane-slot-* / pane-group-* naming is only sound while slots stay a
+  // permutation of the live leaf ids: a duplicate would put one DOM id on two
+  // elements and one React key on two siblings. Swapping is the only thing
+  // that ever moves a slot, but panes also travel between tabs, so the property
+  // is asserted across the whole sequence rather than on swapLeaves alone.
+  it("keeps slots unique and drawn from the live leaves", () => {
+    let tabs: Tab[] = [
+      term(1, row(leaf(10), leaf(11), leaf(12))),
+      term(2, leaf(20)),
+    ];
+    const check = (label: string) => {
+      for (const t of tabs) {
+        if (t.kind !== "terminal") continue;
+        const slots = allSlots(t.paneTree);
+        expect(new Set(slots).size, `${label}: duplicate slot`).toBe(
+          slots.length,
+        );
+        for (const s of slots) {
+          expect(
+            allLeaves(t.paneTree),
+            `${label}: slot off the tree`,
+          ).toContain(s);
+        }
+      }
+    };
+    check("start");
+
+    // Swap two panes, then break one out, then put it back.
+    tabs = tabs.map((t) =>
+      t.id === 1 && t.kind === "terminal"
+        ? ({ ...t, paneTree: swapLeaves(t.paneTree, 10, 12) } as Tab)
+        : t,
+    );
+    check("after swap");
+
+    const out = breakOutPaneFromTabs(tabs, 11, 7, 1);
+    if (!out) throw new Error("expected a break-out");
+    tabs = out.tabs;
+    check("after break-out");
+
+    const back = undoBreakOut(tabs, out.undo);
+    if (typeof back === "string") throw new Error(`refused: ${back}`);
+    tabs = back;
+    check("after undo");
   });
 });
