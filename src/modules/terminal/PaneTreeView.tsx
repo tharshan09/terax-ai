@@ -256,7 +256,9 @@ function PaneDropOverlay({ leafId }: { leafId: number }) {
   // then no glyph is drawn at all: the frames still name the pair, which is the
   // part that matters, and guessing a direction is what this exists to avoid.
   const axis = usePaneDndStore((s) =>
-    s.target?.kind === "pane" ? (s.target.axis ?? null) : null,
+    s.target?.kind === "pane" && s.target.leafId === leafId
+      ? (s.target.axis ?? null)
+      : null,
   );
   if (spot === "center" || swapPartner) {
     return (
