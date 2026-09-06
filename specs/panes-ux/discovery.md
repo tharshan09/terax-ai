@@ -441,6 +441,17 @@ erst mitbringt. Wer C direkt nach A baut, baut die Mitte-Zone hinterher zweimal 
 
 ---
 
+## 5a. Nebenbefund: ein Split setzt die Nachbarn zurueck
+
+Beim Vermessen des Tauschs aufgefallen und **nicht** von dieser Welle verursacht:
+teilt man einen Pane, verlieren seine Geschwister ihre gezogenen Breiten. Gemessen
+775/274, nach einem Split des rechten Panes 524/524. Ursache ist dieselbe Mechanik
+wie beim Tausch: die Resize-Bibliothek merkt sich ein Layout unter der Liste der
+Panel-ids einer Gruppe, und an der Stelle des geteilten Panes steht danach eine
+Gruppe statt eines Blatts, also eine andere id. Ein Slot, der den Uebergang
+Blatt -> Gruppe uebersteht, waere denkbar, kollidiert aber mit der Eindeutigkeit
+der ids (siehe `PaneTreeView`). Eigenes Thema, eigene Welle.
+
 ## 6. Was hier bewusst nicht drin ist
 
 - **Restart-Sicherheit fuer Split-Panes.** Reale Luecke (siehe Abschnitt 1), aber ein

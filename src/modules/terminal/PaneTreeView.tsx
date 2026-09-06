@@ -165,14 +165,19 @@ export const PaneTreeView = memo(function PaneTreeViewImpl(props: Props) {
                 className={dividerActive ? "bg-primary/70" : undefined}
               />
             )}
-            {/* Two namespaces, because a split subtree is named after its
-                first leaf's slot and that leaf's own panel carries the same
-                slot: one id string would put it on two elements at once, and
-                the separator's aria-controls resolves ids document-wide. */}
+            {/* A leaf's panel is named after its SLOT, so a swap leaves the
+                group's panel list untouched and the sizes stay put. A group's
+                panel takes the split node's own id instead: naming it after
+                its first leaf's slot would collide with that leaf's panel, and
+                with any group between them, since they all resolve to the same
+                first leaf. Split ids are unique and a swap never rebuilds a
+                split node, so this is stable for the same reason. DOM ids are
+                document-wide, and the separator points at its panel through
+                aria-controls. */}
             <ResizablePanel
               id={
                 child.kind === "split"
-                  ? `pane-group-${slotId}`
+                  ? `pane-group-${child.id}`
                   : `pane-slot-${slotId}`
               }
               minSize="10%"
