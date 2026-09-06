@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   attachSubtree,
-  leafAnchor,
+  findLeafCwd,
   leafIds,
   moveLeaf,
   type PaneNode,
-  removeLeaf,
   setLeafTmuxSession,
+  withLeavesFrom,
 } from "./panes";
 
 type Split = Extract<PaneNode, { kind: "split" }>;
@@ -214,91 +214,56 @@ describe("attachSubtree (merge a tab's pane tree into another tab)", () => {
   });
 });
 
-describe("leafAnchor (where a pane sat, so a move out can be undone)", () => {
-  const leaf = (id: number): PaneNode => ({ kind: "leaf", id });
+describe("withLeavesFrom (restore a layout, not its old contents)", () => {
+  const leaf = (id: number, cwd?: string): PaneNode => ({
+    kind: "leaf",
+    id,
+    cwd,
+  });
 
-  it("anchors on the pane to its left in a row split", () => {
-    const tree: PaneNode = {
+  it("rebuilds the shape with the leaves that are live now", () => {
+    const shape: PaneNode = {
       kind: "split",
       id: 1,
       dir: "row",
-      children: [leaf(2), leaf(3)],
+      children: [leaf(2, "/old"), leaf(3, "/old")],
     };
-    expect(leafAnchor(tree, 3)).toEqual({ anchorId: 2, edge: "right" });
-  });
-
-  it("anchors on the pane to its right when it is the first child", () => {
-    const tree: PaneNode = {
+    const live: PaneNode = {
       kind: "split",
-      id: 1,
-      dir: "row",
-      children: [leaf(2), leaf(3)],
-    };
-    expect(leafAnchor(tree, 2)).toEqual({ anchorId: 3, edge: "left" });
-  });
-
-  it("uses the split direction, so a column split reports top/bottom", () => {
-    const tree: PaneNode = {
-      kind: "split",
-      id: 1,
+      id: 9,
       dir: "col",
-      children: [leaf(2), leaf(3)],
+      children: [leaf(3, "/new"), leaf(2, "/new")],
     };
-    expect(leafAnchor(tree, 3)).toEqual({ anchorId: 2, edge: "bottom" });
-    expect(leafAnchor(tree, 2)).toEqual({ anchorId: 3, edge: "top" });
-  });
-
-  it("anchors on the neighboring subtree's edge-most leaf", () => {
-    // row[ col[2,3], 4 ] — pane 4 sits to the right of the column, whose
-    // bottom leaf (3) is the one it actually touches.
-    const tree: PaneNode = {
+    const out = withLeavesFrom(shape, [live]);
+    expect(out).toEqual({
       kind: "split",
       id: 1,
       dir: "row",
-      children: [
-        { kind: "split", id: 5, dir: "col", children: [leaf(2), leaf(3)] },
-        leaf(4),
-      ],
-    };
-    expect(leafAnchor(tree, 4)).toEqual({ anchorId: 3, edge: "right" });
+      children: [leaf(2, "/new"), leaf(3, "/new")],
+    });
   });
 
-  it("finds a leaf nested below the root", () => {
-    const tree: PaneNode = {
+  it("takes a leaf from whichever source holds it", () => {
+    const shape: PaneNode = {
       kind: "split",
       id: 1,
       dir: "row",
-      children: [
-        leaf(2),
-        { kind: "split", id: 5, dir: "col", children: [leaf(3), leaf(4)] },
-      ],
+      children: [leaf(2, "/old"), leaf(3, "/old")],
     };
-    expect(leafAnchor(tree, 4)).toEqual({ anchorId: 3, edge: "bottom" });
+    const out = withLeavesFrom(shape, [leaf(2, "/a"), leaf(3, "/b")]);
+    expect(leafIds(out)).toEqual([2, 3]);
+    expect(findLeafCwd(out, 2)).toBe("/a");
+    expect(findLeafCwd(out, 3)).toBe("/b");
   });
 
-  it("has no anchor for a lone pane or an unknown id", () => {
-    expect(leafAnchor(leaf(1), 1)).toBeNull();
-    const tree: PaneNode = {
+  it("keeps a leaf no source knows about", () => {
+    const shape: PaneNode = {
       kind: "split",
       id: 1,
       dir: "row",
-      children: [leaf(2), leaf(3)],
+      children: [leaf(2, "/old"), leaf(3, "/old")],
     };
-    expect(leafAnchor(tree, 99)).toBeNull();
-  });
-
-  it("puts the pane back where it was when fed to attachSubtree", () => {
-    const tree: PaneNode = {
-      kind: "split",
-      id: 1,
-      dir: "row",
-      children: [leaf(2), leaf(3), leaf(4)],
-    };
-    const a = leafAnchor(tree, 3);
-    if (!a) throw new Error("expected an anchor");
-    const without = removeLeaf(tree, 3);
-    if (!without) throw new Error("expected a remaining tree");
-    const back = attachSubtree(without, a.anchorId, leaf(3), a.edge, 99);
-    expect(leafIds(back)).toEqual([2, 3, 4]);
+    const out = withLeavesFrom(shape, [leaf(2, "/a")]);
+    expect(findLeafCwd(out, 3)).toBe("/old");
   });
 });

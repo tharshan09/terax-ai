@@ -198,7 +198,7 @@ export default function App() {
     splitActivePane,
     movePane,
     breakOutPane,
-    movePaneToTab,
+    undoBreakOutPane,
     closeActivePane,
     closePaneByLeaf,
     resetWorkspace,
@@ -1166,32 +1166,26 @@ export default function App() {
   // keyed by tab, so they have to follow the leaf both ways.
   const handleBreakOutPane = useCallback(
     (leafId: number, gapIndex: number) => {
-      const out = breakOutPane(leafId, gapIndex);
-      if (!out) return;
-      useAgentStore.getState().moveLeavesToTab([leafId], out.tabId);
+      const undo = breakOutPane(leafId, gapIndex);
+      if (!undo) return;
+      useAgentStore.getState().moveLeavesToTab([leafId], undo.tabId);
       toast("Pane moved into its own tab", {
         duration: 6000,
         action: {
           label: "Undo",
           onClick: () => {
-            const refusal = movePaneToTab(
-              out.leafId,
-              out.sourceTabId,
-              out.anchorLeafId,
-              out.edge,
-            );
-            if (refusal === null) {
-              useAgentStore
-                .getState()
-                .moveLeavesToTab([out.leafId], out.sourceTabId);
-            } else {
-              toast.error("That pane cannot go back: its old tab has changed");
+            if (undoBreakOutPane(undo) !== null) {
+              toast.error("That pane cannot go back: the layout has changed");
+              return;
             }
+            useAgentStore
+              .getState()
+              .moveLeavesToTab([undo.leafId], undo.sourceTabId);
           },
         },
       });
     },
-    [breakOutPane, movePaneToTab],
+    [breakOutPane, undoBreakOutPane],
   );
 
   const onActivateAgent = activateAgentTarget;

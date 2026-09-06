@@ -174,6 +174,12 @@ Ziel, und das Verweilen ueber einem Tab wechselt dorthin.
 Zwei Bedeutungen, sauber getrennt durch die Flaeche unter dem Zeiger: **auf** einem
 Tab heisst "dort hinein", **zwischen** Tabs heisst "neuer Tab hier".
 
+Die Ablageflaeche ist dabei groesser als die Leiste selbst. Die Tab-Leiste ist
+`shrink`, sie ist nur so breit wie ihre Tabs; rechts daneben liegt ein Fueller, der
+wie die Leiste aussieht und auf den man zielt. Er gehoert zur selben Flaeche
+(`TAB_STRIP_ZONE_ATTR`), sonst verpufft ein Drop bei zwei offenen Tabs auf dem
+groessten Teil der Leiste stillschweigend.
+
 Das Verweilen ist ein Seiteneffekt und braucht einen Rueckweg: der Tab, in dem der
 Drag begann, wird gemerkt. Abbruch per Escape oder `pointercancel` kehrt dorthin
 zurueck, ein Drop bleibt im Zieltab.
@@ -260,10 +266,22 @@ Kein `Cmd+Z`. In einem Terminal ist das eine Taste, die in die Shell gehoert.
 
 Stattdessen ein Toast mit Knopf, sechs Sekunden, und nur bei den beiden Operationen,
 die eine Tab-Grenze ueberschreiten: **Ausbrechen** und **Tab zu Tab**. Dort ist der
-Pane nach einem Fehlgriff aus dem Blick. Die Rueckabwicklung merkt sich den Nachbarn
-und die Seite (`panes.leafAnchor`) und haengt denselben Leaf dort wieder an. Sass der
-Pane neben einem Pane, ist das exakt; sass er neben einem tieferen Teilbaum, stimmt
-die Seite, aber nicht zwingend die alten Proportionen.
+Pane nach einem Fehlgriff aus dem Blick.
+
+Rueckgaengig heisst **exakt**, sonst ist der Knopf falsch beschriftet. Ein erster
+Entwurf merkte sich nur den Nachbarn und die Seite und hing den Leaf dort wieder an.
+Das Review hat gezeigt, warum das zu wenig ist: in `row[ col[A,B], C ]` ist C eine
+Spalte ueber die volle Hoehe, kollabiert der Rest beim Entfernen zu `col[A,B]`, und
+das Wiederanhaengen an B ergibt `col[A, row[B,C]]`. C kaeme als halbhohe Zelle
+zurueck, also ein Umbau und keine Ruecknahme.
+
+Deshalb merkt sich der Vorgang den **ganzen Baum**, den er verlassen hat, und stellt
+ihn wieder her, gefuellt mit den Leaf-Objekten, die jetzt leben (`withLeavesFrom`) -
+ein cwd, den der Pane in diesen sechs Sekunden aufgesammelt hat, faehrt nicht mit
+zurueck in die Vergangenheit. Hat sich in der Zwischenzeit die Form geaendert (der
+neue Tab hat eigene Panes bekommen, der alte wurde geteilt, ein Pane geschlossen oder
+umsortiert), verweigert der Vorgang und sagt das. Ueber fremde Arbeit hinweg
+wiederherzustellen waere schlimmer als gar nicht.
 
 Innerhalb eines Tabs braucht es nichts. Der Pane ist sichtbar, und die Geste ist in
 einer Sekunde wiederholt. Tauschen ist ohnehin selbstinvers.
@@ -296,7 +314,7 @@ Pro Welle ein Branch und ein PR, Review-Gate `/code-review high`, dann die Gates
 |---|---|---|---|
 | A | **Ausbrechen** in einen eigenen Tab (D3 halb, D5, D7) | mittel | Groesster Nutzen, und es baut das dritte Drop-Ziel, auf dem B aufsetzt. |
 | B | **Tauschen** per Drop-Mitte (D2) | klein | Vervollstaendigt die Grammatik *innerhalb* eines Tabs, bevor sie ueber Tabs hinweg gilt. Anzahlneutral, also ohne Grenzen-Mathematik. |
-| C | **Pane von Tab A nach Tab B** (D3 ganz, D6) | mittel | Braucht A (Drop-Ziel Tab-Leiste) und erbt aus B den Tausch ueber Tab-Grenzen gratis. Bringt die gemeinsame Zulaessigkeitspruefung. |
+| C | **Pane von Tab A nach Tab B** (D3 ganz, D6) | mittel | Braucht A (Drop-Ziel Tab-Leiste) und erbt aus B den Tausch ueber Tab-Grenzen gratis. Bringt das allgemeine Primitiv (`movePaneIntoTab`) und die gemeinsame Zulaessigkeitspruefung mit seiner Geste, statt sie in A vorwegzunehmen. |
 | D | **Greifflaeche** (D8) | klein | Reine Optik und Treffsicherheit, keine Zustandslogik. |
 | E | **Tastatur** `Cmd+Alt+Pfeil` (D4) | klein bis mittel | Handarbeit statt Cherry-Pick, funktioniert unabhaengig von allem anderen. |
 
@@ -307,10 +325,13 @@ erst mitbringt. Wer C direkt nach A baut, baut die Mitte-Zone hinterher zweimal 
 
 ### Was A konkret anfasst
 
-- `useTabs.ts`: neu `breakOutPane(leafId)`. Neuer Tab in derselben Space, direkt
-  hinter dem Quelltab, erbt `workspace`, `private`, `blocks`. `paneTree` ist das
-  gefundene Leaf-Objekt selbst, `activeLeafId` seine id, dann `syncTabToLeaf`.
-  Quelltab: `removeLeaf` plus `siblingLeafOf`. No-op, wenn der Tab nur ein Leaf hat.
+- `useTabs.ts`: neu `breakOutPaneFromTabs` und `undoBreakOut` als reine Funktionen,
+  darueber die duennen Hook-Aktionen. Neuer Tab in derselben Space an der gezeigten
+  Luecke, erbt `workspace`, `private`, `blocks`, aber **nicht** den `customTitle`.
+  `paneTree` ist das gefundene Leaf-Objekt selbst, dann `syncTabToLeaf`. Quelltab:
+  `removeLeaf` plus `siblingLeafOf`. No-op, wenn der Tab nur ein Leaf hat.
+- `setActiveId` gehoert **in** den Updater. Ausserhalb wuerde ein Re-Plan, der
+  ablehnt, einen Tab aktiv setzen, den es nie gab (Review-Fund).
 - `paneDndStore.ts`: das Ziel wird eine Variante, `{kind:"pane"} | {kind:"newTab"}`.
 - `useTerminalPaneDnd.ts`: Hit-Test faellt auf die Tab-Leiste zurueck, wenn
   `elementFromPoint` keinen `[data-pane-leaf]` trifft.

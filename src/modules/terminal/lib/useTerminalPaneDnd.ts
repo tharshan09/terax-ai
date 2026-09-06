@@ -1,5 +1,5 @@
 import { getResizeZoomFactor } from "@/lib/zoomResizeFix";
-import { gapIndexAt, TAB_STRIP_ATTR } from "@/modules/tabs/lib/tabStripGap";
+import { gapIndexAt, tabStripAt } from "@/modules/tabs/lib/tabStripGap";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DropEdge } from "./panes";
@@ -93,7 +93,7 @@ export function useTerminalPaneDnd({ onMove, onBreakOut }: Handlers) {
             edge: edgeAt(leafEl, ev.clientX, ev.clientY),
           };
         } else {
-          const strip = under?.closest(`[${TAB_STRIP_ATTR}]`);
+          const strip = tabStripAt(under);
           target = strip
             ? { kind: "newTab", gapIndex: gapIndexAt(strip, ev.clientX) }
             : null;

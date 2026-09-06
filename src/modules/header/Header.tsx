@@ -4,6 +4,7 @@ import { IS_MAC, USE_CUSTOM_WINDOW_CONTROLS } from "@/lib/platform";
 import { NotificationBell } from "@/modules/agents";
 import type { Tab } from "@/modules/tabs";
 import { TabBar } from "@/modules/tabs";
+import { TAB_STRIP_ZONE_ATTR } from "@/modules/tabs/lib/tabStripGap";
 import type { SshHost } from "@/modules/workspace/sshHosts";
 import {
   CommandIcon,
@@ -200,7 +201,11 @@ export function Header({
           onOverrideLanguage={onOverrideLanguage}
           compact={compact}
         />
-        <div data-tauri-drag-region className="h-full min-w-2 flex-1" />
+        <div
+          data-tauri-drag-region
+          {...{ [TAB_STRIP_ZONE_ATTR]: "" }}
+          className="h-full min-w-2 flex-1"
+        />
       </div>
 
       <SearchInline ref={searchRef} target={searchTarget} compact={compact} />

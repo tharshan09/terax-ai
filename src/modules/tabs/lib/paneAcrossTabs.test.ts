@@ -1,12 +1,11 @@
-import type { PaneNode } from "@/modules/terminal/lib/panes";
+import { findLeafCwd, type PaneNode } from "@/modules/terminal/lib/panes";
 import { describe, expect, it } from "vitest";
 import {
   breakOutPaneFromTabs,
-  canMovePaneInto,
   insertTabAtSpaceGap,
-  movePaneIntoTab,
   type Tab,
   type TerminalTab,
+  undoBreakOut,
 } from "./useTabs";
 
 const leaf = (id: number, cwd?: string): PaneNode => ({
@@ -40,13 +39,13 @@ function term(
 }
 
 const ids = (tabs: Tab[]) => tabs.map((t) => t.id);
-const tree = (tabs: Tab[], id: number): PaneNode => {
+const tree_ = (tabs: Tab[], id: number): PaneNode => {
   const t = tabs.find((x) => x.id === id);
   if (t?.kind !== "terminal") throw new Error(`tab ${id} is not a terminal`);
   return t.paneTree;
 };
 const leavesOf = (tabs: Tab[], id: number): number[] => {
-  const n = tree(tabs, id);
+  const n = tree_(tabs, id);
   return n.kind === "leaf" ? [n.id] : n.children.map((c) => c.id);
 };
 
@@ -92,9 +91,17 @@ describe("breakOutPaneFromTabs", () => {
     const out = breakOutPaneFromTabs(tabs, 11, 7, 1);
     if (!out) throw new Error("expected a break-out");
     expect(ids(out.tabs)).toEqual([1, 7, 2]);
-    expect(tree(out.tabs, 7)).toEqual({ kind: "leaf", id: 11, cwd: undefined });
+    expect(tree_(out.tabs, 7)).toEqual({
+      kind: "leaf",
+      id: 11,
+      cwd: undefined,
+    });
     // The split collapses to the surviving pane.
-    expect(tree(out.tabs, 1)).toEqual({ kind: "leaf", id: 10, cwd: undefined });
+    expect(tree_(out.tabs, 1)).toEqual({
+      kind: "leaf",
+      id: 10,
+      cwd: undefined,
+    });
   });
 
   it("keeps the leaf object, so its live session travels with it", () => {
@@ -107,7 +114,7 @@ describe("breakOutPaneFromTabs", () => {
     const tabs = [term(1, row(leaf(10), live))];
     const out = breakOutPaneFromTabs(tabs, 11, 7, 1);
     if (!out) throw new Error("expected a break-out");
-    expect(tree(out.tabs, 7)).toBe(live);
+    expect(tree_(out.tabs, 7)).toBe(live);
     const born = out.tabs.find((t) => t.id === 7);
     if (born?.kind !== "terminal") throw new Error("expected a terminal tab");
     expect(born.cwd).toBe("/srv");
@@ -157,116 +164,118 @@ describe("breakOutPaneFromTabs", () => {
     expect(breakOutPaneFromTabs(tabs, 99, 7, 0)).toBeNull();
   });
 
-  it("reports where the pane sat, so the move can be undone", () => {
-    const tabs = [term(1, row(leaf(10), leaf(11)))];
+  it("records the layout it left behind, so the move can be undone", () => {
+    const tree = row(leaf(10), leaf(11));
+    const tabs = [term(1, tree, { activeLeafId: 10 })];
     const out = breakOutPaneFromTabs(tabs, 11, 7, 1);
     expect(out?.undo).toEqual({
       tabId: 7,
       leafId: 11,
       sourceTabId: 1,
-      anchorLeafId: 10,
-      edge: "right",
+      prevTree: tree,
+      prevActiveLeafId: 10,
     });
   });
 });
 
-describe("movePaneIntoTab", () => {
-  it("undoes a break-out back into the same spot", () => {
+describe("undoBreakOut", () => {
+  const col = (...children: PaneNode[]): PaneNode => ({
+    kind: "split",
+    id: 901,
+    dir: "col",
+    children,
+  });
+
+  function brokenOut(tabs: Tab[], leafId: number, gap = 1) {
+    const out = breakOutPaneFromTabs(tabs, leafId, 7, gap);
+    if (!out) throw new Error("expected a break-out");
+    return out;
+  }
+
+  it("restores the exact layout, not just the side the pane sat on", () => {
+    // row[ col[10,11], 12 ]: pane 12 is a full-height column. Re-attaching it
+    // to a neighbor leaf would bring it back as a cell inside the column.
+    const tree = row(col(leaf(10), leaf(11)), leaf(12));
+    const out = brokenOut([term(1, tree)], 12);
+    const back = undoBreakOut(out.tabs, out.undo);
+    if (typeof back === "string") throw new Error(`refused: ${back}`);
+    expect(ids(back)).toEqual([1]);
+    expect(tree_(back, 1)).toEqual(tree);
+  });
+
+  it("restores a plain row and closes the tab the pane was born into", () => {
     const before = [
       term(1, row(leaf(10), leaf(11), leaf(12))),
       term(2, leaf(20)),
     ];
-    const out = breakOutPaneFromTabs(before, 11, 7, 1);
-    if (!out) throw new Error("expected a break-out");
-    const back = movePaneIntoTab(
-      out.tabs,
-      out.undo.leafId,
-      out.undo.sourceTabId,
-      out.undo.anchorLeafId,
-      out.undo.edge,
-      99,
-    );
+    const out = brokenOut(before, 11);
+    const back = undoBreakOut(out.tabs, out.undo);
     if (typeof back === "string") throw new Error(`refused: ${back}`);
     expect(ids(back)).toEqual([1, 2]);
     expect(leavesOf(back, 1)).toEqual([10, 11, 12]);
   });
 
-  it("closes the source tab when its last pane leaves", () => {
-    const tabs = [term(1, leaf(10)), term(2, leaf(20))];
-    const next = movePaneIntoTab(tabs, 10, 2, 20, "right", 99);
-    if (typeof next === "string") throw new Error(`refused: ${next}`);
-    expect(ids(next)).toEqual([2]);
-    expect(leavesOf(next, 2)).toEqual([20, 10]);
-  });
-
-  it("focuses the arriving pane in the target tab", () => {
-    const tabs = [term(1, leaf(10, "/src")), term(2, row(leaf(20), leaf(21)))];
-    const next = movePaneIntoTab(tabs, 10, 2, 21, "bottom", 99);
-    if (typeof next === "string") throw new Error(`refused: ${next}`);
-    const dst = next.find((t) => t.id === 2);
-    if (dst?.kind !== "terminal") throw new Error("expected a terminal tab");
-    expect(dst.activeLeafId).toBe(10);
-    expect(dst.cwd).toBe("/src");
-  });
-
-  it("wakes a cold target when a live pane lands in it", () => {
-    const tabs = [
-      term(1, row(leaf(10), leaf(11))),
-      term(2, leaf(20), { cold: true }),
-    ];
-    const next = movePaneIntoTab(tabs, 10, 2, 20, "right", 99);
-    if (typeof next === "string") throw new Error(`refused: ${next}`);
-    expect(next.find((t) => t.id === 2)?.cold).toBeUndefined();
-  });
-
-  it("refuses a full target, counting one pane and not the whole tab", () => {
-    const four = row(leaf(20), leaf(21), leaf(22), leaf(23));
-    const tabs = [term(1, row(leaf(10), leaf(11))), term(2, four)];
-    expect(movePaneIntoTab(tabs, 10, 2, 20, "right", 99)).toBe("cap");
-    // Three panes leave room for exactly one more.
-    const three = [
-      term(1, row(leaf(10), leaf(11))),
-      term(2, row(leaf(20), leaf(21), leaf(22))),
-    ];
-    expect(typeof movePaneIntoTab(three, 10, 2, 20, "right", 99)).not.toBe(
-      "string",
+  it("gives the source tab its old focus back", () => {
+    const out = brokenOut(
+      [term(1, row(leaf(10), leaf(11)), { activeLeafId: 10 })],
+      11,
     );
+    const back = undoBreakOut(out.tabs, out.undo);
+    if (typeof back === "string") throw new Error(`refused: ${back}`);
+    const src = back.find((t) => t.id === 1);
+    if (src?.kind !== "terminal") throw new Error("expected a terminal tab");
+    expect(src.activeLeafId).toBe(10);
   });
 
-  it("refuses tabs that disagree on environment, privacy or blocks", () => {
-    const local = term(1, row(leaf(10), leaf(11)));
-    const remote = term(2, leaf(20), {
-      workspace: { kind: "ssh", host: "litha" },
-    });
-    expect(movePaneIntoTab([local, remote], 10, 2, 20, "right", 99)).toBe(
-      "incompatible",
+  it("keeps a cwd the pane picked up after the drop", () => {
+    const out = brokenOut([term(1, row(leaf(10, "/a"), leaf(11, "/a")))], 11);
+    // The broken-out pane cd's while the toast stands.
+    const moved = out.tabs.map((t) =>
+      t.id === 7 ? ({ ...t, paneTree: leaf(11, "/elsewhere") } as Tab) : t,
     );
-    const priv = term(3, leaf(30), { private: true });
-    expect(movePaneIntoTab([local, priv], 10, 3, 30, "right", 99)).toBe(
-      "incompatible",
-    );
-    const blocks = term(4, leaf(40), { blocks: true });
-    expect(movePaneIntoTab([local, blocks], 10, 4, 40, "right", 99)).toBe(
-      "incompatible",
-    );
+    const back = undoBreakOut(moved, out.undo);
+    if (typeof back === "string") throw new Error(`refused: ${back}`);
+    const src = back.find((t) => t.id === 1);
+    if (src?.kind !== "terminal") throw new Error("expected a terminal tab");
+    expect(findLeafCwd(src.paneTree, 11)).toBe("/elsewhere");
+    expect(findLeafCwd(src.paneTree, 10)).toBe("/a");
   });
 
-  it("refuses an unknown leaf, an unknown target or the tab it is already in", () => {
-    const tabs = [term(1, row(leaf(10), leaf(11))), term(2, leaf(20))];
-    expect(movePaneIntoTab(tabs, 99, 2, 20, "right", 99)).toBe("invalid");
-    expect(movePaneIntoTab(tabs, 10, 88, 20, "right", 99)).toBe("invalid");
-    expect(movePaneIntoTab(tabs, 10, 1, 11, "right", 99)).toBe("invalid");
-    expect(movePaneIntoTab(tabs, 10, 2, 88, "right", 99)).toBe("invalid");
+  it("refuses once the new tab has grown panes of its own", () => {
+    const out = brokenOut([term(1, row(leaf(10), leaf(11)))], 11);
+    const split = out.tabs.map((t) =>
+      t.id === 7 ? ({ ...t, paneTree: row(leaf(11), leaf(30)) } as Tab) : t,
+    );
+    expect(undoBreakOut(split, out.undo)).toBe("invalid");
   });
-});
 
-describe("canMovePaneInto", () => {
-  it("counts room for one pane, unlike a whole-tab merge", () => {
-    const three = term(1, row(leaf(10), leaf(11), leaf(12)));
-    const one = term(2, leaf(20));
-    // Merging both tabs would be four panes and is allowed; so is one pane.
-    expect(canMovePaneInto(three, one)).toBeNull();
-    const four = term(3, row(leaf(30), leaf(31), leaf(32), leaf(33)));
-    expect(canMovePaneInto(one, four)).toBe("cap");
+  it("refuses once the old tab has changed shape", () => {
+    const out = brokenOut([term(1, row(leaf(10), leaf(11), leaf(12)))], 11);
+    const grown = out.tabs.map((t) =>
+      t.id === 1
+        ? ({ ...t, paneTree: row(leaf(10), leaf(12), leaf(31)) } as Tab)
+        : t,
+    );
+    expect(undoBreakOut(grown, out.undo)).toBe("invalid");
+    const reordered = out.tabs.map((t) =>
+      t.id === 1 ? ({ ...t, paneTree: row(leaf(12), leaf(10)) } as Tab) : t,
+    );
+    expect(undoBreakOut(reordered, out.undo)).toBe("invalid");
+  });
+
+  it("refuses when either tab is gone", () => {
+    const out = brokenOut([term(1, row(leaf(10), leaf(11)))], 11);
+    expect(
+      undoBreakOut(
+        out.tabs.filter((t) => t.id !== 7),
+        out.undo,
+      ),
+    ).toBe("invalid");
+    expect(
+      undoBreakOut(
+        out.tabs.filter((t) => t.id !== 1),
+        out.undo,
+      ),
+    ).toBe("invalid");
   });
 });
