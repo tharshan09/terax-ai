@@ -123,6 +123,7 @@ import { listSshHosts, type SshHost } from "@/modules/workspace/sshHosts";
 import { setTerminalPathOpener } from "@/modules/terminal/lib/rendererPool";
 import { resolveTerminalPath } from "@/modules/terminal/lib/terminalPathLinks";
 import { invoke } from "@tauri-apps/api/core";
+import { TAB_STRIP_ZONE_OFF_ATTR } from "@/modules/tabs/lib/tabStripGap";
 import { toast } from "sonner";
 import type { SearchAddon } from "@xterm/addon-search";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -1167,7 +1168,15 @@ export default function App() {
   const handleBreakOutPane = useCallback(
     (leafId: number, gapIndex: number) => {
       const undo = breakOutPane(leafId, gapIndex);
-      if (!undo) return;
+      if (!undo) {
+        // The indicator and the ghost have already promised a new tab, so a
+        // refusal must say so rather than swallow the gesture. Unreachable
+        // today (the drag handle only exists inside a split), but the moment
+        // breakOutPaneFromTabs grows a refusal, this is what keeps the drop
+        // from becoming a silent no-op.
+        toast.error("That pane cannot become a tab of its own");
+        return;
+      }
       useAgentStore.getState().moveLeavesToTab([leafId], undo.tabId);
       toast("Pane moved into its own tab", {
         duration: 6000,
@@ -1331,19 +1340,24 @@ export default function App() {
   );
 
   const spaceSwitcher = (
-    <SpaceSwitcher
-      open={switcherOpen}
-      onOpenChange={setSwitcherOpen}
-      tabs={tabs}
-      onNewSpace={() => void handleNewSpace()}
-      onDeleteSpace={handleDeleteSpace}
-      onNewTabInSpace={handleNewTabInSpace}
-      onJumpTab={jumpToTab}
-      onCloseTab={handleClose}
-      onMoveTabToSpace={handleMoveTab}
-      onReorderTab={handleReorderTab}
-      onReorderSpaces={(ids) => useSpaces.getState().reorder(ids)}
-    />
+    // Cut out of the pane drop zone that covers the header row: this control is
+    // where a user aims to move something to ANOTHER space, so a pane dropped
+    // here must not become a tab at the front of the current one.
+    <div {...{ [TAB_STRIP_ZONE_OFF_ATTR]: "" }} className="contents">
+      <SpaceSwitcher
+        open={switcherOpen}
+        onOpenChange={setSwitcherOpen}
+        tabs={tabs}
+        onNewSpace={() => void handleNewSpace()}
+        onDeleteSpace={handleDeleteSpace}
+        onNewTabInSpace={handleNewTabInSpace}
+        onJumpTab={jumpToTab}
+        onCloseTab={handleClose}
+        onMoveTabToSpace={handleMoveTab}
+        onReorderTab={handleReorderTab}
+        onReorderSpaces={(ids) => useSpaces.getState().reorder(ids)}
+      />
+    </div>
   );
 
   const commandPaletteItems = useMemo(

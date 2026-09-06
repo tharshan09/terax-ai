@@ -397,6 +397,14 @@ export function undoBreakOut(
   const expected = removeLeaf(undo.prevTree, undo.leafId);
   if (expected === null || !sameLayout(src.paneTree, expected))
     return "invalid";
+  // Never leave a space without tabs, which closeTab and closeActivePane also
+  // refuse to do. Only reachable when the source tab was moved to another space
+  // while the toast stood, and the born tab is all its own space has left.
+  if (
+    src.spaceId !== born.spaceId &&
+    tabs.filter((t) => t.spaceId === born.spaceId).length === 1
+  )
+    return "invalid";
   const restored = withLeavesFrom(undo.prevTree, [src.paneTree, born.paneTree]);
   return tabs.flatMap((t) => {
     if (t.id === undo.tabId) return [];
@@ -1467,9 +1475,11 @@ export function useTabs(initial?: Partial<TerminalTab>) {
           if (back?.spaceId === activeSpaceIdRef.current) {
             setActiveId(undo.sourceTabId);
           } else if (activeIdRef.current === undo.tabId) {
-            setActiveId(
-              nextActiveInSpace(prev, undo.tabId) ?? undo.sourceTabId,
-            );
+            // The tab being removed is the one on screen, and its pane went
+            // home to another space. undoBreakOut has already refused the case
+            // where this space would be emptied, so a neighbor exists here.
+            const fallback = nextActiveInSpace(prev, undo.tabId);
+            if (fallback !== null) setActiveId(fallback);
           }
           return next;
         });

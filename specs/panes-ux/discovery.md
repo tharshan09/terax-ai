@@ -181,6 +181,11 @@ von beiden gehoeren. Traegt nur der Fueller die Markierung, verpufft ein Drop in
 diesen Baendern stillschweigend. Also traegt die Zeile sie (`TAB_STRIP_ZONE_ATTR`),
 und jeder Drop darin loest sich zu einer Luecke in der Leiste auf.
 
+Mit einer Ausnahme: der **Space-Wechsler** links ist ausgeschnitten
+(`TAB_STRIP_ZONE_OFF_ATTR`). Genau dort zielt man hin, wenn etwas in einen ANDEREN
+Space soll, und er nimmt bereits gezogene Tabs entgegen. Ein Pane, der dort landet,
+duerfte nicht klammheimlich ein Tab am Anfang des aktuellen Space werden.
+
 Das Verweilen ist ein Seiteneffekt und braucht einen Rueckweg: der Tab, in dem der
 Drag begann, wird gemerkt. Abbruch per Escape oder `pointercancel` kehrt dorthin
 zurueck, ein Drop bleibt im Zieltab.
@@ -379,7 +384,7 @@ erst mitbringt. Wer C direkt nach A baut, baut die Mitte-Zone hinterher zweimal 
    sechs Sekunden, und in dieser Zeit reihen OSC-7-Ereignisse und PTY-Abgaenge
    Aenderungen ein. Ein Ersetzen des Zustands aus einem alten Stand heraus kann einen
    gerade entsorgten Pane wieder einsetzen.
-7. **`pnpm format` fasst rund 131 Dateien an.** Nur die eigenen formatieren:
+9. **`pnpm format` fasst rund 131 Dateien an.** Nur die eigenen formatieren:
    `npx biome format --write <pfade>`.
 
 ---

@@ -4,6 +4,7 @@ import {
   gapIndexAt,
   TAB_STRIP_ATTR,
   TAB_STRIP_ZONE_ATTR,
+  TAB_STRIP_ZONE_OFF_ATTR,
   tabStripAt,
 } from "./tabStripGap";
 
@@ -62,6 +63,23 @@ describe("tabStripAt", () => {
     filler.setAttribute(TAB_STRIP_ZONE_ATTR, "");
     document.body.append(filler);
     expect(tabStripAt(filler)).toBe(el);
+  });
+
+  it("is null on a control cut out of the zone", () => {
+    strip([100]);
+    const zone = document.createElement("div");
+    zone.setAttribute(TAB_STRIP_ZONE_ATTR, "");
+    const switcher = document.createElement("div");
+    switcher.setAttribute(TAB_STRIP_ZONE_OFF_ATTR, "");
+    const inner = document.createElement("button");
+    switcher.append(inner);
+    zone.append(switcher);
+    document.body.append(zone);
+    // Aimed at the space switcher, which means "move this somewhere else":
+    // it must not resolve to the strip and quietly make a tab here.
+    expect(tabStripAt(inner)).toBeNull();
+    expect(tabStripAt(switcher)).toBeNull();
+    expect(tabStripAt(zone)).not.toBeNull();
   });
 
   it("is null away from the tab bar, and with no strip at all", () => {

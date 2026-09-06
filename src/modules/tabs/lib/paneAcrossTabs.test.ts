@@ -278,4 +278,17 @@ describe("undoBreakOut", () => {
       ),
     ).toBe("invalid");
   });
+
+  it("refuses when putting the pane back would empty a space", () => {
+    const out = brokenOut([term(1, row(leaf(10), leaf(11)))], 11);
+    // The source tab moves to another space while the toast stands, leaving
+    // the born tab alone in this one.
+    const moved = out.tabs.map((t) =>
+      t.id === 1 ? ({ ...t, spaceId: "b" } as Tab) : t,
+    );
+    expect(undoBreakOut(moved, out.undo)).toBe("invalid");
+    // With a neighbor left behind, the same move is fine.
+    const withNeighbor = [...moved, term(8, leaf(80))];
+    expect(typeof undoBreakOut(withNeighbor, out.undo)).not.toBe("string");
+  });
 });

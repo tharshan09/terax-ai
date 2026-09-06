@@ -9,13 +9,20 @@ export const TAB_STRIP_ATTR = "data-tab-strip";
  *  scroller, not inside it. */
 export const TAB_STRIP_ZONE_ATTR = "data-tab-drop-zone";
 
-/** The tab strip a pointer is over, whether directly or via the filler beside
- *  it. Null when the pointer is nowhere near the tab bar, and when there is no
- *  strip at all (zen mode hides the header). */
+/** Cuts a subtree back out of the drop zone. The zone sits on the whole header
+ *  row, which also holds the space switcher, and that is exactly where one aims
+ *  to move something to ANOTHER space: a pane dropped there must not quietly
+ *  become a tab at the front of this one. */
+export const TAB_STRIP_ZONE_OFF_ATTR = "data-no-pane-drop";
+
+/** The tab strip a pointer is over, whether directly or via the row around it.
+ *  Null when the pointer is on a cut-out control, nowhere near the tab bar, or
+ *  when there is no strip at all (zen mode hides the header). */
 export function tabStripAt(el: Element | null | undefined): Element | null {
-  const strip = el?.closest(`[${TAB_STRIP_ATTR}]`);
+  if (!el || el.closest(`[${TAB_STRIP_ZONE_OFF_ATTR}]`)) return null;
+  const strip = el.closest(`[${TAB_STRIP_ATTR}]`);
   if (strip) return strip;
-  if (!el?.closest(`[${TAB_STRIP_ZONE_ATTR}]`)) return null;
+  if (!el.closest(`[${TAB_STRIP_ZONE_ATTR}]`)) return null;
   return document.querySelector(`[${TAB_STRIP_ATTR}]`);
 }
 
