@@ -92,10 +92,17 @@ describe("swapAxisBetween", () => {
     expect(swapAxisBetween(box(0, 200), box(0, 0))).toBe("vertical");
   });
 
-  it("takes the larger separation when a pair is offset both ways", () => {
+  it("takes the dominant axis when a pair is only slightly staggered", () => {
     // Mostly side by side, slightly staggered.
     expect(swapAxisBetween(box(0, 0), box(300, 40))).toBe("horizontal");
     // Mostly stacked, slightly staggered.
     expect(swapAxisBetween(box(0, 0), box(40, 300))).toBe("vertical");
+  });
+
+  it("names no axis for a diagonal pair", () => {
+    // Two panes of a 2x2 grid on opposite corners trade diagonally, and
+    // neither arrow describes that; the overlay then draws no glyph.
+    expect(swapAxisBetween(box(0, 0), box(300, 300))).toBeUndefined();
+    expect(swapAxisBetween(box(300, 0), box(0, 300))).toBeUndefined();
   });
 });

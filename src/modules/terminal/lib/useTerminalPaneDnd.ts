@@ -62,23 +62,34 @@ export function paneLayerOf(el: Element | null | undefined): string | null {
   return el?.closest<HTMLElement>("[data-tab-layer]")?.dataset.tabLayer ?? null;
 }
 
+/** How far apart the two panes must lean on one axis before that axis is called
+ *  the one they trade along. Below it the pair is diagonal. */
+const AXIS_DOMINANCE = 2;
+
 /**
- * Whether two panes sit side by side or stacked. Taken from the boxes rather
- * than from the tree, because what the glyph has to match is what the user
- * sees. The rects are not zoom-patched, but they are only ever compared with
- * each other, so the factor cancels.
+ * Whether two panes sit side by side or stacked, or undefined when they sit
+ * diagonally and neither arrow would be true. Taken from the boxes rather than
+ * from the tree, because what the glyph has to match is what the user sees. The
+ * rects are not zoom-patched, but they are only ever compared with each other,
+ * so the factor cancels.
  */
-export function swapAxisBetween(a: HTMLElement, b: HTMLElement): SwapAxis {
+export function swapAxisBetween(
+  a: HTMLElement,
+  b: HTMLElement,
+): SwapAxis | undefined {
   const ra = a.getBoundingClientRect();
   const rb = b.getBoundingClientRect();
   const dx = Math.abs(ra.left + ra.right - (rb.left + rb.right));
   const dy = Math.abs(ra.top + ra.bottom - (rb.top + rb.bottom));
-  return dx >= dy ? "horizontal" : "vertical";
+  if (dx > dy * AXIS_DOMINANCE) return "horizontal";
+  if (dy > dx * AXIS_DOMINANCE) return "vertical";
+  return undefined;
 }
 
 /** The pair's axis, or undefined when the source pane is not on screen to be
- *  measured. The overlay draws no glyph at all then, rather than falling back
- *  to one direction and promising a trade that may go the other way. */
+ *  measured, or when the two sit diagonally. The overlay draws no glyph at all
+ *  then, rather than picking a direction and promising a trade that goes
+ *  another way. */
 function axisFrom(a: HTMLElement | null, b: HTMLElement): SwapAxis | undefined {
   return a ? swapAxisBetween(a, b) : undefined;
 }
