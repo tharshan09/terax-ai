@@ -23,6 +23,7 @@ import {
   type PaneNode,
   type SplitDir,
 } from "@/modules/terminal/lib/panes";
+import { useSpaces } from "@/modules/spaces/lib/useSpaces";
 import { killTmuxSession } from "@/modules/terminal/lib/tmux";
 import { disposeSession } from "@/modules/terminal/lib/useTerminalSession";
 import { usePreferencesStore } from "@/modules/settings/preferences";
@@ -346,12 +347,16 @@ export function breakOutPaneFromTabs(
   if (!leaf || rest === null) return null;
   // No customTitle: that name belongs to the tab the user named, and there are
   // two tabs now. The new one takes a cwd-derived label like any fresh tab.
+  // Nor the title when it IS the source's tmux session name (a tmux tab sets
+  // both together): the pane leaving is a plain shell that is not in that
+  // session, and labelFor falls back to the title whenever the leaf has no cwd
+  // yet. An SSH tab's title is its host, which does still describe the pane.
   const born = syncTabToLeaf(
     {
       id: newTabId,
       kind: "terminal",
       spaceId: src.spaceId,
-      title: src.title,
+      title: src.title === src.tmuxSession ? "shell" : src.title,
       paneTree: leaf,
       activeLeafId: leafId,
       ...(src.workspace && { workspace: src.workspace }),
@@ -431,6 +436,13 @@ function survivingActive(
   const remaining = leafIds(rest);
   const sib = siblingLeafOf(tab.paneTree, leafId);
   return sib !== null && remaining.includes(sib) ? sib : remaining[0];
+}
+
+/** The space on screen. The store is the authority and answers without the
+ *  one-commit lag of `activeSpaceIdRef`, which an effect writes; the ref stands
+ *  in only before the store is hydrated, when it holds `null`. */
+function visibleSpaceId(fallback: string): string {
+  return useSpaces.getState().activeId ?? fallback;
 }
 
 export function nextActiveInSpace(
@@ -1457,7 +1469,12 @@ export function useTabs(initial?: Partial<TerminalTab>) {
           // shortcuts keep working during a drag (the listeners are on the
           // window and never see the keys). If the strip has moved on to
           // another space, it no longer describes where this pane would go.
-          if (src && src.spaceId !== activeSpaceIdRef.current) {
+          // The spaces store answers this exactly; `activeSpaceIdRef` is
+          // written by an effect and so lags a switch by a commit, which is
+          // precisely the window being guarded. The ref stands in only before
+          // the store is hydrated, when it holds `null` and knows nothing.
+          // The hit-test suppresses the drop first; this is the backstop.
+          if (src && src.spaceId !== visibleSpaceId(activeSpaceIdRef.current)) {
             result = "space-changed";
             return prev;
           }
@@ -1502,7 +1519,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
             // staying, so hand the strip a neighbor instead. The empty-space
             // refusal above means there is one; the source tab is the fallback
             // that keeps `activeId` valid should that ever stop holding.
-            if (back?.spaceId === activeSpaceIdRef.current) {
+            if (back?.spaceId === visibleSpaceId(activeSpaceIdRef.current)) {
               return undo.sourceTabId;
             }
             return nextActiveInSpace(prev, undo.tabId) ?? undo.sourceTabId;

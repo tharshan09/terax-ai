@@ -26,6 +26,18 @@ export function tabStripAt(el: Element | null | undefined): Element | null {
   return document.querySelector(`[${TAB_STRIP_ATTR}]`);
 }
 
+/** Whether the strip currently lists `tabId`. The strip only renders the active
+ *  space's tabs, so this answers "does what is on screen still describe where
+ *  this tab's pane would go" — the space shortcuts keep working during a drag,
+ *  and a strip belonging to another space must not light up for a drop that
+ *  would only be refused. */
+export function stripHasTab(strip: Element, tabId: string): boolean {
+  for (const el of strip.querySelectorAll<HTMLElement>("[data-tab-id]")) {
+    if (el.dataset.tabId === tabId) return true;
+  }
+  return false;
+}
+
 /**
  * The insertion gap under `clientX`: 0 before the first tab, `n` after the
  * last. Shared by the tab reorder drag and the pane drag so the indicator the

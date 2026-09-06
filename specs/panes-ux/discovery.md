@@ -194,12 +194,18 @@ behandelt, je nachdem was tatsaechlich kaputt geht:
   aber **ohne den Fokus zu holen**. Wer weitergezogen ist, wird nicht von einem Pane
   zurueckgerissen, den er nicht mehr ansieht. Dieselbe Regel gilt beim Rueckgaengig.
 
-Und das Gegenstueck auf der Pane-Seite: wechselt der aktive Tab mitten im Drag, wird
-die Ebene des neuen Tabs anklickbar und seine Panes tauchen im Hit-Test auf. Ein Drop
-dort kann nicht gelingen, `movePane` verlangt beide Leaves im selben Tab. Also wird er
-gar nicht erst angeboten (`paneLayerOf`), statt eine Kante hervorzuheben und beim
-Loslassen nichts zu tun. Das ist die Hausregel aus `canMergeTabs`: ein unmoegliches
+Die Hausregel aus `canMergeTabs` gilt dabei fuer **beide** Ziele: ein unmoegliches
 Ziel darf nicht aufleuchten.
+
+- Pane-Ziel: wechselt der aktive Tab mitten im Drag, wird dessen Ebene anklickbar und
+  seine Panes tauchen im Hit-Test auf. `movePane` verlangt aber beide Leaves im selben
+  Tab, ein Drop dort kann also nie gelingen. Er wird nicht angeboten (`paneLayerOf`).
+- Leisten-Ziel: die Leiste zeigt einen Space. Steht der Tab des Panes nicht darin, sagt
+  sie nichts darueber, wohin der Pane gehoert. Sie leuchtet nicht auf (`stripHasTab`).
+
+Der Wachposten in `breakOutPane` bleibt als zweite Reihe. Er liest den sichtbaren Space
+aus dem Spaces-Store, nicht aus `activeSpaceIdRef`: den schreibt ein Effekt, er hinkt
+einem Wechsel also genau um den Commit hinterher, um den es hier geht.
 
 Mit einer Ausnahme: der **Space-Wechsler** links ist ausgeschnitten
 (`TAB_STRIP_ZONE_OFF_ATTR`). Genau dort zielt man hin, wenn etwas in einen ANDEREN

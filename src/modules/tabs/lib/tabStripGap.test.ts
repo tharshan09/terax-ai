@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   gapIndexAt,
+  stripHasTab,
   TAB_STRIP_ATTR,
   TAB_STRIP_ZONE_ATTR,
   TAB_STRIP_ZONE_OFF_ATTR,
@@ -93,5 +94,23 @@ describe("tabStripAt", () => {
     filler.setAttribute(TAB_STRIP_ZONE_ATTR, "");
     document.body.append(filler);
     expect(tabStripAt(filler)).toBeNull();
+  });
+});
+
+describe("stripHasTab", () => {
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("recognises a tab the strip lists", () => {
+    // strip() names its tabs by their left offset.
+    const el = strip([100, 100]);
+    expect(stripHasTab(el, "0")).toBe(true);
+    expect(stripHasTab(el, "100")).toBe(true);
+  });
+
+  it("does not recognise a tab from another space's strip", () => {
+    expect(stripHasTab(strip([100]), "999")).toBe(false);
+    expect(stripHasTab(strip([]), "0")).toBe(false);
   });
 });

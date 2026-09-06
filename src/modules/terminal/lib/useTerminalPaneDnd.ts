@@ -1,5 +1,9 @@
 import { getResizeZoomFactor } from "@/lib/zoomResizeFix";
-import { gapIndexAt, tabStripAt } from "@/modules/tabs/lib/tabStripGap";
+import {
+  gapIndexAt,
+  stripHasTab,
+  tabStripAt,
+} from "@/modules/tabs/lib/tabStripGap";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { type PaneDropTarget, usePaneDndStore } from "./paneDndStore";
@@ -115,9 +119,14 @@ export function useTerminalPaneDnd({ onMove, onBreakOut }: Handlers) {
           };
         } else {
           const strip = tabStripAt(under);
-          target = strip
-            ? { kind: "newTab", gapIndex: gapIndexAt(strip, ev.clientX) }
-            : null;
+          // The strip lists one space. If the pane's own tab is not in it, the
+          // space changed under the drag and this strip says nothing about
+          // where the pane would go, so it must not light up for a drop that
+          // would only be refused.
+          target =
+            strip && sourceLayer !== null && stripHasTab(strip, sourceLayer)
+              ? { kind: "newTab", gapIndex: gapIndexAt(strip, ev.clientX) }
+              : null;
         }
         store.setTarget(target);
       };

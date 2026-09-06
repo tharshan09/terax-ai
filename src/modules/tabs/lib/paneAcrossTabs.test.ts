@@ -291,4 +291,34 @@ describe("undoBreakOut", () => {
     const withNeighbor = [...moved, term(8, leaf(80))];
     expect(typeof undoBreakOut(withNeighbor, out.undo)).not.toBe("string");
   });
+
+  it("does not label the new tab with a tmux session it is not in", () => {
+    // A tmux tab carries the session name in `title` as well. The pane leaving
+    // a split is a plain shell, so inheriting that title would name a session
+    // it is not attached to.
+    const tabs = [
+      term(1, row(leaf(10), leaf(11)), {
+        title: "deploy",
+        tmuxSession: "deploy",
+      }),
+    ];
+    const out = breakOutPaneFromTabs(tabs, 11, 7, 1);
+    const born = out?.tabs.find((t) => t.id === 7);
+    if (born?.kind !== "terminal") throw new Error("expected a terminal tab");
+    expect(born.title).toBe("shell");
+    expect(born.tmuxSession).toBeUndefined();
+  });
+
+  it("keeps a title that still describes the pane", () => {
+    const tabs = [
+      term(1, row(leaf(10), leaf(11)), {
+        title: "litha",
+        workspace: { kind: "ssh", host: "litha" },
+      }),
+    ];
+    const out = breakOutPaneFromTabs(tabs, 11, 7, 1);
+    const born = out?.tabs.find((t) => t.id === 7);
+    if (born?.kind !== "terminal") throw new Error("expected a terminal tab");
+    expect(born.title).toBe("litha");
+  });
 });
