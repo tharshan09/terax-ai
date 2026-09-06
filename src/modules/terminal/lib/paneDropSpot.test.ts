@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/zoomResizeFix", () => ({ getResizeZoomFactor: () => 1 }));
 
-import { spotAt, swapAxisBetween } from "./useTerminalPaneDnd";
+import { CENTER_INSET, spotAt, swapAxisBetween } from "./useTerminalPaneDnd";
 
 /** A pane at (0,0) 300x300, so a third is exactly 100px. */
 function pane(): HTMLElement {
@@ -39,6 +39,18 @@ describe("spotAt", () => {
     // Horizontally centred but high up: still an edge, not a swap.
     expect(spotAt(el, 150, 40)).toBe("top");
     expect(spotAt(el, 40, 150)).toBe("left");
+  });
+
+  it("swaps exactly inside the box the overlay draws", () => {
+    // The overlay insets its frame by CENTER_INSET, so the frame IS the region
+    // that swaps. A frame bigger than the region would teach the wrong target
+    // and a release just inside it would insert instead.
+    const el = pane();
+    const edge = 300 * CENTER_INSET;
+    expect(spotAt(el, 150, edge + 1)).toBe("center");
+    expect(spotAt(el, 150, edge - 1)).toBe("top");
+    expect(spotAt(el, edge + 1, 150)).toBe("center");
+    expect(spotAt(el, edge - 1, 150)).toBe("left");
   });
 
   it("keeps the corners on the diagonal rule", () => {

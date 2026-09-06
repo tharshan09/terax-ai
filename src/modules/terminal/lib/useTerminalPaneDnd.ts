@@ -21,8 +21,14 @@ const THRESHOLD = 6;
 // The middle third in both axes means "trade places"; nearer an edge means
 // "insert there". A third is wide enough that the boundary does not flicker
 // under a shaking hand, so no hysteresis is needed.
-const CENTER_LO = 1 / 3;
-const CENTER_HI = 2 / 3;
+//
+// Exported because the overlay draws this exact box: a frame larger than the
+// region that actually swaps would teach the wrong target, and releasing just
+// inside it would insert instead, rebuilding the split and discarding the very
+// sizes the swap exists to keep.
+export const CENTER_INSET = 1 / 3;
+const CENTER_LO = CENTER_INSET;
+const CENTER_HI = 1 - CENTER_INSET;
 
 // Where in `el` the pointer sits: which edge it is nearest, or the centre. This
 // decides between inserting the dragged pane beside this one and swapping the

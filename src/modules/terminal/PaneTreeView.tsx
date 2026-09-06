@@ -15,6 +15,7 @@ import type { SearchAddon } from "@xterm/addon-search";
 import { Fragment, memo, type PointerEvent as ReactPointerEvent } from "react";
 import { useTerminalDropStore } from "./lib/dropStore";
 import { usePaneDndStore } from "./lib/paneDndStore";
+import { CENTER_INSET } from "./lib/useTerminalPaneDnd";
 import {
   type DropEdge,
   firstLeafSlotId,
@@ -264,11 +265,16 @@ function PaneDropOverlay({ leafId }: { leafId: number }) {
     return (
       <div className="pointer-events-none absolute inset-0 z-[19]">
         <div
+          // The target's frame is exactly the region that swaps, so releasing
+          // inside it always means what it shows. The partner is no target at
+          // all, so it outlines itself instead of drawing a box nobody can aim
+          // at: it only says which pane is the other half of the pair.
+          style={
+            spot === "center" ? { inset: `${CENTER_INSET * 100}%` } : undefined
+          }
           className={cn(
-            "absolute inset-[12%] grid place-items-center rounded-lg border-2 border-primary",
-            // Only the pane under the cursor names the gesture; its partner
-            // just shows that it is the other half of the pair.
-            spot === "center" ? "bg-primary/10" : "border-dashed",
+            "absolute grid place-items-center rounded-lg border-2 border-primary",
+            spot === "center" ? "bg-primary/10" : "inset-1 border-dashed",
           )}
         >
           {spot === "center" && axis !== null && (
