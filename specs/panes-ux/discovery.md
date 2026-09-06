@@ -182,10 +182,17 @@ diesen Baendern stillschweigend. Also traegt die Zeile sie (`TAB_STRIP_ZONE_ATTR
 und jeder Drop darin loest sich zu einer Luecke in der Leiste auf.
 
 Ein Drag dauert, solange die Taste gehalten wird, und in dieser Zeit steht die Welt
-nicht still. Zwei Faelle brechen ihn ab, statt etwas Falsches zu tun: die Shell des
-Panes oder seines Nachbarn endet und laesst den Split zusammenfallen, oder der Nutzer
-wechselt per Tastenkuerzel den Space, womit die gemessene Luecke zu einer anderen
-Leiste gehoert als der Pane. Beide sagen es und lassen alles, wie es war.
+nicht still. Tastenkuerzel greifen weiter, die Listener haengen am `window` und sehen
+die Tasten nie. Drei Faelle sind dadurch moeglich, und sie werden verschieden
+behandelt, je nachdem was tatsaechlich kaputt geht:
+
+- Die Shell des Panes oder seines Nachbarn endet, der Split faellt zusammen:
+  **abbrechen**, es gibt nichts mehr auszubrechen.
+- Der Space wechselt: **abbrechen**, denn die gemessene Luecke gehoert jetzt zu einer
+  anderen Leiste als der Pane.
+- Der Tab wechselt innerhalb des Space: **ausfuehren**, denn die Luecke stimmt noch,
+  aber **ohne den Fokus zu holen**. Wer weitergezogen ist, wird nicht von einem Pane
+  zurueckgerissen, den er nicht mehr ansieht. Dieselbe Regel gilt beim Rueckgaengig.
 
 Mit einer Ausnahme: der **Space-Wechsler** links ist ausgeschnitten
 (`TAB_STRIP_ZONE_OFF_ATTR`). Genau dort zielt man hin, wenn etwas in einen ANDEREN

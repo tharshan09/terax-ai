@@ -173,4 +173,19 @@ describe("useTabs break-out through React", () => {
     expect(out).toBe("space-changed");
     expect(hook.result.current.tabs).toHaveLength(1);
   });
+
+  it("does not pull the user back from a tab they switched to mid-drag", () => {
+    const { hook, leafId } = splitTab();
+    // The tab shortcuts keep working while a pane is being dragged.
+    let other = 0;
+    act(() => {
+      other = hook.result.current.newTab();
+    });
+    const record = breakOut(hook, leafId);
+    // The pane got its tab, but the user stays where they were looking.
+    expect(hook.result.current.activeId).toBe(other);
+    expect(hook.result.current.tabs.some((t) => t.id === record.tabId)).toBe(
+      true,
+    );
+  });
 });

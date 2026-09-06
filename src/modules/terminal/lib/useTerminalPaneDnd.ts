@@ -71,7 +71,7 @@ export function useTerminalPaneDnd({ onMove, onBreakOut }: Handlers) {
       e.preventDefault();
       // A second pointer (touch, pen) can grab another handle while a drag is
       // live. The listeners are on the window, so the first pointerup would end
-      // both and commit twice; drop the older drag rather than run two.
+      // both and commit twice; abort the older drag rather than run two.
       cleanupRef.current?.();
       const pointerId = e.pointerId;
       const sx = e.clientX;
@@ -132,22 +132,16 @@ export function useTerminalPaneDnd({ onMove, onBreakOut }: Handlers) {
       window.addEventListener("pointermove", move);
       window.addEventListener("pointerup", up);
       window.addEventListener("pointercancel", cancel);
-      cleanupRef.current = detach;
+      // An abort, not just a detach: whoever cuts this drag short (a second
+      // pointer, an unmount) also has to clear the ghost and the shared drop
+      // target, or the tab strip keeps painting an insertion line for a drag
+      // that can no longer commit.
+      cleanupRef.current = () => end(false);
     },
     [],
   );
 
-  // Unmounting mid-drag drops the listeners; the shared drop target has to go
-  // with them, or the tab strip keeps painting an insertion line for a drag
-  // that no longer exists.
-  useEffect(
-    () => () => {
-      if (!cleanupRef.current) return;
-      cleanupRef.current();
-      usePaneDndStore.getState().setDrag(null);
-    },
-    [],
-  );
+  useEffect(() => () => cleanupRef.current?.(), []);
 
   return { ghostRef, dragging, startDrag };
 }

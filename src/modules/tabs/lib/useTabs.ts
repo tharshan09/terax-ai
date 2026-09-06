@@ -1465,8 +1465,11 @@ export function useTabs(initial?: Partial<TerminalTab>) {
           if (!out) return prev;
           result = out.undo;
           // Inside the success branch: outside it, a refusal would leave
-          // `activeId` naming a tab that was never created.
-          setActiveId(tabId);
+          // `activeId` naming a tab that was never created. And only when the
+          // pane's own tab is the one on screen: the tab shortcuts keep working
+          // during a drag as well, and someone who moved on to another tab
+          // should not be pulled back by a pane they stopped looking at.
+          setActiveId((active) => (active === src?.id ? tabId : active));
           return out.tabs;
         });
       });
