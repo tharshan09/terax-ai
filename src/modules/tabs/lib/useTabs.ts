@@ -1458,7 +1458,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   // synchronous render costs nothing that was not going to happen anyway.
   const breakOutPane = useCallback(
     (leafId: number, gapIndex: number): BrokenOutPane | BreakOutRefusal => {
-      const tabId = nextIdRef.current++;
+      let tabId: number | null = null;
       let result: BrokenOutPane | BreakOutRefusal = "collapsed";
       flushSync(() => {
         setTabs((prev) => {
@@ -1478,7 +1478,12 @@ export function useTabs(initial?: Partial<TerminalTab>) {
             result = "space-changed";
             return prev;
           }
-          const out = breakOutPaneFromTabs(prev, leafId, tabId, gapIndex);
+          // Past the guards, so a refused drop does not burn an id. Cached in
+          // the closure rather than taken fresh, so a repeated run of this
+          // updater reuses the same id instead of minting another.
+          if (tabId === null) tabId = nextIdRef.current++;
+          const born = tabId;
+          const out = breakOutPaneFromTabs(prev, leafId, born, gapIndex);
           if (!out) return prev;
           result = out.undo;
           // Inside the success branch: outside it, a refusal would leave
@@ -1486,7 +1491,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
           // pane's own tab is the one on screen: the tab shortcuts keep working
           // during a drag as well, and someone who moved on to another tab
           // should not be pulled back by a pane they stopped looking at.
-          setActiveId((active) => (active === src?.id ? tabId : active));
+          setActiveId((active) => (active === src?.id ? born : active));
           return out.tabs;
         });
       });
