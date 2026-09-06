@@ -13,9 +13,9 @@ import {
   moveLeaf,
   nextLeafId,
   removeLeaf,
+  sameLayout,
   setLeafCwd as setLeafCwdInTree,
   setLeafTmuxSession as setLeafTmuxSessionInTree,
-  sameLayout,
   siblingLeafOf,
   splitLeaf,
   withLeavesFrom,
@@ -272,10 +272,11 @@ function sameEnv(
   return true;
 }
 
-/** The part both pane-crossing gestures share: panes inherit their tab's
- *  workspace / private / blocks semantics, so the two tabs must agree on them
- *  before anything moves. Returns the narrowed pair when they do, otherwise the
- *  refusal. Only the pane budget differs between the callers. */
+/** Panes inherit their tab's workspace / private / blocks semantics, so two
+ *  tabs must agree on them before a pane crosses between them. Returns the
+ *  narrowed pair when they do, otherwise the refusal. Only `canMergeTabs` needs
+ *  it today; the per-pane budget differs, which is why the count is left to the
+ *  caller. */
 function terminalPair(
   source: Tab | undefined,
   target: Tab | undefined,
@@ -1484,21 +1485,25 @@ export function useTabs(initial?: Partial<TerminalTab>) {
             refusal = next;
             return prev;
           }
-          // Only when the tab being removed is the one on screen. The pane
-          // going home is no reason to pull the user out of a tab they
-          // switched to while the toast stood.
-          if (activeIdRef.current === undo.tabId) {
+          // Functional form, like every other tab-removal path here: an
+          // `activeId` that a queued update is about to change is invisible to
+          // `activeIdRef`, which an effect writes a commit late, and this
+          // flushSync drains that update in the same pass.
+          setActiveId((active) => {
+            // Only when the tab being removed is the one on screen. The pane
+            // going home is no reason to pull the user out of a tab they
+            // switched to while the toast stood.
+            if (active !== undo.tabId) return active;
             const back = next.find((t) => t.id === undo.sourceTabId);
+            // Following the pane into another space would be worse than
+            // staying, so hand the strip a neighbor instead. The empty-space
+            // refusal above means there is one; the source tab is the fallback
+            // that keeps `activeId` valid should that ever stop holding.
             if (back?.spaceId === activeSpaceIdRef.current) {
-              setActiveId(undo.sourceTabId);
-            } else {
-              // The pane went home to another space, where following it would
-              // be worse than staying. undoBreakOut has already refused the
-              // case that would empty this space, so a neighbor exists.
-              const fallback = nextActiveInSpace(prev, undo.tabId);
-              if (fallback !== null) setActiveId(fallback);
+              return undo.sourceTabId;
             }
-          }
+            return nextActiveInSpace(prev, undo.tabId) ?? undo.sourceTabId;
+          });
           return next;
         });
       });

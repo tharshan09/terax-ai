@@ -2,8 +2,8 @@ import { getResizeZoomFactor } from "@/lib/zoomResizeFix";
 import { gapIndexAt, tabStripAt } from "@/modules/tabs/lib/tabStripGap";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { DropEdge } from "./panes";
 import { type PaneDropTarget, usePaneDndStore } from "./paneDndStore";
+import type { DropEdge } from "./panes";
 
 // Only turn a press into a drag past this many px, so a click on the handle
 // doesn't accidentally move a pane.
@@ -69,6 +69,11 @@ export function useTerminalPaneDnd({ onMove, onBreakOut }: Handlers) {
     (sourceLeafId: number, e: ReactPointerEvent) => {
       if (e.button !== 0) return;
       e.preventDefault();
+      // A second pointer (touch, pen) can grab another handle while a drag is
+      // live. The listeners are on the window, so the first pointerup would end
+      // both and commit twice; drop the older drag rather than run two.
+      cleanupRef.current?.();
+      const pointerId = e.pointerId;
       const sx = e.clientX;
       const sy = e.clientY;
       let active = false;
@@ -76,6 +81,7 @@ export function useTerminalPaneDnd({ onMove, onBreakOut }: Handlers) {
       const store = usePaneDndStore.getState();
 
       const move = (ev: PointerEvent) => {
+        if (ev.pointerId !== pointerId) return;
         if (!active) {
           if (Math.hypot(ev.clientX - sx, ev.clientY - sy) < THRESHOLD) return;
           active = true;
@@ -117,8 +123,12 @@ export function useTerminalPaneDnd({ onMove, onBreakOut }: Handlers) {
           onBreakOutRef.current(sourceLeafId, target.gapIndex);
         }
       };
-      const up = () => end(true);
-      const cancel = () => end(false);
+      const up = (ev: PointerEvent) => {
+        if (ev.pointerId === pointerId) end(true);
+      };
+      const cancel = (ev: PointerEvent) => {
+        if (ev.pointerId === pointerId) end(false);
+      };
       window.addEventListener("pointermove", move);
       window.addEventListener("pointerup", up);
       window.addEventListener("pointercancel", cancel);

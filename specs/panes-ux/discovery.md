@@ -389,7 +389,10 @@ erst mitbringt. Wer C direkt nach A baut, baut die Mitte-Zone hinterher zweimal 
    und die Aktion meldet nichts. Gegen `tabsRef` zu planen ist die andere Falle, siehe
    Punkt 8. `useTabs.breakout.test.tsx` haelt beides fest, weil kein Test der reinen
    Funktionen es sehen kann.
-8. **`tabsRef` wird von einem Effekt nachgezogen**, ist also einen Commit alt. Das
+8. **`tabsRef` und `activeIdRef` werden von einem Effekt nachgezogen**, sind also
+   einen Commit alt. Fuer `activeId` gibt es die Loesung im Haus: jeder andere Pfad,
+   der einen Tab entfernt, nutzt `setActiveId((active) => ...)` und liest damit auch,
+   was noch in der Warteschlange steht. Fuer `tabsRef` gilt: das
    faellt bei einer Geste kaum auf und bei einem Toast-Knopf sehr wohl: der steht
    sechs Sekunden, und in dieser Zeit reihen OSC-7-Ereignisse und PTY-Abgaenge
    Aenderungen ein. Ein Ersetzen des Zustands aus einem alten Stand heraus kann einen
