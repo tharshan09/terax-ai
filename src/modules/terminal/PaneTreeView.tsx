@@ -4,15 +4,20 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
-import { ArrowDataTransferHorizontalIcon } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { WorkspaceEnv } from "@/modules/workspace";
+import { ArrowDataTransferHorizontalIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import type { SearchAddon } from "@xterm/addon-search";
 import { Fragment, memo, type PointerEvent as ReactPointerEvent } from "react";
 import { useTerminalDropStore } from "./lib/dropStore";
 import { usePaneDndStore } from "./lib/paneDndStore";
-import { type DropEdge, leafIds, type PaneNode } from "./lib/panes";
+import {
+  type DropEdge,
+  firstLeafSlotId,
+  leafIds,
+  type PaneNode,
+} from "./lib/panes";
 import { TerminalPane, type TerminalPaneHandle } from "./TerminalPane";
 
 type LeafBundle = {
@@ -142,18 +147,21 @@ export const PaneTreeView = memo(function PaneTreeViewImpl(props: Props) {
           marker === "divider" &&
           ((prev !== undefined && leafIds(prev).includes(props.activeLeafId)) ||
             leafIds(child).includes(props.activeLeafId));
+        // Keyed and named by the subtree's first SLOT, not by the node id and
+        // not by the leaf: splitting a leaf in place mints a fresh split id
+        // that would otherwise remount the surviving pane, and swapping two
+        // panes would otherwise reorder the group's panel ids and drag the
+        // sizes along with them.
+        const slotId = firstLeafSlotId(child);
         return (
-          // Keyed by the subtree's first leaf, not the node id: when a leaf is
-          // split in place, the replacing split node gets a fresh id and would
-          // otherwise remount the surviving pane.
-          <Fragment key={leafIds(child)[0]}>
+          <Fragment key={slotId}>
             {i > 0 && (
               <ResizableHandle
                 withHandle
                 className={dividerActive ? "bg-primary/70" : undefined}
               />
             )}
-            <ResizablePanel id={`pane-${child.id}`} minSize="10%">
+            <ResizablePanel id={`pane-slot-${slotId}`} minSize="10%">
               <PaneTreeView {...props} node={child} split />
             </ResizablePanel>
           </Fragment>

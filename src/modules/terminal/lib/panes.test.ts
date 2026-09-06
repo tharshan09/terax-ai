@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   attachSubtree,
   findLeafCwd,
+  firstLeafSlotId,
   leafIds,
   moveLeaf,
   type PaneNode,
   sameLayout,
   setLeafTmuxSession,
+  slotOf,
   swapLeaves,
   withLeavesFrom,
 } from "./panes";
@@ -333,11 +335,36 @@ describe("swapLeaves", () => {
     dir: "row" | "col",
     ...children: PaneNode[]
   ): PaneNode => ({ kind: "split", id, dir, children });
+  const slots = (n: PaneNode): number[] =>
+    n.kind === "leaf" ? [slotOf(n)] : n.children.flatMap(slots);
 
   it("exchanges two siblings without touching the split", () => {
     const tree = split(1, "row", leaf(2, "/a"), leaf(3, "/b"));
     const out = swapLeaves(tree, 2, 3);
-    expect(out).toEqual(split(1, "row", leaf(3, "/b"), leaf(2, "/a")));
+    expect(leafIds(out)).toEqual([3, 2]);
+    expect(out.kind === "split" && out.id).toBe(1);
+    expect(out.kind === "split" && out.dir).toBe("row");
+  });
+
+  it("hands each pane the slot it moves into, so the sizes stay put", () => {
+    const tree = split(1, "row", leaf(2, "/a"), leaf(3, "/b"));
+    const out = swapLeaves(tree, 2, 3);
+    // The panes changed places; the slots, which name the panels the resize
+    // library sizes, did not.
+    expect(slots(tree)).toEqual([2, 3]);
+    expect(slots(out)).toEqual([2, 3]);
+    expect(findLeafCwd(out, 2)).toBe("/a");
+    expect(findLeafCwd(out, 3)).toBe("/b");
+  });
+
+  it("keeps the slot order across levels too", () => {
+    // row[ col[2,3], 4 ]: swapping 3 and 4 moves a pane out of the column and
+    // another into it. Both groups must keep their panel ids in order.
+    const tree = split(1, "row", split(5, "col", leaf(2), leaf(3)), leaf(4));
+    const out = swapLeaves(tree, 3, 4);
+    expect(leafIds(out)).toEqual([2, 4, 3]);
+    expect(slots(out)).toEqual(slots(tree));
+    expect(firstLeafSlotId(out)).toBe(firstLeafSlotId(tree));
   });
 
   it("carries each leaf's own contents along", () => {
@@ -353,16 +380,6 @@ describe("swapLeaves", () => {
     expect(leafIds(out)).toEqual([3, 2]);
   });
 
-  it("exchanges across different levels of the tree", () => {
-    // row[ col[2,3], 4 ]: swapping 3 and 4 moves a pane out of the column and
-    // another into it, and both splits keep their shape.
-    const tree = split(1, "row", split(5, "col", leaf(2), leaf(3)), leaf(4));
-    const out = swapLeaves(tree, 3, 4);
-    expect(out).toEqual(
-      split(1, "row", split(5, "col", leaf(2), leaf(4)), leaf(3)),
-    );
-  });
-
   it("leaves the tree alone for the same leaf or an unknown one", () => {
     const tree = split(1, "row", leaf(2), leaf(3));
     expect(swapLeaves(tree, 2, 2)).toBe(tree);
@@ -370,8 +387,10 @@ describe("swapLeaves", () => {
     expect(swapLeaves(tree, 99, 2)).toBe(tree);
   });
 
-  it("is its own inverse", () => {
+  it("is its own inverse, slots included", () => {
     const tree = split(1, "row", split(5, "col", leaf(2), leaf(3)), leaf(4));
-    expect(swapLeaves(swapLeaves(tree, 3, 4), 3, 4)).toEqual(tree);
+    const back = swapLeaves(swapLeaves(tree, 3, 4), 3, 4);
+    expect(leafIds(back)).toEqual(leafIds(tree));
+    expect(slots(back)).toEqual(slots(tree));
   });
 });

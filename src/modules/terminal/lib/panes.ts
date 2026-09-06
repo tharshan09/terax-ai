@@ -3,7 +3,19 @@ export type PaneId = number;
 export type SplitDir = "row" | "col";
 
 export type PaneNode =
-  | { kind: "leaf"; id: PaneId; cwd?: string; tmuxSession?: string }
+  | {
+      kind: "leaf";
+      id: PaneId;
+      /** The position this pane occupies in its enclosing split, as opposed to
+       *  which pane it is. The resize library keys its sizes by panel id, so
+       *  the panel is named after the SLOT: two panes that trade places inherit
+       *  each other's slot, the group's panel list is unchanged, and the sizes
+       *  stay where the user dragged them instead of travelling with the pane.
+       *  Absent means the pane has never moved and its own id names its slot. */
+      slotId?: PaneId;
+      cwd?: string;
+      tmuxSession?: string;
+    }
   | {
       kind: "split";
       id: PaneId;
@@ -18,6 +30,18 @@ export function isLeaf(n: PaneNode): n is Extract<PaneNode, { kind: "leaf" }> {
 export function leafIds(n: PaneNode): PaneId[] {
   if (isLeaf(n)) return [n.id];
   return n.children.flatMap(leafIds);
+}
+
+/** The slot a leaf sits in; its own id until it has traded places with someone. */
+export function slotOf(n: Extract<PaneNode, { kind: "leaf" }>): PaneId {
+  return n.slotId ?? n.id;
+}
+
+/** The slot naming `n`'s position in its parent: a subtree is identified by the
+ *  slot of its first leaf, which is what keeps a panel's id (and its React key,
+ *  and so its mounted terminal) stable while the panes inside it move. */
+export function firstLeafSlotId(n: PaneNode): PaneId {
+  return isLeaf(n) ? slotOf(n) : firstLeafSlotId(n.children[0]);
 }
 
 export function findLeafCwd(n: PaneNode, id: PaneId): string | undefined {
@@ -334,9 +358,13 @@ export function withLeavesFrom(
 
 /**
  * Exchange two leaves in place. Both keep their ids, so their live sessions go
- * with them; every split node, its direction and its children's order stay as
- * they were, which is what makes this preserve the sizes the user dragged.
- * Inserting instead would rebuild the enclosing split and reset them.
+ * with them, and every split node keeps its direction and its children's order.
+ *
+ * Each pane also inherits the SLOT it moves into. That is what actually holds
+ * the layout still: the resize library keys sizes by panel id, and the panel is
+ * named after the slot, so the group sees the same panels in the same order and
+ * neither the sizes nor the mounted terminals are disturbed. Without it the
+ * widths travel with the panes and the divider jumps on every swap.
  *
  * Returns the tree unchanged when the two are the same leaf or either is
  * missing.
@@ -347,7 +375,11 @@ export function swapLeaves(tree: PaneNode, a: PaneId, b: PaneId): PaneNode {
   const nodeB = findLeafNode(tree, b);
   if (!nodeA || !nodeB) return tree;
   const put = (n: PaneNode): PaneNode => {
-    if (isLeaf(n)) return n.id === a ? nodeB : n.id === b ? nodeA : n;
+    if (isLeaf(n)) {
+      if (n.id === a) return { ...nodeB, slotId: slotOf(n) };
+      if (n.id === b) return { ...nodeA, slotId: slotOf(n) };
+      return n;
+    }
     return { ...n, children: n.children.map(put) };
   };
   return put(tree);
