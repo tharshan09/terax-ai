@@ -1,7 +1,11 @@
-# Offene Themen (Stand 2026-09-05, nach Session terax-ai-39)
+# Offene Themen (Stand 2026-09-06, nach Session terax-ai-98)
 
-`main` = `0bf7d01`, Version 0.8.6, installiert und live. Upstream-Sync Runde 3 und beide
-Follow-up-Runden sind abgeschlossen. Diese Datei ist der Einstieg für die nächste Session.
+`main` = `e41418a`, Version 0.8.6. Upstream-Sync Runde 3 und beide Follow-up-Runden sind
+abgeschlossen. Diese Datei ist der Einstieg für die nächste Session.
+
+**Panes/Tabs: Discovery abgeschlossen, Wellen A und B gemergt.** Die Entscheidungen und
+der Bauplan stehen in `specs/panes-ux/discovery.md`, dort weiterlesen statt hier.
+Als Nächstes steht Welle C an (Pane von Tab A nach Tab B).
 
 ---
 
@@ -20,22 +24,26 @@ bessere Greiffläche.
 - Fokus-Optik kombinierbar in den Einstellungen: Marker aktiv, Inaktiv-Abdunklung,
   optionale Pane-Kopfzeilen.
 
-### Was fehlt
-1. **Pane in einen eigenen Tab ausbrechen.** Die Umkehrung des Tab-auf-Tab-Merges. Griff
-   auf die Tab-Leiste ziehen. Der Baum kann das schon (`removeLeaf` + neuer Tab mit
-   Subtree), es fehlt das Drop-Ziel und der Übergang ohne PTY-Neustart.
-2. **Pane direkt von Tab A nach Tab B ziehen.** Heute nur der Umweg über einen Merge des
-   ganzen Tabs. Als „cross-tab pane move" schon länger notiert.
-3. **Tauschen statt Einfügen.** Drop auf die Mitte eines Panes sollte die beiden Panes
-   tauschen, die Kante fügt weiterhin ein.
-4. **Kopfzeile als Greiffläche.** Der Griff erscheint heute nur bei Hover und ist klein.
-   Die optionale Pane-Kopfzeile wäre die natürliche Fläche zum Ziehen.
-5. **Tastaturweg zum Verschieben.** Upstream `d6e3491` und `460657a` bringen
-   `⌘⌥⇧`+Pfeil. Übernahme kollidiert in fünf Dateien, deshalb Handarbeit.
+### Stand der Wellen
+1. ~~**Pane in einen eigenen Tab ausbrechen.**~~ **GEMERGT** (PR #81, `61fa496`).
+2. **Pane direkt von Tab A nach Tab B ziehen.** Welle C, als Nächstes. Baut auf A auf:
+   eine inaktive Tab-Ebene ist `pointer-events: none`, der Weg führt über die Tab-Leiste
+   (Verweilen über einem Tab wechselt dorthin). Bringt `movePaneIntoTab` und die
+   gemeinsame Zulässigkeitsprüfung mit, die A bewusst nicht vorweggenommen hat.
+3. ~~**Tauschen statt Einfügen.**~~ **GEMERGT** (PR #82, `e41418a`).
+4. **Kopfzeile als Greiffläche.** Welle D. Der Griff ist klein und nur bei Hover da.
+5. **Tastaturweg**, Upstream `d6e3491`/`460657a`. Welle E, Handarbeit (5-Datei-Konflikt).
 
-Reihenfolge nach Nutzen: 1, dann 2, dann 3, danach 4 und 5.
-Testweg: Drag ist synthetisch schwer, daher die Store-Aktionen direkt testen, wie bei
-`mergeTabInto`. Für den Sichttest die Test-Bridge.
+Dazu zwei beim Messen gefundene, eigenständige Themen (beide in `discovery.md`):
+- **§5a** Einen Pane zu teilen setzt die Breiten der Geschwister zurück (775/274 →
+  524/524). Bestand auf `main`, nicht von den Wellen verursacht.
+- **§5b** Verschieben und Tauschen schweigen, wenn ein Drag überholt wird; nur das
+  Ausbrechen sagt Bescheid.
+
+Testweg: Store-Aktionen direkt testen. **Neu und wichtig:** der Drag lässt sich in der
+echten App sehr wohl synthetisch fahren (`elementFromPoint` trifft echtes Layout), und
+Messungen dort haben mehrere Fehler gefunden, die keine Testsuite gesehen hätte. Details
+in `discovery.md`, Abschnitt Fallstricke.
 
 ---
 
@@ -91,8 +99,11 @@ Alle mit Konflikten, also Handarbeit. Aufwand jeweils klein bis mittel.
 ## Arbeitsweise, die sich bewährt hat
 
 Pro Welle ein Branch und ein PR. Review-Gate über `/code-review high`, und die Findings
-ernst nehmen: in den letzten drei Runden hat jedes Gate mindestens einen echten Fehler in
-frisch geschriebenem Code gefunden. Danach die Gates laufen lassen (`check-types`, `lint`,
+ernst nehmen: über die Panes-Wellen hat das Gate 13 Runden gebraucht, bis es leer kam.
+Die frühen Runden fanden echte Fehler, die späten etwas Unangenehmeres: Kommentare und
+sogar einen Test, die mehr behaupteten, als der Code hält. Das Gate laufen lassen, bis es
+nichts Neues mehr findet, und die eigenen Sicherheitsbehauptungen zuletzt prüfen, nicht
+zuerst glauben. Danach die Gates laufen lassen (`check-types`, `lint`,
 `vitest`, `cargo test`, `clippy -D warnings`, Build), erst dann mergen. Installieren nur
 mit ausdrücklichem Ja des Users, und die laufende App nie ungefragt beenden.
 
