@@ -15,6 +15,7 @@ import {
   removeLeaf,
   setLeafCwd as setLeafCwdInTree,
   setLeafTmuxSession as setLeafTmuxSessionInTree,
+  sameLayout,
   siblingLeafOf,
   splitLeaf,
   withLeavesFrom,
@@ -387,12 +388,14 @@ export function undoBreakOut(
   const born = tabs.find((t) => t.id === undo.tabId);
   const src = tabs.find((t) => t.id === undo.sourceTabId);
   if (born?.kind !== "terminal" || src?.kind !== "terminal") return "invalid";
-  // Order matters as much as membership: a reorder is work to preserve too.
-  const sameShape = (a: number[], b: number[]) =>
-    a.length === b.length && a.every((id, i) => id === b[i]);
-  if (!sameShape(leafIds(born.paneTree), [undo.leafId])) return "invalid";
-  const expected = leafIds(undo.prevTree).filter((id) => id !== undo.leafId);
-  if (!sameShape(leafIds(src.paneTree), expected)) return "invalid";
+  // The whole layout has to match, not just which panes are where in the list:
+  // moving a pane below its neighbor keeps the leaf order but turns a row into
+  // a column, and restoring over that would throw the move away.
+  if (!sameLayout(born.paneTree, { kind: "leaf", id: undo.leafId }))
+    return "invalid";
+  const expected = removeLeaf(undo.prevTree, undo.leafId);
+  if (expected === null || !sameLayout(src.paneTree, expected))
+    return "invalid";
   const restored = withLeavesFrom(undo.prevTree, [src.paneTree, born.paneTree]);
   return tabs.flatMap((t) => {
     if (t.id === undo.tabId) return [];
@@ -1414,48 +1417,47 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   );
 
   // Both of these are thin: the transition itself is a pure function above, so
-  // it can be tested without rendering. Each one plans against `tabsRef.current`
-  // for a synchronous verdict (the undo toast needs one), then re-plans inside
-  // the updater in case React had work pending. `setActiveId` sits INSIDE the
-  // updater's success branch on purpose: outside it, a re-plan that refuses
-  // would leave `activeId` naming a tab that was never created.
+  // it can be tested without rendering. Each decides SYNCHRONOUSLY and mirrors
+  // the result into `tabsRef` before handing it to React, so what it reports
+  // and what it commits are the same thing. The caller acts on that answer (it
+  // re-keys the pane's agent session and offers an undo), and neither of the
+  // two obvious alternatives can carry it: `tabsRef` is otherwise refreshed by
+  // an effect, a commit behind, and React runs an updater eagerly only when
+  // nothing else is queued, so an updater's verdict often arrives too late to
+  // return. The cost is a plain `setTabs(value)`, which drops an update queued
+  // but unprocessed; both gestures come from a discrete pointer event, and
+  // React flushes those one event at a time, so there is nothing in flight.
   const breakOutPane = useCallback(
     (leafId: number, gapIndex: number): BrokenOutPane | null => {
       const tabId = nextIdRef.current++;
-      const planned = breakOutPaneFromTabs(
+      const out = breakOutPaneFromTabs(
         tabsRef.current,
         leafId,
         tabId,
         gapIndex,
       );
-      if (!planned) return null;
-      setTabs((prev) => {
-        const out = breakOutPaneFromTabs(prev, leafId, tabId, gapIndex);
-        if (!out) return prev;
-        setActiveId(tabId);
-        return out.tabs;
-      });
-      return planned.undo;
+      if (!out) return null;
+      tabsRef.current = out.tabs;
+      setTabs(out.tabs);
+      setActiveId(tabId);
+      return out.undo;
     },
     [],
   );
 
   const undoBreakOutPane = useCallback(
     (undo: BrokenOutPane): MergeRefusal | null => {
-      const planned = undoBreakOut(tabsRef.current, undo);
-      if (typeof planned === "string") return planned;
-      setTabs((prev) => {
-        const next = undoBreakOut(prev, undo);
-        if (typeof next === "string") return prev;
-        // The focus follows the pane home, unless the user has moved to another
-        // space in the meantime: selecting a tab outside the visible strip
-        // would leave the bar with nothing marked and show the wrong space.
-        const back = next.find((t) => t.id === undo.sourceTabId);
-        if (back?.spaceId === activeSpaceIdRef.current) {
-          setActiveId(undo.sourceTabId);
-        }
-        return next;
-      });
+      const next = undoBreakOut(tabsRef.current, undo);
+      if (typeof next === "string") return next;
+      tabsRef.current = next;
+      setTabs(next);
+      // The focus follows the pane home, unless the user has moved to another
+      // space in the meantime: selecting a tab outside the visible strip would
+      // leave the bar with nothing marked and show the wrong space.
+      const back = next.find((t) => t.id === undo.sourceTabId);
+      if (back?.spaceId === activeSpaceIdRef.current) {
+        setActiveId(undo.sourceTabId);
+      }
       return null;
     },
     [],

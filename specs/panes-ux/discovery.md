@@ -330,8 +330,13 @@ erst mitbringt. Wer C direkt nach A baut, baut die Mitte-Zone hinterher zweimal 
   Luecke, erbt `workspace`, `private`, `blocks`, aber **nicht** den `customTitle`.
   `paneTree` ist das gefundene Leaf-Objekt selbst, dann `syncTabToLeaf`. Quelltab:
   `removeLeaf` plus `siblingLeafOf`. No-op, wenn der Tab nur ein Leaf hat.
-- `setActiveId` gehoert **in** den Updater. Ausserhalb wuerde ein Re-Plan, der
-  ablehnt, einen Tab aktiv setzen, den es nie gab (Review-Fund).
+- Beide Aktionen entscheiden **synchron** und spiegeln das Ergebnis in `tabsRef`,
+  bevor sie es React geben. Zwei naheliegende Wege tragen die Antwort nicht: `tabsRef`
+  wird sonst von einem Effekt nachgezogen und ist einen Commit alt, und React wertet
+  einen Updater nur dann sofort aus, wenn nichts ansteht. Ein Test durch React hat
+  genau das gezeigt: der Tab entstand, die Aktion meldete `null`, also kein Toast und
+  kein Nachziehen der Agenten-Sitzung. Wer den Rueckgabewert braucht, darf ihn nicht
+  aus einem Updater holen.
 - `paneDndStore.ts`: das Ziel wird eine Variante, `{kind:"pane"} | {kind:"newTab"}`.
 - `useTerminalPaneDnd.ts`: Hit-Test faellt auf die Tab-Leiste zurueck, wenn
   `elementFromPoint` keinen `[data-pane-leaf]` trifft.
@@ -360,6 +365,13 @@ erst mitbringt. Wer C direkt nach A baut, baut die Mitte-Zone hinterher zweimal 
    react-resizable-panels. Geometrie aus dem DOM immer durch `zoomResizeFix.ts`.
 6. **Drag ist synthetisch kaum testbar.** Store-Aktionen direkt testen, Sichttest
    ueber die Test-Bridge, und die nur im Dev-Build (`import.meta.env.DEV`).
+7. **Eine Aktion, deren Rueckgabewert etwas ausloest, darf ihn nicht aus einem
+   `setTabs`-Updater beziehen.** React fuehrt den Updater nur dann sofort aus, wenn
+   nichts in der Warteschlange steht; sonst passiert die Aenderung, und die Aktion
+   meldet nichts. `useTabs.breakout.test.tsx` haelt das fest, weil kein Test der
+   reinen Funktionen es sehen kann.
+8. **`tabsRef` wird von einem Effekt nachgezogen**, ist also einen Commit alt. Wer
+   synchron gegen ihn plant, plant unter Umstaenden gegen von gestern.
 7. **`pnpm format` fasst rund 131 Dateien an.** Nur die eigenen formatieren:
    `npx biome format --write <pfade>`.
 

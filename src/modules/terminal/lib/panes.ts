@@ -295,6 +295,21 @@ export function moveLeaf(
 }
 
 /**
+ * Whether two trees lay out the same: same nesting, same directions, same
+ * leaves in the same order. Split node ids and leaf contents (cwd, tmux
+ * session) are ignored, because those change on their own while the layout
+ * stands still. Two trees this calls equal are two the user cannot tell apart.
+ */
+export function sameLayout(a: PaneNode, b: PaneNode): boolean {
+  if (isLeaf(a) || isLeaf(b)) return isLeaf(a) && isLeaf(b) && a.id === b.id;
+  return (
+    a.dir === b.dir &&
+    a.children.length === b.children.length &&
+    a.children.every((c, i) => sameLayout(c, b.children[i]))
+  );
+}
+
+/**
  * Rebuild `shape` out of the leaf objects that are live now, looked up by id in
  * `sources`. Restoring a remembered layout must not drag its contents back in
  * time with it: a pane's cwd may have moved on since the shape was recorded.
