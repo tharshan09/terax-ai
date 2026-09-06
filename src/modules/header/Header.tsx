@@ -170,6 +170,12 @@ export function Header({
       <div
         className="flex min-w-0 flex-1 items-center gap-2"
         data-tauri-drag-region
+        // The whole row is where a dragged pane may be dropped to become a tab
+        // of its own, not just the strip: the strip is `shrink`, so most of the
+        // bar is the filler beside it, and the row's own `gap-2` leaves bands
+        // between its children that belong to neither. A drop anywhere here
+        // resolves to an insertion gap in the strip.
+        {...{ [TAB_STRIP_ZONE_ATTR]: "" }}
         onContextMenu={(e) => {
           // Empty chrome falls through to WebKit Reload, which reloads the
           // webview and pty_close_all's every shell (#1242). Per-tab menus
@@ -201,11 +207,7 @@ export function Header({
           onOverrideLanguage={onOverrideLanguage}
           compact={compact}
         />
-        <div
-          data-tauri-drag-region
-          {...{ [TAB_STRIP_ZONE_ATTR]: "" }}
-          className="h-full min-w-2 flex-1"
-        />
+        <div data-tauri-drag-region className="h-full min-w-2 flex-1" />
       </div>
 
       <SearchInline ref={searchRef} target={searchTarget} compact={compact} />

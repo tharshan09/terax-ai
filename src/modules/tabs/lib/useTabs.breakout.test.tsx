@@ -107,4 +107,42 @@ describe("useTabs break-out through React", () => {
     expect(refusal).toBe("invalid");
     expect(hook.result.current.tabs).toHaveLength(2);
   });
+
+  it("refuses to undo a pane whose tab is already gone", () => {
+    const { hook, leafId } = splitTab();
+    let undo = null as ReturnType<typeof hook.result.current.breakOutPane>;
+    act(() => {
+      undo = hook.result.current.breakOutPane(leafId, 0);
+    });
+    if (!undo) throw new Error("expected a break-out");
+    const record = undo;
+    // The broken-out pane's shell exits while the toast still stands.
+    act(() => {
+      hook.result.current.closePaneByLeaf(record.leafId);
+    });
+    let refusal: string | null = null;
+    act(() => {
+      refusal = hook.result.current.undoBreakOutPane(record);
+    });
+    expect(refusal).toBe("invalid");
+  });
+
+  it("never leaves activeId naming a tab that is gone", () => {
+    const { hook, leafId } = splitTab();
+    const exists = () =>
+      hook.result.current.tabs.some(
+        (t) => t.id === hook.result.current.activeId,
+      );
+    let undo = null as ReturnType<typeof hook.result.current.breakOutPane>;
+    act(() => {
+      undo = hook.result.current.breakOutPane(leafId, 0);
+    });
+    if (!undo) throw new Error("expected a break-out");
+    const record = undo;
+    expect(exists()).toBe(true);
+    act(() => {
+      hook.result.current.undoBreakOutPane(record);
+    });
+    expect(exists()).toBe(true);
+  });
 });

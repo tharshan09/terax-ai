@@ -174,11 +174,12 @@ Ziel, und das Verweilen ueber einem Tab wechselt dorthin.
 Zwei Bedeutungen, sauber getrennt durch die Flaeche unter dem Zeiger: **auf** einem
 Tab heisst "dort hinein", **zwischen** Tabs heisst "neuer Tab hier".
 
-Die Ablageflaeche ist dabei groesser als die Leiste selbst. Die Tab-Leiste ist
-`shrink`, sie ist nur so breit wie ihre Tabs; rechts daneben liegt ein Fueller, der
-wie die Leiste aussieht und auf den man zielt. Er gehoert zur selben Flaeche
-(`TAB_STRIP_ZONE_ATTR`), sonst verpufft ein Drop bei zwei offenen Tabs auf dem
-groessten Teil der Leiste stillschweigend.
+Die Ablageflaeche ist dabei die **ganze Zeile**, nicht nur die Leiste. Die Leiste ist
+`shrink`, sie ist nur so breit wie ihre Tabs; rechts daneben liegt ein Fueller, und
+zwischen den Kindern der Zeile liegen durch `gap-2` weitere Baender, die zu keinem
+von beiden gehoeren. Traegt nur der Fueller die Markierung, verpufft ein Drop in
+diesen Baendern stillschweigend. Also traegt die Zeile sie (`TAB_STRIP_ZONE_ATTR`),
+und jeder Drop darin loest sich zu einer Luecke in der Leiste auf.
 
 Das Verweilen ist ein Seiteneffekt und braucht einen Rueckweg: der Tab, in dem der
 Drag begann, wird gemerkt. Abbruch per Escape oder `pointercancel` kehrt dorthin
@@ -330,13 +331,15 @@ erst mitbringt. Wer C direkt nach A baut, baut die Mitte-Zone hinterher zweimal 
   Luecke, erbt `workspace`, `private`, `blocks`, aber **nicht** den `customTitle`.
   `paneTree` ist das gefundene Leaf-Objekt selbst, dann `syncTabToLeaf`. Quelltab:
   `removeLeaf` plus `siblingLeafOf`. No-op, wenn der Tab nur ein Leaf hat.
-- Beide Aktionen entscheiden **synchron** und spiegeln das Ergebnis in `tabsRef`,
-  bevor sie es React geben. Zwei naheliegende Wege tragen die Antwort nicht: `tabsRef`
-  wird sonst von einem Effekt nachgezogen und ist einen Commit alt, und React wertet
-  einen Updater nur dann sofort aus, wenn nichts ansteht. Ein Test durch React hat
-  genau das gezeigt: der Tab entstand, die Aktion meldete `null`, also kein Toast und
-  kein Nachziehen der Agenten-Sitzung. Wer den Rueckgabewert braucht, darf ihn nicht
-  aus einem Updater holen.
+- Beide Aktionen laufen in `flushSync`. Sie muessen ihrem Aufrufer eine echte
+  Antwort geben, weil er darauf handelt, und keiner der naheliegenden Wege traegt
+  eine: `tabsRef` wird von einem Effekt nachgezogen und ist einen Commit hinter allem,
+  was ein PTY-Ereignis eingereiht hat, und React wertet einen Updater nur dann sofort
+  aus, wenn nichts ansteht. Ein Test durch React hat genau das gezeigt: der Tab
+  entstand, die Aktion meldete `null`, also kein Toast und kein Nachziehen der
+  Agenten-Sitzung. `flushSync` loest beides, weil die Warteschlange hier und jetzt
+  abgearbeitet wird: der Uebergang sieht den wahren Vorzustand, und sein Urteil liegt
+  vor der Rueckgabe vor.
 - `paneDndStore.ts`: das Ziel wird eine Variante, `{kind:"pane"} | {kind:"newTab"}`.
 - `useTerminalPaneDnd.ts`: Hit-Test faellt auf die Tab-Leiste zurueck, wenn
   `elementFromPoint` keinen `[data-pane-leaf]` trifft.
@@ -365,13 +368,17 @@ erst mitbringt. Wer C direkt nach A baut, baut die Mitte-Zone hinterher zweimal 
    react-resizable-panels. Geometrie aus dem DOM immer durch `zoomResizeFix.ts`.
 6. **Drag ist synthetisch kaum testbar.** Store-Aktionen direkt testen, Sichttest
    ueber die Test-Bridge, und die nur im Dev-Build (`import.meta.env.DEV`).
-7. **Eine Aktion, deren Rueckgabewert etwas ausloest, darf ihn nicht aus einem
-   `setTabs`-Updater beziehen.** React fuehrt den Updater nur dann sofort aus, wenn
-   nichts in der Warteschlange steht; sonst passiert die Aenderung, und die Aktion
-   meldet nichts. `useTabs.breakout.test.tsx` haelt das fest, weil kein Test der
-   reinen Funktionen es sehen kann.
-8. **`tabsRef` wird von einem Effekt nachgezogen**, ist also einen Commit alt. Wer
-   synchron gegen ihn plant, plant unter Umstaenden gegen von gestern.
+7. **Eine Aktion, deren Rueckgabewert etwas ausloest, gehoert in `flushSync`.** Aus
+   einem `setTabs`-Updater kommt die Antwort oft zu spaet: React fuehrt ihn nur dann
+   sofort aus, wenn nichts in der Warteschlange steht, sonst passiert die Aenderung
+   und die Aktion meldet nichts. Gegen `tabsRef` zu planen ist die andere Falle, siehe
+   Punkt 8. `useTabs.breakout.test.tsx` haelt beides fest, weil kein Test der reinen
+   Funktionen es sehen kann.
+8. **`tabsRef` wird von einem Effekt nachgezogen**, ist also einen Commit alt. Das
+   faellt bei einer Geste kaum auf und bei einem Toast-Knopf sehr wohl: der steht
+   sechs Sekunden, und in dieser Zeit reihen OSC-7-Ereignisse und PTY-Abgaenge
+   Aenderungen ein. Ein Ersetzen des Zustands aus einem alten Stand heraus kann einen
+   gerade entsorgten Pane wieder einsetzen.
 7. **`pnpm format` fasst rund 131 Dateien an.** Nur die eigenen formatieren:
    `npx biome format --write <pfade>`.
 

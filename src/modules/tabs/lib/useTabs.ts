@@ -32,6 +32,7 @@ import {
   type WorkspaceEnv,
 } from "@/modules/workspace";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { applyDocView } from "./applyDocView";
 import { resolveFileTabOpen } from "./resolveFileTabOpen";
 
@@ -1417,48 +1418,63 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   );
 
   // Both of these are thin: the transition itself is a pure function above, so
-  // it can be tested without rendering. Each decides SYNCHRONOUSLY and mirrors
-  // the result into `tabsRef` before handing it to React, so what it reports
-  // and what it commits are the same thing. The caller acts on that answer (it
-  // re-keys the pane's agent session and offers an undo), and neither of the
-  // two obvious alternatives can carry it: `tabsRef` is otherwise refreshed by
-  // an effect, a commit behind, and React runs an updater eagerly only when
-  // nothing else is queued, so an updater's verdict often arrives too late to
-  // return. The cost is a plain `setTabs(value)`, which drops an update queued
-  // but unprocessed; both gestures come from a discrete pointer event, and
-  // React flushes those one event at a time, so there is nothing in flight.
+  // it can be tested without rendering. Both also have to hand their caller a
+  // real answer, because it acts on it (re-keys the pane's agent session and
+  // offers an undo), and neither of the obvious ways can carry one: `tabsRef`
+  // is refreshed by an effect, so it is a commit behind whatever a PTY event
+  // has queued, and React runs an updater eagerly ONLY when nothing is queued,
+  // so a verdict set inside one often arrives after the return.
+  //
+  // `flushSync` settles both at once: the queue is processed here and now, so
+  // the transition sees the true previous state and its verdict is available
+  // to return. Both gestures are one-off (a drop, a toast button), so the extra
+  // synchronous render costs nothing that was not going to happen anyway.
   const breakOutPane = useCallback(
     (leafId: number, gapIndex: number): BrokenOutPane | null => {
       const tabId = nextIdRef.current++;
-      const out = breakOutPaneFromTabs(
-        tabsRef.current,
-        leafId,
-        tabId,
-        gapIndex,
-      );
-      if (!out) return null;
-      tabsRef.current = out.tabs;
-      setTabs(out.tabs);
-      setActiveId(tabId);
-      return out.undo;
+      let undo: BrokenOutPane | null = null;
+      flushSync(() => {
+        setTabs((prev) => {
+          const out = breakOutPaneFromTabs(prev, leafId, tabId, gapIndex);
+          if (!out) return prev;
+          undo = out.undo;
+          // Inside the success branch: outside it, a refusal would leave
+          // `activeId` naming a tab that was never created.
+          setActiveId(tabId);
+          return out.tabs;
+        });
+      });
+      return undo;
     },
     [],
   );
 
   const undoBreakOutPane = useCallback(
     (undo: BrokenOutPane): MergeRefusal | null => {
-      const next = undoBreakOut(tabsRef.current, undo);
-      if (typeof next === "string") return next;
-      tabsRef.current = next;
-      setTabs(next);
-      // The focus follows the pane home, unless the user has moved to another
-      // space in the meantime: selecting a tab outside the visible strip would
-      // leave the bar with nothing marked and show the wrong space.
-      const back = next.find((t) => t.id === undo.sourceTabId);
-      if (back?.spaceId === activeSpaceIdRef.current) {
-        setActiveId(undo.sourceTabId);
-      }
-      return null;
+      let refusal: MergeRefusal | null = null;
+      flushSync(() => {
+        setTabs((prev) => {
+          const next = undoBreakOut(prev, undo);
+          if (typeof next === "string") {
+            refusal = next;
+            return prev;
+          }
+          // The focus follows the pane home. If the user has moved to another
+          // space meanwhile, staying put is friendlier than being yanked over
+          // there, but the tab being removed may be the active one, so the
+          // strip needs someone else to mark.
+          const back = next.find((t) => t.id === undo.sourceTabId);
+          if (back?.spaceId === activeSpaceIdRef.current) {
+            setActiveId(undo.sourceTabId);
+          } else if (activeIdRef.current === undo.tabId) {
+            setActiveId(
+              nextActiveInSpace(prev, undo.tabId) ?? undo.sourceTabId,
+            );
+          }
+          return next;
+        });
+      });
+      return refusal;
     },
     [],
   );
