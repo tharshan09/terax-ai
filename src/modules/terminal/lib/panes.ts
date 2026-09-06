@@ -293,3 +293,46 @@ export function moveLeaf(
   const next = attachSubtree(pruned, targetId, moved, edge, newSplitId);
   return next === pruned ? tree : next;
 }
+
+/**
+ * Where `leafId` sits relative to the pane beside it: the leaf to anchor on and
+ * which edge of that anchor it occupies. Feeding both back into
+ * {@link attachSubtree} puts the leaf back where it came from, which is how a
+ * move out of a tab is undone.
+ *
+ * The anchor is the neighboring subtree's edge-most leaf. That is exact for a
+ * pane sitting next to a pane; next to a deeper subtree it lands against the
+ * near edge of that subtree's first leaf, which restores the side but not
+ * necessarily the old proportions. Null for a root leaf (it has no neighbor)
+ * and for an id that is not in the tree.
+ */
+export function leafAnchor(
+  tree: PaneNode,
+  leafId: PaneId,
+): { anchorId: PaneId; edge: DropEdge } | null {
+  if (isLeaf(tree)) return null;
+  for (let i = 0; i < tree.children.length; i++) {
+    const c = tree.children[i];
+    if (!isLeaf(c) || c.id !== leafId) continue;
+    const prev = tree.children[i - 1];
+    if (prev) {
+      const ids = leafIds(prev);
+      return {
+        anchorId: ids[ids.length - 1],
+        edge: tree.dir === "row" ? "right" : "bottom",
+      };
+    }
+    const next = tree.children[i + 1];
+    if (!next) return null;
+    return {
+      anchorId: leafIds(next)[0],
+      edge: tree.dir === "row" ? "left" : "top",
+    };
+  }
+  for (const c of tree.children) {
+    if (isLeaf(c)) continue;
+    const r = leafAnchor(c, leafId);
+    if (r !== null) return r;
+  }
+  return null;
+}

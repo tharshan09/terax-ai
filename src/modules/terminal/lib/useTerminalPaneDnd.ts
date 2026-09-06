@@ -1,8 +1,9 @@
 import { getResizeZoomFactor } from "@/lib/zoomResizeFix";
+import { gapIndexAt, TAB_STRIP_ATTR } from "@/modules/tabs/lib/tabStripGap";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DropEdge } from "./panes";
-import { usePaneDndStore } from "./paneDndStore";
+import { type PaneDropTarget, usePaneDndStore } from "./paneDndStore";
 
 // Only turn a press into a drag past this many px, so a click on the handle
 // doesn't accidentally move a pane.
@@ -23,19 +24,32 @@ function edgeAt(el: HTMLElement, x: number, y: number): DropEdge {
   );
 }
 
+type Handlers = {
+  /** Drop landed on another pane: move the leaf beside it, on `edge`. */
+  onMove: (sourceLeafId: number, targetLeafId: number, edge: DropEdge) => void;
+  /** Drop landed on the tab strip: the leaf becomes a tab of its own at
+   *  `gapIndex` (the same insertion gaps a tab reorder uses). */
+  onBreakOut: (sourceLeafId: number, gapIndex: number) => void;
+};
+
 /** Pointer-based pane drag & drop (HTML5 DnD is intercepted by Tauri). A drag
  *  handle calls `startDrag(leafId, e)`; on drop the leaf moves next to the pane
- *  under the cursor, on the nearest edge. The ghost follows the cursor via
- *  direct DOM writes so moving only re-renders the highlighted pane. */
-export function useTerminalPaneDnd(
-  onMove: (sourceLeafId: number, targetLeafId: number, edge: DropEdge) => void,
-) {
+ *  under the cursor on the nearest edge, or breaks out into its own tab when the
+ *  drop is on the tab strip. The ghost follows the cursor via direct DOM writes
+ *  so moving only re-renders the highlighted surface.
+ *
+ *  An inactive tab's layer is `pointer-events: none`, so its panes are never
+ *  under the cursor: dropping onto a pane in ANOTHER tab is not reachable from
+ *  here, which is why the strip is the way across. */
+export function useTerminalPaneDnd({ onMove, onBreakOut }: Handlers) {
   const [dragging, setDragging] = useState(false);
   const ghostElRef = useRef<HTMLDivElement | null>(null);
   const lastPosRef = useRef({ x: 0, y: 0 });
   const cleanupRef = useRef<(() => void) | null>(null);
   const onMoveRef = useRef(onMove);
   onMoveRef.current = onMove;
+  const onBreakOutRef = useRef(onBreakOut);
+  onBreakOutRef.current = onBreakOut;
 
   const placeGhost = (x: number, y: number) => {
     lastPosRef.current = { x, y };
@@ -58,7 +72,7 @@ export function useTerminalPaneDnd(
       const sx = e.clientX;
       const sy = e.clientY;
       let active = false;
-      let target: { id: number; edge: DropEdge } | null = null;
+      let target: PaneDropTarget | null = null;
       const store = usePaneDndStore.getState();
 
       const move = (ev: PointerEvent) => {
@@ -69,18 +83,22 @@ export function useTerminalPaneDnd(
           store.setDrag(sourceLeafId);
         }
         placeGhost(ev.clientX, ev.clientY);
-        const leafEl = document
-          .elementFromPoint(ev.clientX, ev.clientY)
-          ?.closest<HTMLElement>("[data-pane-leaf]");
+        const under = document.elementFromPoint(ev.clientX, ev.clientY);
+        const leafEl = under?.closest<HTMLElement>("[data-pane-leaf]");
         const id = leafEl ? Number(leafEl.dataset.paneLeaf) : Number.NaN;
-        if (!leafEl || !Number.isFinite(id) || id === sourceLeafId) {
-          target = null;
-          store.setTarget(null, null);
-          return;
+        if (leafEl && Number.isFinite(id) && id !== sourceLeafId) {
+          target = {
+            kind: "pane",
+            leafId: id,
+            edge: edgeAt(leafEl, ev.clientX, ev.clientY),
+          };
+        } else {
+          const strip = under?.closest(`[${TAB_STRIP_ATTR}]`);
+          target = strip
+            ? { kind: "newTab", gapIndex: gapIndexAt(strip, ev.clientX) }
+            : null;
         }
-        const edge = edgeAt(leafEl, ev.clientX, ev.clientY);
-        target = { id, edge };
-        store.setTarget(id, edge);
+        store.setTarget(target);
       };
       const detach = () => {
         window.removeEventListener("pointermove", move);
@@ -92,8 +110,11 @@ export function useTerminalPaneDnd(
         detach();
         store.setDrag(null);
         setDragging(false);
-        if (active && commit && target) {
-          onMoveRef.current(sourceLeafId, target.id, target.edge);
+        if (!active || !commit || !target) return;
+        if (target.kind === "pane") {
+          onMoveRef.current(sourceLeafId, target.leafId, target.edge);
+        } else {
+          onBreakOutRef.current(sourceLeafId, target.gapIndex);
         }
       };
       const up = () => end(true);

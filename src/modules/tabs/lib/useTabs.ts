@@ -9,6 +9,7 @@ import {
   countLeaves,
   findLeafNode,
   hasLeaf,
+  leafAnchor,
   leafIds,
   moveLeaf,
   nextLeafId,
@@ -238,7 +239,20 @@ export function syncTabToLeaf(tab: TerminalTab, leafId: number): TerminalTab {
 
 export type MergeRefusal = "cap" | "incompatible" | "invalid";
 
-function sameEnv(a: WorkspaceEnv | undefined, b: WorkspaceEnv | undefined): boolean {
+/** What a break-out leaves behind so it can be undone: the pane, the tab it
+ *  was born into, and the leaf plus edge it used to sit against. */
+export type BrokenOutPane = {
+  tabId: number;
+  leafId: number;
+  sourceTabId: number;
+  anchorLeafId: number;
+  edge: DropEdge;
+};
+
+function sameEnv(
+  a: WorkspaceEnv | undefined,
+  b: WorkspaceEnv | undefined,
+): boolean {
   const x = a ?? LOCAL_WORKSPACE;
   const y = b ?? LOCAL_WORKSPACE;
   if (x.kind !== y.kind) return false;
@@ -247,23 +261,188 @@ function sameEnv(a: WorkspaceEnv | undefined, b: WorkspaceEnv | undefined): bool
   return true;
 }
 
-/** Whether `source` may be merged into `target` as a split. Panes inherit
- *  the tab's workspace / private / blocks semantics, so both tabs must agree
- *  on them, and the result must respect the per-tab pane cap. Shared by the
- *  tab-strip hit-test (so an impossible drop is never offered) and the state
- *  mutation. */
+/** The part both pane-crossing gestures share: panes inherit their tab's
+ *  workspace / private / blocks semantics, so the two tabs must agree on them
+ *  before anything moves. Returns the narrowed pair when they do, otherwise the
+ *  refusal. Only the pane budget differs between the callers. */
+function terminalPair(
+  source: Tab | undefined,
+  target: Tab | undefined,
+): { source: TerminalTab; target: TerminalTab } | MergeRefusal {
+  if (source?.kind !== "terminal" || target?.kind !== "terminal")
+    return "invalid";
+  if (source.id === target.id) return "invalid";
+  if (source.blocks || target.blocks) return "incompatible";
+  if (Boolean(source.private) !== Boolean(target.private))
+    return "incompatible";
+  if (!sameEnv(source.workspace, target.workspace)) return "incompatible";
+  return { source, target };
+}
+
+/** Whether `source` may be merged into `target` as a split. The whole source
+ *  tree crosses, so the cap counts both sides. Shared by the tab-strip
+ *  hit-test (so an impossible drop is never offered) and the state mutation. */
 export function canMergeTabs(
   source: Tab | undefined,
   target: Tab | undefined,
 ): MergeRefusal | null {
-  if (source?.kind !== "terminal" || target?.kind !== "terminal") return "invalid";
-  if (source.id === target.id) return "invalid";
-  if (source.blocks || target.blocks) return "incompatible";
-  if (Boolean(source.private) !== Boolean(target.private)) return "incompatible";
-  if (!sameEnv(source.workspace, target.workspace)) return "incompatible";
-  if (countLeaves(source.paneTree) + countLeaves(target.paneTree) > MAX_PANES_PER_TAB)
-    return "cap";
-  return null;
+  const pair = terminalPair(source, target);
+  if (typeof pair === "string") return pair;
+  return countLeaves(pair.source.paneTree) + countLeaves(pair.target.paneTree) >
+    MAX_PANES_PER_TAB
+    ? "cap"
+    : null;
+}
+
+/** Whether ONE pane may move from `source` into `target`. Same environment
+ *  rules as a whole-tab merge, but only a single leaf crosses, so the target
+ *  needs room for exactly one more. */
+export function canMovePaneInto(
+  source: Tab | undefined,
+  target: Tab | undefined,
+): MergeRefusal | null {
+  const pair = terminalPair(source, target);
+  if (typeof pair === "string") return pair;
+  return countLeaves(pair.target.paneTree) >= MAX_PANES_PER_TAB ? "cap" : null;
+}
+
+/** Place a NEW tab so it sits at `gapIndex` within its own space's strip.
+ *  Unlike {@link reorderTabsByGap} the tab is not already in the list, so the
+ *  gap needs no correction for a slot it used to occupy. */
+export function insertTabAtSpaceGap(
+  tabs: Tab[],
+  tab: Tab,
+  gapIndex: number,
+): Tab[] {
+  const sameSpace = tabs.filter((t) => t.spaceId === tab.spaceId);
+  const at = Math.max(0, Math.min(gapIndex, sameSpace.length));
+  const past = at === sameSpace.length;
+  const anchor = past ? sameSpace[at - 1] : sameSpace[at];
+  if (!anchor) return [...tabs, tab];
+  const idx = tabs.findIndex((t) => t.id === anchor.id);
+  const insertAt = past ? idx + 1 : idx;
+  return [...tabs.slice(0, insertAt), tab, ...tabs.slice(insertAt)];
+}
+
+/** Pull `leafId` out of its split into a brand-new tab with id `newTabId`,
+ *  placed at `gapIndex` in its space's strip. The leaf object moves untouched,
+ *  so its PTY and any managed tmux session travel with it: the caller must NOT
+ *  dispose it and must NOT reap its managed session (`removedManagedSessions`
+ *  compares one tab's tree and would report the still-live pane as gone).
+ *  Null when the leaf is unknown or already alone in its tab. */
+export function breakOutPaneFromTabs(
+  tabs: Tab[],
+  leafId: number,
+  newTabId: number,
+  gapIndex: number,
+): { tabs: Tab[]; undo: BrokenOutPane } | null {
+  const src = tabs.find(
+    (t) => t.kind === "terminal" && hasLeaf(t.paneTree, leafId),
+  );
+  // A lone pane already IS the tab; breaking it out would change nothing.
+  if (src?.kind !== "terminal" || countLeaves(src.paneTree) < 2) return null;
+  const leaf = findLeafNode(src.paneTree, leafId);
+  const anchor = leafAnchor(src.paneTree, leafId);
+  const rest = removeLeaf(src.paneTree, leafId);
+  if (!leaf || !anchor || rest === null) return null;
+  // No customTitle: that name belongs to the tab the user named, and there are
+  // two tabs now. The new one takes a cwd-derived label like any fresh tab.
+  const born = syncTabToLeaf(
+    {
+      id: newTabId,
+      kind: "terminal",
+      spaceId: src.spaceId,
+      title: src.title,
+      paneTree: leaf,
+      activeLeafId: leafId,
+      ...(src.workspace && { workspace: src.workspace }),
+      ...(src.private && { private: true as const }),
+      ...(src.blocks && { blocks: true as const }),
+    },
+    leafId,
+  );
+  const without = tabs.map((t) =>
+    t.id === src.id && t.kind === "terminal"
+      ? syncTabToLeaf(
+          { ...t, paneTree: rest },
+          survivingActive(src, rest, leafId),
+        )
+      : t,
+  );
+  return {
+    tabs: insertTabAtSpaceGap(without, born, gapIndex),
+    undo: {
+      tabId: newTabId,
+      leafId,
+      sourceTabId: src.id,
+      anchorLeafId: anchor.anchorId,
+      edge: anchor.edge,
+    },
+  };
+}
+
+/** Move ONE pane into another tab, beside `targetLeafId` on `edge`. The leaf
+ *  keeps its id, so its live session moves with it; the source tab disappears
+ *  when this was its last pane. Undoes a break-out, and is the state half of a
+ *  cross-tab pane drag. Returns the refusal instead of a list when the move is
+ *  not allowed. */
+export function movePaneIntoTab(
+  tabs: Tab[],
+  leafId: number,
+  targetTabId: number,
+  targetLeafId: number,
+  edge: DropEdge,
+  newSplitId: number,
+): Tab[] | MergeRefusal {
+  const src = tabs.find(
+    (t) => t.kind === "terminal" && hasLeaf(t.paneTree, leafId),
+  );
+  const dst = tabs.find((t) => t.id === targetTabId);
+  const refusal = canMovePaneInto(src, dst);
+  if (refusal) return refusal;
+  if (src?.kind !== "terminal" || dst?.kind !== "terminal") return "invalid";
+  if (!hasLeaf(dst.paneTree, targetLeafId)) return "invalid";
+  const leaf = findLeafNode(src.paneTree, leafId);
+  if (!leaf) return "invalid";
+  const grown = attachSubtree(
+    dst.paneTree,
+    targetLeafId,
+    leaf,
+    edge,
+    newSplitId,
+  );
+  if (grown === dst.paneTree) return "invalid";
+  const rest = removeLeaf(src.paneTree, leafId);
+  return tabs.flatMap((t) => {
+    if (t.id === dst.id && t.kind === "terminal") {
+      // A live pane wakes a still-cold (restored) target.
+      const { cold: _cold, ...bare } = t;
+      const cold = t.cold && src.cold ? { cold: true as const } : {};
+      return [syncTabToLeaf({ ...bare, paneTree: grown, ...cold }, leafId)];
+    }
+    if (t.id !== src.id || t.kind !== "terminal") return [t];
+    // That was its last pane, so the tab goes with it.
+    if (rest === null) return [];
+    return [
+      syncTabToLeaf(
+        { ...t, paneTree: rest },
+        survivingActive(src, rest, leafId),
+      ),
+    ];
+  });
+}
+
+/** Which pane a tab focuses once `leafId` has left it: the closest neighbor of
+ *  the departed pane when it was the focused one, otherwise nothing changes. */
+function survivingActive(
+  tab: TerminalTab,
+  rest: PaneNode,
+  leafId: number,
+): number {
+  if (tab.activeLeafId !== leafId) return tab.activeLeafId;
+  const remaining = leafIds(rest);
+  const sib = siblingLeafOf(tab.paneTree, leafId);
+  return sib !== null && remaining.includes(sib) ? sib : remaining[0];
 }
 
 export function nextActiveInSpace(
@@ -1234,7 +1413,8 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         const source = curr.find((t) => t.id === sourceTabId);
         const target = curr.find((t) => t.id === targetTabId);
         if (canMergeTabs(source, target) !== null) return curr;
-        if (source?.kind !== "terminal" || target?.kind !== "terminal") return curr;
+        if (source?.kind !== "terminal" || target?.kind !== "terminal")
+          return curr;
         const paneTree = attachSubtree(
           target.paneTree,
           target.activeLeafId,
@@ -1243,7 +1423,9 @@ export function useTabs(initial?: Partial<TerminalTab>) {
           newSplitId,
         );
         if (paneTree === target.paneTree) return curr;
-        setActiveId((active) => (active === sourceTabId ? targetTabId : active));
+        setActiveId((active) =>
+          active === sourceTabId ? targetTabId : active,
+        );
         return curr
           .filter((t) => t.id !== sourceTabId)
           .map((t) => {
@@ -1251,9 +1433,71 @@ export function useTabs(initial?: Partial<TerminalTab>) {
             // A live source wakes a still-cold (restored) target.
             const { cold: _cold, ...rest } = t;
             const cold = t.cold && source.cold ? { cold: true } : {};
-            return syncTabToLeaf({ ...rest, paneTree, ...cold }, source.activeLeafId);
+            return syncTabToLeaf(
+              { ...rest, paneTree, ...cold },
+              source.activeLeafId,
+            );
           });
       });
+      return null;
+    },
+    [],
+  );
+
+  // Both of these are thin: the transition itself is a pure function above, so
+  // it can be tested without rendering. Each one plans against `tabsRef.current`
+  // so the caller gets a synchronous verdict (the undo toast needs it), then
+  // re-plans inside the updater in case React had work pending.
+  const breakOutPane = useCallback(
+    (leafId: number, gapIndex: number): BrokenOutPane | null => {
+      const tabId = nextIdRef.current++;
+      const planned = breakOutPaneFromTabs(
+        tabsRef.current,
+        leafId,
+        tabId,
+        gapIndex,
+      );
+      if (!planned) return null;
+      setTabs(
+        (prev) =>
+          breakOutPaneFromTabs(prev, leafId, tabId, gapIndex)?.tabs ?? prev,
+      );
+      setActiveId(tabId);
+      return planned.undo;
+    },
+    [],
+  );
+
+  const movePaneToTab = useCallback(
+    (
+      leafId: number,
+      targetTabId: number,
+      targetLeafId: number,
+      edge: DropEdge,
+    ): MergeRefusal | null => {
+      const newSplitId = nextIdRef.current++;
+      const planned = movePaneIntoTab(
+        tabsRef.current,
+        leafId,
+        targetTabId,
+        targetLeafId,
+        edge,
+        newSplitId,
+      );
+      if (typeof planned === "string") return planned;
+      setTabs((prev) => {
+        const next = movePaneIntoTab(
+          prev,
+          leafId,
+          targetTabId,
+          targetLeafId,
+          edge,
+          newSplitId,
+        );
+        return typeof next === "string" ? prev : next;
+      });
+      // The focus follows the pane, so the tab it landed in becomes active.
+      setActiveId(targetTabId);
       return null;
     },
     [],
@@ -1402,6 +1646,8 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     splitActivePane,
     movePane,
     mergeTabInto,
+    breakOutPane,
+    movePaneToTab,
     closeActivePane,
     closePaneByLeaf,
     resetWorkspace,

@@ -197,6 +197,8 @@ export default function App() {
     focusNextPaneInTab,
     splitActivePane,
     movePane,
+    breakOutPane,
+    movePaneToTab,
     closeActivePane,
     closePaneByLeaf,
     resetWorkspace,
@@ -491,7 +493,13 @@ export default function App() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [tmuxPollKind, tmuxPollHost, tmuxPollSession, tmuxPollLeafId, tmuxPollTabId]);
+  }, [
+    tmuxPollKind,
+    tmuxPollHost,
+    tmuxPollSession,
+    tmuxPollLeafId,
+    tmuxPollTabId,
+  ]);
 
   // Claude Code stats over SSH. The model/context/cost widgets read stats the
   // statusLine wrapper writes; over SSH Claude runs on the host, so the wrapper
@@ -1152,6 +1160,40 @@ export default function App() {
     [focusPane],
   );
 
+  // A pane dropped on the tab strip becomes a tab of its own. The pane crosses a
+  // tab boundary, so it is out of sight after a mis-drop: offer the way back for
+  // as long as the toast stands. Agent sessions and their notifications are
+  // keyed by tab, so they have to follow the leaf both ways.
+  const handleBreakOutPane = useCallback(
+    (leafId: number, gapIndex: number) => {
+      const out = breakOutPane(leafId, gapIndex);
+      if (!out) return;
+      useAgentStore.getState().moveLeavesToTab([leafId], out.tabId);
+      toast("Pane moved into its own tab", {
+        duration: 6000,
+        action: {
+          label: "Undo",
+          onClick: () => {
+            const refusal = movePaneToTab(
+              out.leafId,
+              out.sourceTabId,
+              out.anchorLeafId,
+              out.edge,
+            );
+            if (refusal === null) {
+              useAgentStore
+                .getState()
+                .moveLeavesToTab([out.leafId], out.sourceTabId);
+            } else {
+              toast.error("That pane cannot go back: its old tab has changed");
+            }
+          },
+        },
+      });
+    },
+    [breakOutPane, movePaneToTab],
+  );
+
   const onActivateAgent = activateAgentTarget;
 
   const onActivateLocalAgent = useCallback(() => {
@@ -1578,6 +1620,7 @@ export default function App() {
                       onExit={handleLeafExit}
                       onFocusLeaf={handleFocusLeaf}
                       movePane={movePane}
+                      breakOutPane={handleBreakOutPane}
                       registerEditorHandle={registerEditorHandle}
                       onEditorDirtyChange={handleEditorDirty}
                       onEditorCloseTab={disposeTab}
