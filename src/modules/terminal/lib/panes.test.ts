@@ -7,6 +7,7 @@ import {
   type PaneNode,
   sameLayout,
   setLeafTmuxSession,
+  swapLeaves,
   withLeavesFrom,
 } from "./panes";
 
@@ -318,5 +319,59 @@ describe("sameLayout", () => {
     expect(sameLayout(leaf(2), split(1, "row", leaf(2), leaf(3)))).toBe(false);
     expect(sameLayout(leaf(2), leaf(3))).toBe(false);
     expect(sameLayout(leaf(2), leaf(2))).toBe(true);
+  });
+});
+
+describe("swapLeaves", () => {
+  const leaf = (id: number, cwd?: string): PaneNode => ({
+    kind: "leaf",
+    id,
+    cwd,
+  });
+  const split = (
+    id: number,
+    dir: "row" | "col",
+    ...children: PaneNode[]
+  ): PaneNode => ({ kind: "split", id, dir, children });
+
+  it("exchanges two siblings without touching the split", () => {
+    const tree = split(1, "row", leaf(2, "/a"), leaf(3, "/b"));
+    const out = swapLeaves(tree, 2, 3);
+    expect(out).toEqual(split(1, "row", leaf(3, "/b"), leaf(2, "/a")));
+  });
+
+  it("carries each leaf's own contents along", () => {
+    const tree = split(
+      1,
+      "row",
+      { kind: "leaf", id: 2, cwd: "/a", tmuxSession: "one" },
+      leaf(3, "/b"),
+    );
+    const out = swapLeaves(tree, 2, 3);
+    expect(findLeafCwd(out, 2)).toBe("/a");
+    expect(findLeafCwd(out, 3)).toBe("/b");
+    expect(leafIds(out)).toEqual([3, 2]);
+  });
+
+  it("exchanges across different levels of the tree", () => {
+    // row[ col[2,3], 4 ]: swapping 3 and 4 moves a pane out of the column and
+    // another into it, and both splits keep their shape.
+    const tree = split(1, "row", split(5, "col", leaf(2), leaf(3)), leaf(4));
+    const out = swapLeaves(tree, 3, 4);
+    expect(out).toEqual(
+      split(1, "row", split(5, "col", leaf(2), leaf(4)), leaf(3)),
+    );
+  });
+
+  it("leaves the tree alone for the same leaf or an unknown one", () => {
+    const tree = split(1, "row", leaf(2), leaf(3));
+    expect(swapLeaves(tree, 2, 2)).toBe(tree);
+    expect(swapLeaves(tree, 2, 99)).toBe(tree);
+    expect(swapLeaves(tree, 99, 2)).toBe(tree);
+  });
+
+  it("is its own inverse", () => {
+    const tree = split(1, "row", split(5, "col", leaf(2), leaf(3)), leaf(4));
+    expect(swapLeaves(swapLeaves(tree, 3, 4), 3, 4)).toEqual(tree);
   });
 });

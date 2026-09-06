@@ -4,6 +4,8 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
+import { ArrowDataTransferHorizontalIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import type { SearchAddon } from "@xterm/addon-search";
@@ -205,20 +207,53 @@ const EDGE_POS: Record<DropEdge, string> = {
   bottom: "inset-x-0 bottom-0 h-1/2",
 };
 
-// Highlights the half of the target pane where a dragged pane would land.
+// Shows what a drop would do. Near an edge the dragged pane is inserted there,
+// so the half it would take is filled in. In the middle the two panes trade
+// places, which is a different kind of thing and so gets a different shape: a
+// frame around each of the pair, left open, with the glyph on the target.
 function PaneDropOverlay({ leafId }: { leafId: number }) {
-  const edge = usePaneDndStore((s) =>
+  const spot = usePaneDndStore((s) =>
     s.target?.kind === "pane" && s.target.leafId === leafId
-      ? s.target.edge
+      ? s.target.spot
       : null,
   );
-  if (!edge) return null;
+  const swapPartner = usePaneDndStore(
+    (s) =>
+      s.target?.kind === "pane" &&
+      s.target.spot === "center" &&
+      s.sourceLeafId === leafId,
+  );
+  if (spot === "center" || swapPartner) {
+    return (
+      <div className="pointer-events-none absolute inset-0 z-[19]">
+        <div
+          className={cn(
+            "absolute inset-[12%] grid place-items-center rounded-lg border-2 border-primary",
+            // Only the pane under the cursor names the gesture; its partner
+            // just shows that it is the other half of the pair.
+            spot === "center" ? "bg-primary/10" : "border-dashed",
+          )}
+        >
+          {spot === "center" && (
+            <span className="rounded-full bg-background/85 p-2 text-primary shadow-sm backdrop-blur-sm">
+              <HugeiconsIcon
+                icon={ArrowDataTransferHorizontalIcon}
+                size={22}
+                strokeWidth={2}
+              />
+            </span>
+          )}
+        </div>
+      </div>
+    );
+  }
+  if (!spot) return null;
   return (
     <div className="pointer-events-none absolute inset-0 z-[19]">
       <div
         className={cn(
           "absolute rounded-md border-2 border-primary bg-primary/20",
-          EDGE_POS[edge],
+          EDGE_POS[spot],
         )}
       />
     </div>

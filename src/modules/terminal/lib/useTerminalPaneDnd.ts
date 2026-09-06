@@ -6,22 +6,40 @@ import {
 } from "@/modules/tabs/lib/tabStripGap";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { type PaneDropTarget, usePaneDndStore } from "./paneDndStore";
+import {
+  type PaneDropSpot,
+  type PaneDropTarget,
+  usePaneDndStore,
+} from "./paneDndStore";
 import type { DropEdge } from "./panes";
 
 // Only turn a press into a drag past this many px, so a click on the handle
 // doesn't accidentally move a pane.
 const THRESHOLD = 6;
 
-// Which edge of `el` the pointer is nearest — decides where the moved pane
-// lands (left/right split, or top/bottom). The leaf wrapper carries
-// `data-pane-leaf` (not `data-panel`), so its rect is NOT zoom-patched; scale it
-// into the zoomed pointer space before measuring.
-function edgeAt(el: HTMLElement, x: number, y: number): DropEdge {
+// The middle third in both axes means "trade places"; nearer an edge means
+// "insert there". A third is wide enough that the boundary does not flicker
+// under a shaking hand, so no hysteresis is needed.
+const CENTER_LO = 1 / 3;
+const CENTER_HI = 2 / 3;
+
+// Where in `el` the pointer sits: which edge it is nearest, or the centre. This
+// decides between inserting the dragged pane beside this one and swapping the
+// two. The leaf wrapper carries `data-pane-leaf` (not `data-panel`), so its
+// rect is NOT zoom-patched; scale it into the zoomed pointer space first.
+export function spotAt(el: HTMLElement, x: number, y: number): PaneDropSpot {
   const r = el.getBoundingClientRect();
   const z = getResizeZoomFactor();
   const px = (x - r.left * z) / (r.width * z || 1);
   const py = (y - r.top * z) / (r.height * z || 1);
+  if (
+    px >= CENTER_LO &&
+    px <= CENTER_HI &&
+    py >= CENTER_LO &&
+    py <= CENTER_HI
+  ) {
+    return "center";
+  }
   const dist = { left: px, right: 1 - px, top: py, bottom: 1 - py };
   return (Object.keys(dist) as DropEdge[]).reduce((a, b) =>
     dist[b] < dist[a] ? b : a,
@@ -38,8 +56,11 @@ export function paneLayerOf(el: Element | null | undefined): string | null {
 }
 
 type Handlers = {
-  /** Drop landed on another pane: move the leaf beside it, on `edge`. */
+  /** Drop landed near another pane's edge: move the leaf beside it, there. */
   onMove: (sourceLeafId: number, targetLeafId: number, edge: DropEdge) => void;
+  /** Drop landed in the middle of another pane: the two trade places, which
+   *  keeps the sizes an insert would rebuild. */
+  onSwap: (sourceLeafId: number, targetLeafId: number) => void;
   /** Drop landed on the tab strip: the leaf becomes a tab of its own at
    *  `gapIndex` (the same insertion gaps a tab reorder uses). */
   onBreakOut: (sourceLeafId: number, gapIndex: number) => void;
@@ -54,13 +75,15 @@ type Handlers = {
  *  An inactive tab's layer is `pointer-events: none`, so its panes are never
  *  under the cursor: dropping onto a pane in ANOTHER tab is not reachable from
  *  here, which is why the strip is the way across. */
-export function useTerminalPaneDnd({ onMove, onBreakOut }: Handlers) {
+export function useTerminalPaneDnd({ onMove, onSwap, onBreakOut }: Handlers) {
   const [dragging, setDragging] = useState(false);
   const ghostElRef = useRef<HTMLDivElement | null>(null);
   const lastPosRef = useRef({ x: 0, y: 0 });
   const cleanupRef = useRef<(() => void) | null>(null);
   const onMoveRef = useRef(onMove);
   onMoveRef.current = onMove;
+  const onSwapRef = useRef(onSwap);
+  onSwapRef.current = onSwap;
   const onBreakOutRef = useRef(onBreakOut);
   onBreakOutRef.current = onBreakOut;
 
@@ -122,7 +145,7 @@ export function useTerminalPaneDnd({ onMove, onBreakOut }: Handlers) {
           target = {
             kind: "pane",
             leafId: id,
-            edge: edgeAt(leafEl, ev.clientX, ev.clientY),
+            spot: spotAt(leafEl, ev.clientX, ev.clientY),
           };
         } else {
           const strip = tabStripAt(under);
@@ -148,10 +171,12 @@ export function useTerminalPaneDnd({ onMove, onBreakOut }: Handlers) {
         store.setDrag(null);
         setDragging(false);
         if (!active || !commit || !target) return;
-        if (target.kind === "pane") {
-          onMoveRef.current(sourceLeafId, target.leafId, target.edge);
-        } else {
+        if (target.kind !== "pane") {
           onBreakOutRef.current(sourceLeafId, target.gapIndex);
+        } else if (target.spot === "center") {
+          onSwapRef.current(sourceLeafId, target.leafId);
+        } else {
+          onMoveRef.current(sourceLeafId, target.leafId, target.spot);
         }
       };
       const up = (ev: PointerEvent) => {

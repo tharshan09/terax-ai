@@ -198,6 +198,7 @@ export default function App() {
     focusNextPaneInTab,
     splitActivePane,
     movePane,
+    swapPanes,
     breakOutPane,
     undoBreakOutPane,
     closeActivePane,
@@ -1634,6 +1635,7 @@ export default function App() {
                       onExit={handleLeafExit}
                       onFocusLeaf={handleFocusLeaf}
                       movePane={movePane}
+                      swapPanes={swapPanes}
                       breakOutPane={handleBreakOutPane}
                       registerEditorHandle={registerEditorHandle}
                       onEditorDirtyChange={handleEditorDirty}

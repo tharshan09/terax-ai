@@ -29,6 +29,8 @@ type Props = {
     targetLeafId: number,
     edge: DropEdge,
   ) => void;
+  /** A pane dropped in the middle of another one trades places with it. */
+  swapPanes: (a: number, b: number) => void;
   /** A pane dropped on the tab strip becomes a tab of its own at `gapIndex`. */
   breakOutPane: (sourceLeafId: number, gapIndex: number) => void;
 };
@@ -103,11 +105,13 @@ function TerminalStackInner({
   onExit,
   onFocusLeaf,
   movePane,
+  swapPanes,
   breakOutPane,
 }: Props) {
   const terminals = useMemo(() => selectLiveTerminals(tabs), [tabs]);
   const paneDnd = useTerminalPaneDnd({
     onMove: movePane,
+    onSwap: swapPanes,
     onBreakOut: breakOutPane,
   });
 

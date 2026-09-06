@@ -65,6 +65,7 @@ function element(tabs: TerminalTab[], activeId: number) {
       onExit={noop}
       onFocusLeaf={noop}
       movePane={noop}
+      swapPanes={noop}
       breakOutPane={noop}
     />
   );

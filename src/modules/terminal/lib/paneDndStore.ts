@@ -1,10 +1,14 @@
 import { create } from "zustand";
 import type { DropEdge } from "./panes";
 
-/** Where a dragged pane would land: beside another pane on one of its edges,
- *  or as a new tab at an insertion gap in the tab strip. */
+/** Where in a pane the pointer sits: near one of its edges, meaning the dragged
+ *  pane is inserted there, or in its middle, meaning the two trade places. */
+export type PaneDropSpot = DropEdge | "center";
+
+/** Where a dragged pane would land: on another pane (edge or middle), or as a
+ *  new tab at an insertion gap in the tab strip. */
 export type PaneDropTarget =
-  | { kind: "pane"; leafId: number; edge: DropEdge }
+  | { kind: "pane"; leafId: number; spot: PaneDropSpot }
   | { kind: "newTab"; gapIndex: number };
 
 // Drop-target state for pane drag & drop, mirrored into the pane overlays and
@@ -29,7 +33,7 @@ function sameTarget(
   if (a === b) return true;
   if (a === null || b === null) return false;
   if (a.kind === "pane" && b.kind === "pane")
-    return a.leafId === b.leafId && a.edge === b.edge;
+    return a.leafId === b.leafId && a.spot === b.spot;
   if (a.kind === "newTab" && b.kind === "newTab")
     return a.gapIndex === b.gapIndex;
   return false;

@@ -331,3 +331,24 @@ export function withLeavesFrom(
     children: shape.children.map((c) => withLeavesFrom(c, sources)),
   };
 }
+
+/**
+ * Exchange two leaves in place. Both keep their ids, so their live sessions go
+ * with them; every split node, its direction and its children's order stay as
+ * they were, which is what makes this preserve the sizes the user dragged.
+ * Inserting instead would rebuild the enclosing split and reset them.
+ *
+ * Returns the tree unchanged when the two are the same leaf or either is
+ * missing.
+ */
+export function swapLeaves(tree: PaneNode, a: PaneId, b: PaneId): PaneNode {
+  if (a === b) return tree;
+  const nodeA = findLeafNode(tree, a);
+  const nodeB = findLeafNode(tree, b);
+  if (!nodeA || !nodeB) return tree;
+  const put = (n: PaneNode): PaneNode => {
+    if (isLeaf(n)) return n.id === a ? nodeB : n.id === b ? nodeA : n;
+    return { ...n, children: n.children.map(put) };
+  };
+  return put(tree);
+}

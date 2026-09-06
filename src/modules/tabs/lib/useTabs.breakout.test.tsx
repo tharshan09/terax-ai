@@ -188,4 +188,46 @@ describe("useTabs break-out through React", () => {
       true,
     );
   });
+
+  it("swaps two panes without rebuilding the split", () => {
+    const { hook, tabId, leafId } = splitTab();
+    const before = hook.result.current.tabs.find((t) => t.id === tabId);
+    const order = before?.kind === "terminal" ? leafIds(before.paneTree) : [];
+    const split =
+      before?.kind === "terminal" && before.paneTree.kind === "split"
+        ? before.paneTree
+        : null;
+    expect(order).toHaveLength(2);
+    act(() => {
+      hook.result.current.swapPanes(order[1], order[0]);
+    });
+    const after = hook.result.current.tabs.find((t) => t.id === tabId);
+    if (after?.kind !== "terminal") throw new Error("expected a terminal tab");
+    expect(leafIds(after.paneTree)).toEqual([order[1], order[0]]);
+    // Same split node, same direction: nothing was rebuilt, so the sizes the
+    // user dragged are still the ones react-resizable-panels knows.
+    expect(after.paneTree.kind).toBe("split");
+    if (after.paneTree.kind === "split") {
+      expect(after.paneTree.id).toBe(split?.id);
+      expect(after.paneTree.dir).toBe(split?.dir);
+    }
+    // The focus goes with the pane that was dragged.
+    expect(after.activeLeafId).toBe(order[1]);
+    expect(hook.result.current.tabs).toHaveLength(1);
+    expect(leafId).toBe(order[1]);
+  });
+
+  it("ignores a swap that names one pane twice or a pane from elsewhere", () => {
+    const { hook, tabId, leafId } = splitTab();
+    const snapshot = hook.result.current.tabs.find((t) => t.id === tabId);
+    const tree = snapshot?.kind === "terminal" ? snapshot.paneTree : null;
+    act(() => {
+      hook.result.current.swapPanes(leafId, leafId);
+    });
+    act(() => {
+      hook.result.current.swapPanes(leafId, 9999);
+    });
+    const after = hook.result.current.tabs.find((t) => t.id === tabId);
+    expect(after?.kind === "terminal" && after.paneTree).toBe(tree);
+  });
 });

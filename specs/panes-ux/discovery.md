@@ -359,8 +359,8 @@ Pro Welle ein Branch und ein PR, Review-Gate `/code-review high`, dann die Gates
 
 | # | Inhalt | Umfang | Warum an dieser Stelle |
 |---|---|---|---|
-| A | **Ausbrechen** in einen eigenen Tab (D3 halb, D5, D7) | mittel | Groesster Nutzen, und es baut das dritte Drop-Ziel, auf dem B aufsetzt. |
-| B | **Tauschen** per Drop-Mitte (D2) | klein | Vervollstaendigt die Grammatik *innerhalb* eines Tabs, bevor sie ueber Tabs hinweg gilt. Anzahlneutral, also ohne Grenzen-Mathematik. |
+| A | **Ausbrechen** in einen eigenen Tab (D3 halb, D5, D7) | mittel | Groesster Nutzen, und es baut das dritte Drop-Ziel, auf dem B aufsetzt. **GEMERGT** (PR #81, `61fa496`) |
+| B | **Tauschen** per Drop-Mitte (D2) | klein | Vervollstaendigt die Grammatik *innerhalb* eines Tabs, bevor sie ueber Tabs hinweg gilt. Anzahlneutral, also ohne Grenzen-Mathematik. **GEBAUT** |
 | C | **Pane von Tab A nach Tab B** (D3 ganz, D6) | mittel | Braucht A (Drop-Ziel Tab-Leiste) und erbt aus B den Tausch ueber Tab-Grenzen gratis. Bringt das allgemeine Primitiv (`movePaneIntoTab`) und die gemeinsame Zulaessigkeitspruefung mit seiner Geste, statt sie in A vorwegzunehmen. |
 | D | **Greifflaeche** (D8) | klein | Reine Optik und Treffsicherheit, keine Zustandslogik. |
 | E | **Tastatur** `Cmd+Alt+Pfeil` (D4) | klein bis mittel | Handarbeit statt Cherry-Pick, funktioniert unabhaengig von allem anderen. |

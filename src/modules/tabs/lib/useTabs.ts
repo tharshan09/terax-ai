@@ -18,6 +18,7 @@ import {
   setLeafTmuxSession as setLeafTmuxSessionInTree,
   siblingLeafOf,
   splitLeaf,
+  swapLeaves,
   withLeavesFrom,
   type DropEdge,
   type PaneNode,
@@ -1404,6 +1405,27 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     [],
   );
 
+  // Two panes trade places. Count and tab are unchanged, so there is nothing to
+  // check against the cap, and swapLeaves rebuilds no split, which is what
+  // keeps the sizes the user dragged. The focus goes with the pane that was
+  // dragged, as it does for a move.
+  const swapPanes = useCallback((a: number, b: number): void => {
+    if (a === b) return;
+    setTabs((curr) =>
+      curr.map((t) => {
+        if (
+          t.kind !== "terminal" ||
+          !hasLeaf(t.paneTree, a) ||
+          !hasLeaf(t.paneTree, b)
+        )
+          return t;
+        const paneTree = swapLeaves(t.paneTree, a, b);
+        if (paneTree === t.paneTree) return t;
+        return syncTabToLeaf({ ...t, paneTree }, a);
+      }),
+    );
+  }, []);
+
   // Drop a terminal tab onto another one: its whole pane tree becomes a split
   // next to the target's focused pane and the source tab disappears. Leaf ids
   // (and so PTYs / tmux sessions) move untouched, so nothing is disposed or
@@ -1696,6 +1718,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     focusNextPaneInTab,
     splitActivePane,
     movePane,
+    swapPanes,
     mergeTabInto,
     breakOutPane,
     undoBreakOutPane,
