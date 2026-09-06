@@ -123,6 +123,7 @@ import { listSshHosts, type SshHost } from "@/modules/workspace/sshHosts";
 import { setTerminalPathOpener } from "@/modules/terminal/lib/rendererPool";
 import { resolveTerminalPath } from "@/modules/terminal/lib/terminalPathLinks";
 import { invoke } from "@tauri-apps/api/core";
+import { TAB_STRIP_ZONE_OFF_ATTR } from "@/modules/tabs/lib/tabStripGap";
 import { toast } from "sonner";
 import type { SearchAddon } from "@xterm/addon-search";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -197,6 +198,8 @@ export default function App() {
     focusNextPaneInTab,
     splitActivePane,
     movePane,
+    breakOutPane,
+    undoBreakOutPane,
     closeActivePane,
     closePaneByLeaf,
     resetWorkspace,
@@ -491,7 +494,13 @@ export default function App() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [tmuxPollKind, tmuxPollHost, tmuxPollSession, tmuxPollLeafId, tmuxPollTabId]);
+  }, [
+    tmuxPollKind,
+    tmuxPollHost,
+    tmuxPollSession,
+    tmuxPollLeafId,
+    tmuxPollTabId,
+  ]);
 
   // Claude Code stats over SSH. The model/context/cost widgets read stats the
   // statusLine wrapper writes; over SSH Claude runs on the host, so the wrapper
@@ -1152,6 +1161,48 @@ export default function App() {
     [focusPane],
   );
 
+  // A pane dropped on the tab strip becomes a tab of its own. The pane crosses a
+  // tab boundary, so it is out of sight after a mis-drop: offer the way back for
+  // as long as the toast stands. Agent sessions and their notifications are
+  // keyed by tab, so they have to follow the leaf both ways.
+  const handleBreakOutPane = useCallback(
+    (leafId: number, gapIndex: number) => {
+      const undo = breakOutPane(leafId, gapIndex);
+      // Both refusals come from the ground moving under a drag that lasts as
+      // long as the user holds the button. The ghost and the insertion
+      // indicator have already promised a new tab, so say what happened rather
+      // than swallow the gesture.
+      if (typeof undo === "string") {
+        toast.error(
+          undo === "space-changed"
+            ? "You changed space while dragging, so the pane stayed put"
+            : "The split closed while you were dragging",
+        );
+        return;
+      }
+      useAgentStore.getState().moveLeavesToTab([leafId], undo.tabId);
+      toast("Pane moved into its own tab", {
+        duration: 6000,
+        action: {
+          label: "Undo",
+          onClick: () => {
+            if (undoBreakOutPane(undo) !== null) {
+              // One refusal covers several reasons (the layout moved on, a
+              // pane closed, the old tab left for another space), so the
+              // wording stays true to all of them.
+              toast.error("That pane cannot go back any more");
+              return;
+            }
+            useAgentStore
+              .getState()
+              .moveLeavesToTab([undo.leafId], undo.sourceTabId);
+          },
+        },
+      });
+    },
+    [breakOutPane, undoBreakOutPane],
+  );
+
   const onActivateAgent = activateAgentTarget;
 
   const onActivateLocalAgent = useCallback(() => {
@@ -1295,19 +1346,24 @@ export default function App() {
   );
 
   const spaceSwitcher = (
-    <SpaceSwitcher
-      open={switcherOpen}
-      onOpenChange={setSwitcherOpen}
-      tabs={tabs}
-      onNewSpace={() => void handleNewSpace()}
-      onDeleteSpace={handleDeleteSpace}
-      onNewTabInSpace={handleNewTabInSpace}
-      onJumpTab={jumpToTab}
-      onCloseTab={handleClose}
-      onMoveTabToSpace={handleMoveTab}
-      onReorderTab={handleReorderTab}
-      onReorderSpaces={(ids) => useSpaces.getState().reorder(ids)}
-    />
+    // Cut out of the pane drop zone that covers the header row: this control is
+    // where a user aims to move something to ANOTHER space, so a pane dropped
+    // here must not become a tab at the front of the current one.
+    <div {...{ [TAB_STRIP_ZONE_OFF_ATTR]: "" }} className="contents">
+      <SpaceSwitcher
+        open={switcherOpen}
+        onOpenChange={setSwitcherOpen}
+        tabs={tabs}
+        onNewSpace={() => void handleNewSpace()}
+        onDeleteSpace={handleDeleteSpace}
+        onNewTabInSpace={handleNewTabInSpace}
+        onJumpTab={jumpToTab}
+        onCloseTab={handleClose}
+        onMoveTabToSpace={handleMoveTab}
+        onReorderTab={handleReorderTab}
+        onReorderSpaces={(ids) => useSpaces.getState().reorder(ids)}
+      />
+    </div>
   );
 
   const commandPaletteItems = useMemo(
@@ -1578,6 +1634,7 @@ export default function App() {
                       onExit={handleLeafExit}
                       onFocusLeaf={handleFocusLeaf}
                       movePane={movePane}
+                      breakOutPane={handleBreakOutPane}
                       registerEditorHandle={registerEditorHandle}
                       onEditorDirtyChange={handleEditorDirty}
                       onEditorCloseTab={disposeTab}

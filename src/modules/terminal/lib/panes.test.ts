@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   attachSubtree,
+  findLeafCwd,
   leafIds,
   moveLeaf,
   type PaneNode,
+  sameLayout,
   setLeafTmuxSession,
+  withLeavesFrom,
 } from "./panes";
 
 type Split = Extract<PaneNode, { kind: "split" }>;
@@ -209,5 +212,111 @@ describe("attachSubtree (merge a tab's pane tree into another tab)", () => {
   it("returns the tree unchanged when the target leaf is missing", () => {
     const tree = leaf(1);
     expect(attachSubtree(tree, 99, leaf(2), "right", 100)).toBe(tree);
+  });
+});
+
+describe("withLeavesFrom (restore a layout, not its old contents)", () => {
+  const leaf = (id: number, cwd?: string): PaneNode => ({
+    kind: "leaf",
+    id,
+    cwd,
+  });
+
+  it("rebuilds the shape with the leaves that are live now", () => {
+    const shape: PaneNode = {
+      kind: "split",
+      id: 1,
+      dir: "row",
+      children: [leaf(2, "/old"), leaf(3, "/old")],
+    };
+    const live: PaneNode = {
+      kind: "split",
+      id: 9,
+      dir: "col",
+      children: [leaf(3, "/new"), leaf(2, "/new")],
+    };
+    const out = withLeavesFrom(shape, [live]);
+    expect(out).toEqual({
+      kind: "split",
+      id: 1,
+      dir: "row",
+      children: [leaf(2, "/new"), leaf(3, "/new")],
+    });
+  });
+
+  it("takes a leaf from whichever source holds it", () => {
+    const shape: PaneNode = {
+      kind: "split",
+      id: 1,
+      dir: "row",
+      children: [leaf(2, "/old"), leaf(3, "/old")],
+    };
+    const out = withLeavesFrom(shape, [leaf(2, "/a"), leaf(3, "/b")]);
+    expect(leafIds(out)).toEqual([2, 3]);
+    expect(findLeafCwd(out, 2)).toBe("/a");
+    expect(findLeafCwd(out, 3)).toBe("/b");
+  });
+
+  it("keeps a leaf no source knows about", () => {
+    const shape: PaneNode = {
+      kind: "split",
+      id: 1,
+      dir: "row",
+      children: [leaf(2, "/old"), leaf(3, "/old")],
+    };
+    const out = withLeavesFrom(shape, [leaf(2, "/a")]);
+    expect(findLeafCwd(out, 3)).toBe("/old");
+  });
+});
+
+describe("sameLayout", () => {
+  const leaf = (id: number, cwd?: string): PaneNode => ({
+    kind: "leaf",
+    id,
+    cwd,
+  });
+  const split = (
+    id: number,
+    dir: "row" | "col",
+    ...children: PaneNode[]
+  ): PaneNode => ({ kind: "split", id, dir, children });
+
+  it("ignores split ids and leaf contents", () => {
+    expect(
+      sameLayout(
+        split(1, "row", leaf(2, "/a"), leaf(3)),
+        split(99, "row", leaf(2, "/b"), leaf(3)),
+      ),
+    ).toBe(true);
+  });
+
+  it("separates a row from a column of the same panes", () => {
+    expect(
+      sameLayout(
+        split(1, "row", leaf(2), leaf(3)),
+        split(1, "col", leaf(2), leaf(3)),
+      ),
+    ).toBe(false);
+  });
+
+  it("separates a reorder and a different nesting", () => {
+    expect(
+      sameLayout(
+        split(1, "row", leaf(2), leaf(3)),
+        split(1, "row", leaf(3), leaf(2)),
+      ),
+    ).toBe(false);
+    expect(
+      sameLayout(
+        split(1, "row", leaf(2), leaf(3), leaf(4)),
+        split(1, "row", leaf(2), split(5, "col", leaf(3), leaf(4))),
+      ),
+    ).toBe(false);
+  });
+
+  it("separates a leaf from a split, and different leaves", () => {
+    expect(sameLayout(leaf(2), split(1, "row", leaf(2), leaf(3)))).toBe(false);
+    expect(sameLayout(leaf(2), leaf(3))).toBe(false);
+    expect(sameLayout(leaf(2), leaf(2))).toBe(true);
   });
 });

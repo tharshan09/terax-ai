@@ -13,14 +13,17 @@ import {
   moveLeaf,
   nextLeafId,
   removeLeaf,
+  sameLayout,
   setLeafCwd as setLeafCwdInTree,
   setLeafTmuxSession as setLeafTmuxSessionInTree,
   siblingLeafOf,
   splitLeaf,
+  withLeavesFrom,
   type DropEdge,
   type PaneNode,
   type SplitDir,
 } from "@/modules/terminal/lib/panes";
+import { useSpaces } from "@/modules/spaces/lib/useSpaces";
 import { killTmuxSession } from "@/modules/terminal/lib/tmux";
 import { disposeSession } from "@/modules/terminal/lib/useTerminalSession";
 import { usePreferencesStore } from "@/modules/settings/preferences";
@@ -30,6 +33,7 @@ import {
   type WorkspaceEnv,
 } from "@/modules/workspace";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { applyDocView } from "./applyDocView";
 import { resolveFileTabOpen } from "./resolveFileTabOpen";
 
@@ -238,7 +242,29 @@ export function syncTabToLeaf(tab: TerminalTab, leafId: number): TerminalTab {
 
 export type MergeRefusal = "cap" | "incompatible" | "invalid";
 
-function sameEnv(a: WorkspaceEnv | undefined, b: WorkspaceEnv | undefined): boolean {
+/** Why a pane did not become a tab of its own. `collapsed`: the split it came
+ *  from closed under the drag (a shell exited, either the pane's own or its
+ *  sibling's). `space-changed`: the user switched space while dragging, so the
+ *  strip the drop was measured against is no longer the pane's own. */
+export type BreakOutRefusal = "collapsed" | "space-changed";
+
+/** What a break-out leaves behind so it can be undone: the pane, the tab it was
+ *  born into, and the source tab's layout as it stood. The whole tree, not just
+ *  the neighbor it sat against: re-attaching to a neighbor restores the side but
+ *  can change the shape (a pane beside a nested split comes back inside it), and
+ *  a button labelled Undo may not restructure anything. */
+export type BrokenOutPane = {
+  tabId: number;
+  leafId: number;
+  sourceTabId: number;
+  prevTree: PaneNode;
+  prevActiveLeafId: number;
+};
+
+function sameEnv(
+  a: WorkspaceEnv | undefined,
+  b: WorkspaceEnv | undefined,
+): boolean {
   const x = a ?? LOCAL_WORKSPACE;
   const y = b ?? LOCAL_WORKSPACE;
   if (x.kind !== y.kind) return false;
@@ -247,23 +273,187 @@ function sameEnv(a: WorkspaceEnv | undefined, b: WorkspaceEnv | undefined): bool
   return true;
 }
 
-/** Whether `source` may be merged into `target` as a split. Panes inherit
- *  the tab's workspace / private / blocks semantics, so both tabs must agree
- *  on them, and the result must respect the per-tab pane cap. Shared by the
- *  tab-strip hit-test (so an impossible drop is never offered) and the state
- *  mutation. */
+/** Panes inherit their tab's workspace / private / blocks semantics, so two
+ *  tabs must agree on them before a pane crosses between them. Returns the
+ *  narrowed pair when they do, otherwise the refusal. Only `canMergeTabs` needs
+ *  it today; the per-pane budget differs, which is why the count is left to the
+ *  caller. */
+function terminalPair(
+  source: Tab | undefined,
+  target: Tab | undefined,
+): { source: TerminalTab; target: TerminalTab } | MergeRefusal {
+  if (source?.kind !== "terminal" || target?.kind !== "terminal")
+    return "invalid";
+  if (source.id === target.id) return "invalid";
+  if (source.blocks || target.blocks) return "incompatible";
+  if (Boolean(source.private) !== Boolean(target.private))
+    return "incompatible";
+  if (!sameEnv(source.workspace, target.workspace)) return "incompatible";
+  return { source, target };
+}
+
+/** Whether `source` may be merged into `target` as a split. The whole source
+ *  tree crosses, so the cap counts both sides. Shared by the tab-strip
+ *  hit-test (so an impossible drop is never offered) and the state mutation. */
 export function canMergeTabs(
   source: Tab | undefined,
   target: Tab | undefined,
 ): MergeRefusal | null {
-  if (source?.kind !== "terminal" || target?.kind !== "terminal") return "invalid";
-  if (source.id === target.id) return "invalid";
-  if (source.blocks || target.blocks) return "incompatible";
-  if (Boolean(source.private) !== Boolean(target.private)) return "incompatible";
-  if (!sameEnv(source.workspace, target.workspace)) return "incompatible";
-  if (countLeaves(source.paneTree) + countLeaves(target.paneTree) > MAX_PANES_PER_TAB)
-    return "cap";
-  return null;
+  const pair = terminalPair(source, target);
+  if (typeof pair === "string") return pair;
+  return countLeaves(pair.source.paneTree) + countLeaves(pair.target.paneTree) >
+    MAX_PANES_PER_TAB
+    ? "cap"
+    : null;
+}
+
+/** Place a NEW tab so it sits at `gapIndex` within its own space's strip.
+ *  Unlike {@link reorderTabsByGap} the tab is not already in the list, so the
+ *  gap needs no correction for a slot it used to occupy. */
+export function insertTabAtSpaceGap(
+  tabs: Tab[],
+  tab: Tab,
+  gapIndex: number,
+): Tab[] {
+  const sameSpace = tabs.filter((t) => t.spaceId === tab.spaceId);
+  const at = Math.max(0, Math.min(gapIndex, sameSpace.length));
+  const past = at === sameSpace.length;
+  const anchor = past ? sameSpace[at - 1] : sameSpace[at];
+  if (!anchor) return [...tabs, tab];
+  const idx = tabs.findIndex((t) => t.id === anchor.id);
+  const insertAt = past ? idx + 1 : idx;
+  return [...tabs.slice(0, insertAt), tab, ...tabs.slice(insertAt)];
+}
+
+/** Whether `leafId` names a pane that could become a tab of its own: it exists,
+ *  and it is not already alone in its tab (a lone pane IS the tab, so breaking
+ *  it out would change nothing). The precondition of
+ *  {@link breakOutPaneFromTabs}, separate so a caller can answer it before
+ *  spending a tab id on a drop that cannot happen. */
+export function canBreakOutPane(tabs: Tab[], leafId: number): boolean {
+  const src = tabs.find(
+    (t) => t.kind === "terminal" && hasLeaf(t.paneTree, leafId),
+  );
+  return src?.kind === "terminal" && countLeaves(src.paneTree) >= 2;
+}
+
+/** Pull `leafId` out of its split into a brand-new tab with id `newTabId`,
+ *  placed at `gapIndex` in its space's strip. The leaf object moves untouched,
+ *  so its PTY and any managed tmux session travel with it: the caller must NOT
+ *  dispose it and must NOT reap its managed session (`removedManagedSessions`
+ *  compares one tab's tree and would report the still-live pane as gone).
+ *  Null when the leaf is unknown or already alone in its tab. */
+export function breakOutPaneFromTabs(
+  tabs: Tab[],
+  leafId: number,
+  newTabId: number,
+  gapIndex: number,
+): { tabs: Tab[]; undo: BrokenOutPane } | null {
+  const src = tabs.find(
+    (t) => t.kind === "terminal" && hasLeaf(t.paneTree, leafId),
+  );
+  if (src?.kind !== "terminal" || !canBreakOutPane(tabs, leafId)) return null;
+  const leaf = findLeafNode(src.paneTree, leafId);
+  const rest = removeLeaf(src.paneTree, leafId);
+  if (!leaf || rest === null) return null;
+  // No customTitle: that name belongs to the tab the user named, and there are
+  // two tabs now. The new one takes a cwd-derived label like any fresh tab.
+  // Nor the title when it IS the source's tmux session name (a tmux tab sets
+  // both together): the pane leaving is a plain shell that is not in that
+  // session, and labelFor falls back to the title whenever the leaf has no cwd
+  // yet. An SSH tab's title is its host, which does still describe the pane.
+  const born = syncTabToLeaf(
+    {
+      id: newTabId,
+      kind: "terminal",
+      spaceId: src.spaceId,
+      title: src.title === src.tmuxSession ? "shell" : src.title,
+      paneTree: leaf,
+      activeLeafId: leafId,
+      ...(src.workspace && { workspace: src.workspace }),
+      ...(src.private && { private: true as const }),
+      ...(src.blocks && { blocks: true as const }),
+    },
+    leafId,
+  );
+  const without = tabs.map((t) =>
+    t.id === src.id && t.kind === "terminal"
+      ? syncTabToLeaf(
+          { ...t, paneTree: rest },
+          survivingActive(src, rest, leafId),
+        )
+      : t,
+  );
+  return {
+    tabs: insertTabAtSpaceGap(without, born, gapIndex),
+    undo: {
+      tabId: newTabId,
+      leafId,
+      sourceTabId: src.id,
+      prevTree: src.paneTree,
+      prevActiveLeafId: src.activeLeafId,
+    },
+  };
+}
+
+/** Put a broken-out pane back exactly where it came from: the source tab gets
+ *  its recorded layout again, filled with the leaf objects that are live NOW (a
+ *  cwd may have moved on while the toast stood), and the tab the pane was born
+ *  into disappears. Nothing is disposed; the leaf simply changes trees again.
+ *
+ *  Refused when either side has changed shape in the meantime: the new tab grew
+ *  panes of its own, or the old tab was split, closed a pane, or had its panes
+ *  reordered. Restoring over any of that would undo work the user did after the
+ *  drop, which is not what the button promises. */
+export function undoBreakOut(
+  tabs: Tab[],
+  undo: BrokenOutPane,
+): Tab[] | MergeRefusal {
+  const born = tabs.find((t) => t.id === undo.tabId);
+  const src = tabs.find((t) => t.id === undo.sourceTabId);
+  if (born?.kind !== "terminal" || src?.kind !== "terminal") return "invalid";
+  // The whole layout has to match, not just which panes are where in the list:
+  // moving a pane below its neighbor keeps the leaf order but turns a row into
+  // a column, and restoring over that would throw the move away.
+  if (!sameLayout(born.paneTree, { kind: "leaf", id: undo.leafId }))
+    return "invalid";
+  const expected = removeLeaf(undo.prevTree, undo.leafId);
+  if (expected === null || !sameLayout(src.paneTree, expected))
+    return "invalid";
+  // Never leave a space without tabs, which closeTab and closeActivePane also
+  // refuse to do. Only reachable when the source tab was moved to another space
+  // while the toast stood, and the born tab is all its own space has left.
+  if (
+    src.spaceId !== born.spaceId &&
+    tabs.filter((t) => t.spaceId === born.spaceId).length === 1
+  )
+    return "invalid";
+  const restored = withLeavesFrom(undo.prevTree, [src.paneTree, born.paneTree]);
+  return tabs.flatMap((t) => {
+    if (t.id === undo.tabId) return [];
+    if (t.id !== undo.sourceTabId || t.kind !== "terminal") return [t];
+    return [syncTabToLeaf({ ...t, paneTree: restored }, undo.prevActiveLeafId)];
+  });
+}
+
+/** Which pane a tab focuses once `leafId` has left it: the closest neighbor of
+ *  the departed pane when it was the focused one, otherwise nothing changes. */
+function survivingActive(
+  tab: TerminalTab,
+  rest: PaneNode,
+  leafId: number,
+): number {
+  if (tab.activeLeafId !== leafId) return tab.activeLeafId;
+  const remaining = leafIds(rest);
+  const sib = siblingLeafOf(tab.paneTree, leafId);
+  return sib !== null && remaining.includes(sib) ? sib : remaining[0];
+}
+
+/** The space on screen. The store is the authority and answers without the
+ *  one-commit lag of `activeSpaceIdRef`, which an effect writes; the ref stands
+ *  in only before the store is hydrated, when it holds `null`. */
+function visibleSpaceId(fallback: string): string {
+  return useSpaces.getState().activeId ?? fallback;
 }
 
 export function nextActiveInSpace(
@@ -1234,7 +1424,8 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         const source = curr.find((t) => t.id === sourceTabId);
         const target = curr.find((t) => t.id === targetTabId);
         if (canMergeTabs(source, target) !== null) return curr;
-        if (source?.kind !== "terminal" || target?.kind !== "terminal") return curr;
+        if (source?.kind !== "terminal" || target?.kind !== "terminal")
+          return curr;
         const paneTree = attachSubtree(
           target.paneTree,
           target.activeLeafId,
@@ -1243,7 +1434,9 @@ export function useTabs(initial?: Partial<TerminalTab>) {
           newSplitId,
         );
         if (paneTree === target.paneTree) return curr;
-        setActiveId((active) => (active === sourceTabId ? targetTabId : active));
+        setActiveId((active) =>
+          active === sourceTabId ? targetTabId : active,
+        );
         return curr
           .filter((t) => t.id !== sourceTabId)
           .map((t) => {
@@ -1251,10 +1444,112 @@ export function useTabs(initial?: Partial<TerminalTab>) {
             // A live source wakes a still-cold (restored) target.
             const { cold: _cold, ...rest } = t;
             const cold = t.cold && source.cold ? { cold: true } : {};
-            return syncTabToLeaf({ ...rest, paneTree, ...cold }, source.activeLeafId);
+            return syncTabToLeaf(
+              { ...rest, paneTree, ...cold },
+              source.activeLeafId,
+            );
           });
       });
       return null;
+    },
+    [],
+  );
+
+  // Both of these are thin: the transition itself is a pure function above, so
+  // it can be tested without rendering. Both also have to hand their caller a
+  // real answer, because it acts on it (re-keys the pane's agent session and
+  // offers an undo), and neither of the obvious ways can carry one: `tabsRef`
+  // is refreshed by an effect, so it is a commit behind whatever a PTY event
+  // has queued, and React runs an updater eagerly ONLY when nothing is queued,
+  // so a verdict set inside one often arrives after the return.
+  //
+  // `flushSync` settles both at once: the queue is processed here and now, so
+  // the transition sees the true previous state and its verdict is available
+  // to return. Both gestures are one-off (a drop, a toast button), so the extra
+  // synchronous render costs nothing that was not going to happen anyway.
+  const breakOutPane = useCallback(
+    (leafId: number, gapIndex: number): BrokenOutPane | BreakOutRefusal => {
+      let tabId: number | null = null;
+      let result: BrokenOutPane | BreakOutRefusal = "collapsed";
+      // Read once, out here: the updater must answer from `prev` alone, or a
+      // re-invocation would re-read a store that has moved on and decide
+      // differently from the run whose verdict the caller gets.
+      const visible = visibleSpaceId(activeSpaceIdRef.current);
+      flushSync(() => {
+        setTabs((prev) => {
+          const src = prev.find(
+            (t) => t.kind === "terminal" && hasLeaf(t.paneTree, leafId),
+          );
+          // The gap was measured against the strip on screen, and the space
+          // shortcuts keep working during a drag (the listeners are on the
+          // window and never see the keys). If the strip has moved on to
+          // another space, it no longer describes where this pane would go.
+          // The spaces store answers this exactly; `activeSpaceIdRef` is
+          // written by an effect and so lags a switch by a commit, which is
+          // precisely the window being guarded. The ref stands in only before
+          // the store is hydrated, when it holds `null` and knows nothing.
+          // The hit-test suppresses the drop first; this is the backstop.
+          if (src && src.spaceId !== visible) {
+            result = "space-changed";
+            return prev;
+          }
+          // Past every refusal, so none of them burns an id. Cached in the
+          // closure rather than taken fresh, so a repeated run of this updater
+          // reuses the same id instead of minting another.
+          if (!canBreakOutPane(prev, leafId)) return prev;
+          if (tabId === null) tabId = nextIdRef.current++;
+          const born = tabId;
+          const out = breakOutPaneFromTabs(prev, leafId, born, gapIndex);
+          if (!out) return prev;
+          result = out.undo;
+          // Inside the success branch: outside it, a refusal would leave
+          // `activeId` naming a tab that was never created. And only when the
+          // pane's own tab is the one on screen: the tab shortcuts keep working
+          // during a drag as well, and someone who moved on to another tab
+          // should not be pulled back by a pane they stopped looking at.
+          setActiveId((active) => (active === src?.id ? born : active));
+          return out.tabs;
+        });
+      });
+      return result;
+    },
+    [],
+  );
+
+  const undoBreakOutPane = useCallback(
+    (undo: BrokenOutPane): MergeRefusal | null => {
+      let refusal: MergeRefusal | null = null;
+      const visible = visibleSpaceId(activeSpaceIdRef.current);
+      flushSync(() => {
+        setTabs((prev) => {
+          const next = undoBreakOut(prev, undo);
+          if (typeof next === "string") {
+            refusal = next;
+            return prev;
+          }
+          // Functional form, like every other tab-removal path here: an
+          // `activeId` that a queued update is about to change is invisible to
+          // `activeIdRef`, which an effect writes a commit late, and this
+          // flushSync drains that update in the same pass.
+          setActiveId((active) => {
+            // Only when the tab being removed is the one on screen. The pane
+            // going home is no reason to pull the user out of a tab they
+            // switched to while the toast stood.
+            if (active !== undo.tabId) return active;
+            const back = next.find((t) => t.id === undo.sourceTabId);
+            // Following the pane into another space would be worse than
+            // staying, so hand the strip a neighbor instead. The empty-space
+            // refusal above means there is one; the source tab is the fallback
+            // that keeps `activeId` valid should that ever stop holding.
+            if (back?.spaceId === visible) {
+              return undo.sourceTabId;
+            }
+            return nextActiveInSpace(prev, undo.tabId) ?? undo.sourceTabId;
+          });
+          return next;
+        });
+      });
+      return refusal;
     },
     [],
   );
@@ -1402,6 +1697,8 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     splitActivePane,
     movePane,
     mergeTabInto,
+    breakOutPane,
+    undoBreakOutPane,
     closeActivePane,
     closePaneByLeaf,
     resetWorkspace,

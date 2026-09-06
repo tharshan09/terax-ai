@@ -18,6 +18,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import type { SshHost } from "@/modules/workspace/sshHosts";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { usePaneDndStore } from "@/modules/terminal/lib/paneDndStore";
+import { gapIndexAt, TAB_STRIP_ATTR } from "./lib/tabStripGap";
 import { canMergeTabs } from "./lib/useTabs";
 import { fmtShortcut, MOD_KEY, SHIFT_KEY } from "@/lib/platform";
 import { cn } from "@/lib/utils";
@@ -46,7 +48,9 @@ import {
   useEffect,
   useLayoutEffect,
   useRef,
-  useState, useMemo } from "react";
+  useState,
+  useMemo,
+} from "react";
 import { labelFor } from "./lib/tabLabel";
 import type { EditorTab, Tab, TerminalTab } from "./lib/useTabs";
 import { TabActivityIndicator } from "./TabActivityIndicator";
@@ -116,6 +120,21 @@ export function TabBar({
   const [dropTarget, setDropTargetState] = useState<DropTarget>(null);
   const dropGap = dropTarget?.kind === "gap" ? dropTarget.index : null;
   const mergeTargetId = dropTarget?.kind === "merge" ? dropTarget.id : null;
+  // A pane dragged onto the strip breaks out into a tab of its own. It lands in
+  // the same insertion gaps a tab reorder uses, so it reuses the same indicator.
+  const paneDropTab = usePaneDndStore((s) =>
+    s.target?.kind === "newTab" ? s.sourceTabId : null,
+  );
+  const paneDropAt = usePaneDndStore((s) =>
+    s.target?.kind === "newTab" ? s.target.gapIndex : null,
+  );
+  // Only when this strip is the pane's own. The strip lists one space and the
+  // space shortcuts keep working during a drag, so checking at render time is
+  // what keeps a stale target from painting a line in the wrong space.
+  const paneDropGap =
+    paneDropTab !== null && tabs.some((t) => String(t.id) === paneDropTab)
+      ? paneDropAt
+      : null;
   const tabById = useMemo(() => new Map(tabs.map((t) => [t.id, t])), [tabs]);
   const [showAllLanguages, setShowAllLanguages] = useState(false);
   const drag = useRef<{
@@ -183,40 +202,34 @@ export function TabBar({
     }
   }, [pill, pillReady]);
 
-  // One pass over the tab rects decides both gestures: the inner half of a
-  // mergeable terminal tab (pointer still on the strip vertically) is "onto"
-  // it, everything else resolves to the insertion gap by the half-width rule.
+  // The inner half of a mergeable terminal tab (pointer still on the strip
+  // vertically) means "onto" it; everything else resolves to an insertion gap,
+  // via the same helper the pane drag uses so both land in the same place.
   const dropTargetAt = (
     clientX: number,
     clientY: number,
     fromId: number,
     canMerge: boolean,
   ): DropTarget => {
-    const els =
-      scrollRef.current?.querySelectorAll<HTMLElement>("[data-tab-id]") ?? [];
-    let gap = els.length;
-    let gapFound = false;
-    for (let i = 0; i < els.length; i++) {
-      const el = els[i];
-      const r = el.getBoundingClientRect();
-      if (!gapFound && clientX < r.left + r.width / 2) {
-        gap = i;
-        gapFound = true;
-      }
-      if (!canMerge) continue;
-      const id = Number(el.dataset.tabId);
-      if (id === fromId) continue;
-      const inner =
-        clientX >= r.left + r.width / 4 &&
-        clientX <= r.right - r.width / 4 &&
-        clientY >= r.top - MERGE_Y_SLACK &&
-        clientY <= r.bottom + MERGE_Y_SLACK;
-      if (!inner) continue;
-      if (canMergeTabs(tabById.get(fromId), tabById.get(id)) === null) {
-        return { kind: "merge", id };
+    const strip = scrollRef.current;
+    if (!strip) return { kind: "gap", index: 0 };
+    if (canMerge) {
+      for (const el of strip.querySelectorAll<HTMLElement>("[data-tab-id]")) {
+        const id = Number(el.dataset.tabId);
+        if (id === fromId) continue;
+        const r = el.getBoundingClientRect();
+        const inner =
+          clientX >= r.left + r.width / 4 &&
+          clientX <= r.right - r.width / 4 &&
+          clientY >= r.top - MERGE_Y_SLACK &&
+          clientY <= r.bottom + MERGE_Y_SLACK;
+        if (!inner) continue;
+        if (canMergeTabs(tabById.get(fromId), tabById.get(id)) === null) {
+          return { kind: "merge", id };
+        }
       }
     }
-    return { kind: "gap", index: gap };
+    return { kind: "gap", index: gapIndexAt(strip, clientX) };
   };
 
   const endDrag = (currentTarget: HTMLElement) => {
@@ -253,6 +266,7 @@ export function TabBar({
   return (
     <div
       ref={scrollRef}
+      {...{ [TAB_STRIP_ATTR]: "" }}
       data-tauri-drag-region
       className="min-w-0 shrink overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
     >
@@ -288,11 +302,14 @@ export function TabBar({
               const isNew = !firstRender && !seen.has(t.id);
 
               const srcIndex = tabs.findIndex((x) => x.id === draggingId);
+              // A tab drag hides the two gaps that would not move it; a pane
+              // breaking out has no such no-op position, every gap is real.
               const showGap = (gap: number) =>
-                draggingId !== null &&
-                dropGap === gap &&
-                gap !== srcIndex &&
-                gap !== srcIndex + 1;
+                paneDropGap === gap ||
+                (draggingId !== null &&
+                  dropGap === gap &&
+                  gap !== srcIndex &&
+                  gap !== srcIndex + 1);
 
               // While renaming, render a non-button cell so the <input> is not
               // nested inside the trigger <button> (invalid HTML, and WebKit
@@ -336,7 +353,9 @@ export function TabBar({
                     className="size-1.5 shrink-0 rounded-full bg-foreground/70"
                   />
                 ) : t.kind === "terminal" ? (
-                  <TabActivityIndicator paneTree={(t as TerminalTab).paneTree} />
+                  <TabActivityIndicator
+                    paneTree={(t as TerminalTab).paneTree}
+                  />
                 ) : null;
 
               const trigger = (
@@ -369,7 +388,12 @@ export function TabBar({
                     }
                     e.preventDefault();
                     setDropTarget(
-                      dropTargetAt(e.clientX, e.clientY, st.fromId, st.canMerge),
+                      dropTargetAt(
+                        e.clientX,
+                        e.clientY,
+                        st.fromId,
+                        st.canMerge,
+                      ),
                     );
                   }}
                   onPointerUp={(e) => {
@@ -573,7 +597,9 @@ export function TabBar({
                       </span>
                     </span>
                   ) : indicator ? (
-                    <span className="flex shrink-0 items-center">{indicator}</span>
+                    <span className="flex shrink-0 items-center">
+                      {indicator}
+                    </span>
                   ) : null}
                 </TabsTrigger>
               );

@@ -9,6 +9,7 @@ import {
   useRef,
 } from "react";
 import { selectLiveTerminals } from "./lib/liveTerminals";
+import { usePaneDndStore } from "./lib/paneDndStore";
 import { type DropEdge, leafIds } from "./lib/panes";
 import { useTerminalPaneDnd } from "./lib/useTerminalPaneDnd";
 import { PaneTreeView } from "./PaneTreeView";
@@ -28,6 +29,8 @@ type Props = {
     targetLeafId: number,
     edge: DropEdge,
   ) => void;
+  /** A pane dropped on the tab strip becomes a tab of its own at `gapIndex`. */
+  breakOutPane: (sourceLeafId: number, gapIndex: number) => void;
 };
 
 type Bundle = {
@@ -72,6 +75,10 @@ const TerminalTabLayer = memo(function TerminalTabLayer({
         pointerEvents: tabVisible ? "auto" : "none",
       }}
       aria-hidden={!tabVisible}
+      // Marks which tab a pane belongs to, so a pane drag can tell a drop on a
+      // sibling pane from one on a pane that only became reachable because the
+      // active tab changed under it.
+      data-tab-layer={tab.id}
     >
       <PaneTreeView
         node={tab.paneTree}
@@ -96,9 +103,13 @@ function TerminalStackInner({
   onExit,
   onFocusLeaf,
   movePane,
+  breakOutPane,
 }: Props) {
   const terminals = useMemo(() => selectLiveTerminals(tabs), [tabs]);
-  const paneDnd = useTerminalPaneDnd(movePane);
+  const paneDnd = useTerminalPaneDnd({
+    onMove: movePane,
+    onBreakOut: breakOutPane,
+  });
 
   const registerRef = useRef(registerHandle);
   const searchReadyRef = useRef(onSearchReady);
@@ -161,11 +172,18 @@ function TerminalStackInner({
           ref={paneDnd.ghostRef}
           className="pointer-events-none fixed top-0 left-0 z-50 rounded-md border border-primary/50 bg-background/90 px-2 py-1 font-medium text-foreground text-xs shadow-lg backdrop-blur-sm"
         >
-          Move pane
+          <PaneDragGhostLabel />
         </div>
       )}
     </div>
   );
+}
+
+// Subscribes on its own so the label can follow the drop target without
+// re-rendering the whole stack on every pointer move.
+function PaneDragGhostLabel() {
+  const newTab = usePaneDndStore((s) => s.target?.kind === "newTab");
+  return <>{newTab ? "New tab" : "Move pane"}</>;
 }
 
 export const TerminalStack = memo(TerminalStackInner);

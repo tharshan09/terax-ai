@@ -7,11 +7,7 @@ import { cn } from "@/lib/utils";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import type { SearchAddon } from "@xterm/addon-search";
-import {
-  Fragment,
-  memo,
-  type PointerEvent as ReactPointerEvent,
-} from "react";
+import { Fragment, memo, type PointerEvent as ReactPointerEvent } from "react";
 import { useTerminalDropStore } from "./lib/dropStore";
 import { usePaneDndStore } from "./lib/paneDndStore";
 import { type DropEdge, leafIds, type PaneNode } from "./lib/panes";
@@ -212,7 +208,9 @@ const EDGE_POS: Record<DropEdge, string> = {
 // Highlights the half of the target pane where a dragged pane would land.
 function PaneDropOverlay({ leafId }: { leafId: number }) {
   const edge = usePaneDndStore((s) =>
-    s.targetLeafId === leafId ? s.edge : null,
+    s.target?.kind === "pane" && s.target.leafId === leafId
+      ? s.target.edge
+      : null,
   );
   if (!edge) return null;
   return (
