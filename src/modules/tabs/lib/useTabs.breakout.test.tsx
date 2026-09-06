@@ -14,6 +14,7 @@ vi.mock("@/modules/terminal/lib/tmux", () => ({
   isValidSessionName: (n: string) => n.length > 0,
 }));
 
+import { leafIds } from "@/modules/terminal/lib/panes";
 import { useTabs } from "./useTabs";
 
 /** The whole point of these two: `breakOutPane` reports what the state updater
@@ -144,5 +145,30 @@ describe("useTabs break-out through React", () => {
       hook.result.current.undoBreakOutPane(record);
     });
     expect(exists()).toBe(true);
+  });
+
+  it("leaves the focus alone when the user moved on before undoing", () => {
+    const { hook, tabId, leafId } = splitTab();
+    let undo = null as ReturnType<typeof hook.result.current.breakOutPane>;
+    act(() => {
+      undo = hook.result.current.breakOutPane(leafId, 0);
+    });
+    if (!undo) throw new Error("expected a break-out");
+    const record = undo;
+    // The user switches to another tab while the toast still stands.
+    let other = 0;
+    act(() => {
+      other = hook.result.current.newTab();
+    });
+    expect(hook.result.current.activeId).toBe(other);
+    act(() => {
+      hook.result.current.undoBreakOutPane(record);
+    });
+    // The pane went home, but the tab being worked in was untouched by it.
+    expect(hook.result.current.activeId).toBe(other);
+    const src = hook.result.current.tabs.find((t) => t.id === tabId);
+    const home = src?.kind === "terminal" ? leafIds(src.paneTree) : [];
+    expect(home).toHaveLength(2);
+    expect(home).toContain(leafId);
   });
 });

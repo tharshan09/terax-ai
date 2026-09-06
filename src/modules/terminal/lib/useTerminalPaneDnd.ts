@@ -127,7 +127,17 @@ export function useTerminalPaneDnd({ onMove, onBreakOut }: Handlers) {
     [],
   );
 
-  useEffect(() => () => cleanupRef.current?.(), []);
+  // Unmounting mid-drag drops the listeners; the shared drop target has to go
+  // with them, or the tab strip keeps painting an insertion line for a drag
+  // that no longer exists.
+  useEffect(
+    () => () => {
+      if (!cleanupRef.current) return;
+      cleanupRef.current();
+      usePaneDndStore.getState().setDrag(null);
+    },
+    [],
+  );
 
   return { ghostRef, dragging, startDrag };
 }

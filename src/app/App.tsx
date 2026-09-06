@@ -1169,12 +1169,12 @@ export default function App() {
     (leafId: number, gapIndex: number) => {
       const undo = breakOutPane(leafId, gapIndex);
       if (!undo) {
-        // The indicator and the ghost have already promised a new tab, so a
-        // refusal must say so rather than swallow the gesture. Unreachable
-        // today (the drag handle only exists inside a split), but the moment
-        // breakOutPaneFromTabs grows a refusal, this is what keeps the drop
-        // from becoming a silent no-op.
-        toast.error("That pane cannot become a tab of its own");
+        // Reachable: the drag lasts as long as the user holds the button, and
+        // a shell exiting in that time collapses the split under it (either
+        // the sibling, leaving this pane alone, or the pane itself). The ghost
+        // and the insertion indicator have already promised a new tab, so say
+        // what happened rather than swallow the gesture.
+        toast.error("The split closed while you were dragging");
         return;
       }
       useAgentStore.getState().moveLeavesToTab([leafId], undo.tabId);
@@ -1184,7 +1184,10 @@ export default function App() {
           label: "Undo",
           onClick: () => {
             if (undoBreakOutPane(undo) !== null) {
-              toast.error("That pane cannot go back: the layout has changed");
+              // One refusal covers several reasons (the layout moved on, a
+              // pane closed, the old tab left for another space), so the
+              // wording stays true to all of them.
+              toast.error("That pane cannot go back any more");
               return;
             }
             useAgentStore

@@ -1467,19 +1467,20 @@ export function useTabs(initial?: Partial<TerminalTab>) {
             refusal = next;
             return prev;
           }
-          // The focus follows the pane home. If the user has moved to another
-          // space meanwhile, staying put is friendlier than being yanked over
-          // there, but the tab being removed may be the active one, so the
-          // strip needs someone else to mark.
-          const back = next.find((t) => t.id === undo.sourceTabId);
-          if (back?.spaceId === activeSpaceIdRef.current) {
-            setActiveId(undo.sourceTabId);
-          } else if (activeIdRef.current === undo.tabId) {
-            // The tab being removed is the one on screen, and its pane went
-            // home to another space. undoBreakOut has already refused the case
-            // where this space would be emptied, so a neighbor exists here.
-            const fallback = nextActiveInSpace(prev, undo.tabId);
-            if (fallback !== null) setActiveId(fallback);
+          // Only when the tab being removed is the one on screen. The pane
+          // going home is no reason to pull the user out of a tab they
+          // switched to while the toast stood.
+          if (activeIdRef.current === undo.tabId) {
+            const back = next.find((t) => t.id === undo.sourceTabId);
+            if (back?.spaceId === activeSpaceIdRef.current) {
+              setActiveId(undo.sourceTabId);
+            } else {
+              // The pane went home to another space, where following it would
+              // be worse than staying. undoBreakOut has already refused the
+              // case that would empty this space, so a neighbor exists.
+              const fallback = nextActiveInSpace(prev, undo.tabId);
+              if (fallback !== null) setActiveId(fallback);
+            }
           }
           return next;
         });

@@ -235,6 +235,10 @@ folgt der aktive Tab mit.
 - Tauschen: derselbe Pane, nur an anderer Stelle. Nichts zu tun.
 - Ausbrechen: neuer Tab wird aktiv, sein `activeLeafId` ist der ausgebrochene Pane.
   Der Quelltab bekommt `siblingLeafOf` als neuen Fokus, wie beim Schliessen.
+- Rueckgaengig: der Fokus geht nur dann mit dem Pane heim, wenn der Tab, der dabei
+  verschwindet, gerade der sichtbare ist. Wer waehrend der sechs Sekunden in einen
+  anderen Tab gewechselt ist, bleibt dort. Der heimkehrende Pane ist kein Grund, ihn
+  aus seiner Arbeit zu reissen.
 - Tab zu Tab: Zieltab bleibt aktiv, Fokus auf dem angekommenen Pane. Der Quelltab
   faellt auf `siblingLeafOf` zurueck; war es sein letzter Pane, verschwindet er.
 
