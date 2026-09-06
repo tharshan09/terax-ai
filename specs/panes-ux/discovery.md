@@ -181,6 +181,12 @@ von beiden gehoeren. Traegt nur der Fueller die Markierung, verpufft ein Drop in
 diesen Baendern stillschweigend. Also traegt die Zeile sie (`TAB_STRIP_ZONE_ATTR`),
 und jeder Drop darin loest sich zu einer Luecke in der Leiste auf.
 
+Ein Drag dauert, solange die Taste gehalten wird, und in dieser Zeit steht die Welt
+nicht still. Zwei Faelle brechen ihn ab, statt etwas Falsches zu tun: die Shell des
+Panes oder seines Nachbarn endet und laesst den Split zusammenfallen, oder der Nutzer
+wechselt per Tastenkuerzel den Space, womit die gemessene Luecke zu einer anderen
+Leiste gehoert als der Pane. Beide sagen es und lassen alles, wie es war.
+
 Mit einer Ausnahme: der **Space-Wechsler** links ist ausgeschnitten
 (`TAB_STRIP_ZONE_OFF_ATTR`). Genau dort zielt man hin, wenn etwas in einen ANDEREN
 Space soll, und er nimmt bereits gezogene Tabs entgegen. Ein Pane, der dort landet,

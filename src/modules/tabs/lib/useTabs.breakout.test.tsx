@@ -15,6 +15,7 @@ vi.mock("@/modules/terminal/lib/tmux", () => ({
 }));
 
 import { leafIds } from "@/modules/terminal/lib/panes";
+import type { BreakOutRefusal, BrokenOutPane } from "./useTabs";
 import { useTabs } from "./useTabs";
 
 /** The whole point of these two: `breakOutPane` reports what the state updater
@@ -24,6 +25,20 @@ import { useTabs } from "./useTabs";
  *  would half-work in a way no pure-function test could see. */
 describe("useTabs break-out through React", () => {
   afterEach(cleanup);
+
+  /** Break a pane out and hand back the undo record, narrowed. */
+  function breakOut(
+    hook: ReturnType<typeof renderHook<ReturnType<typeof useTabs>, unknown>>,
+    leafId: number,
+    gap = 0,
+  ): BrokenOutPane {
+    let out: BrokenOutPane | BreakOutRefusal = "collapsed";
+    act(() => {
+      out = hook.result.current.breakOutPane(leafId, gap);
+    });
+    if (typeof out === "string") throw new Error(`refused: ${out}`);
+    return out;
+  }
 
   function splitTab() {
     const hook = renderHook(() => useTabs());
@@ -38,15 +53,11 @@ describe("useTabs break-out through React", () => {
 
   it("reports the break-out it committed, and switches to the new tab", () => {
     const { hook, leafId } = splitTab();
-    let undo = null as ReturnType<typeof hook.result.current.breakOutPane>;
-    act(() => {
-      undo = hook.result.current.breakOutPane(leafId, 0);
-    });
-    expect(undo).not.toBeNull();
+    const record = breakOut(hook, leafId);
     expect(hook.result.current.tabs).toHaveLength(2);
-    expect(hook.result.current.activeId).toBe(undo?.tabId);
+    expect(hook.result.current.activeId).toBe(record.tabId);
     // The pane is alone in the new tab, and gone from the old one.
-    const born = hook.result.current.tabs.find((t) => t.id === undo?.tabId);
+    const born = hook.result.current.tabs.find((t) => t.id === record.tabId);
     expect(born?.kind === "terminal" && born.paneTree).toEqual({
       kind: "leaf",
       id: leafId,
@@ -61,11 +72,11 @@ describe("useTabs break-out through React", () => {
       only.kind === "terminal" && only.paneTree.kind === "leaf"
         ? only.paneTree.id
         : -1;
-    let undo = null as ReturnType<typeof hook.result.current.breakOutPane>;
+    let out: BrokenOutPane | BreakOutRefusal = "space-changed";
     act(() => {
-      undo = hook.result.current.breakOutPane(leafId, 0);
+      out = hook.result.current.breakOutPane(leafId, 0);
     });
-    expect(undo).toBeNull();
+    expect(out).toBe("collapsed");
     expect(hook.result.current.tabs).toHaveLength(1);
   });
 
@@ -73,12 +84,7 @@ describe("useTabs break-out through React", () => {
     const { hook, tabId, leafId } = splitTab();
     const before = hook.result.current.tabs.find((t) => t.id === tabId);
     const layout = before?.kind === "terminal" ? before.paneTree : null;
-    let undo = null as ReturnType<typeof hook.result.current.breakOutPane>;
-    act(() => {
-      undo = hook.result.current.breakOutPane(leafId, 0);
-    });
-    if (!undo) throw new Error("expected a break-out");
-    const record = undo;
+    const record = breakOut(hook, leafId);
     let refusal: string | null = null;
     act(() => {
       refusal = hook.result.current.undoBreakOutPane(record);
@@ -92,12 +98,7 @@ describe("useTabs break-out through React", () => {
 
   it("refuses to undo over a layout the user changed after the drop", () => {
     const { hook, tabId, leafId } = splitTab();
-    let undo = null as ReturnType<typeof hook.result.current.breakOutPane>;
-    act(() => {
-      undo = hook.result.current.breakOutPane(leafId, 0);
-    });
-    if (!undo) throw new Error("expected a break-out");
-    const record = undo;
+    const record = breakOut(hook, leafId);
     act(() => {
       hook.result.current.splitActivePane(tabId, "col");
     });
@@ -111,12 +112,7 @@ describe("useTabs break-out through React", () => {
 
   it("refuses to undo a pane whose tab is already gone", () => {
     const { hook, leafId } = splitTab();
-    let undo = null as ReturnType<typeof hook.result.current.breakOutPane>;
-    act(() => {
-      undo = hook.result.current.breakOutPane(leafId, 0);
-    });
-    if (!undo) throw new Error("expected a break-out");
-    const record = undo;
+    const record = breakOut(hook, leafId);
     // The broken-out pane's shell exits while the toast still stands.
     act(() => {
       hook.result.current.closePaneByLeaf(record.leafId);
@@ -134,12 +130,7 @@ describe("useTabs break-out through React", () => {
       hook.result.current.tabs.some(
         (t) => t.id === hook.result.current.activeId,
       );
-    let undo = null as ReturnType<typeof hook.result.current.breakOutPane>;
-    act(() => {
-      undo = hook.result.current.breakOutPane(leafId, 0);
-    });
-    if (!undo) throw new Error("expected a break-out");
-    const record = undo;
+    const record = breakOut(hook, leafId);
     expect(exists()).toBe(true);
     act(() => {
       hook.result.current.undoBreakOutPane(record);
@@ -149,12 +140,7 @@ describe("useTabs break-out through React", () => {
 
   it("leaves the focus alone when the user moved on before undoing", () => {
     const { hook, tabId, leafId } = splitTab();
-    let undo = null as ReturnType<typeof hook.result.current.breakOutPane>;
-    act(() => {
-      undo = hook.result.current.breakOutPane(leafId, 0);
-    });
-    if (!undo) throw new Error("expected a break-out");
-    const record = undo;
+    const record = breakOut(hook, leafId);
     // The user switches to another tab while the toast still stands.
     let other = 0;
     act(() => {
@@ -170,5 +156,21 @@ describe("useTabs break-out through React", () => {
     const home = src?.kind === "terminal" ? leafIds(src.paneTree) : [];
     expect(home).toHaveLength(2);
     expect(home).toContain(leafId);
+  });
+
+  it("refuses when the user changed space mid-drag", () => {
+    const { hook, leafId } = splitTab();
+    // The space shortcuts keep working while a pane is being dragged, so the
+    // strip the drop is measured against can belong to another space by the
+    // time the button comes up.
+    act(() => {
+      hook.result.current.setActiveSpaceForNewTabs("elsewhere");
+    });
+    let out: BrokenOutPane | BreakOutRefusal = "collapsed";
+    act(() => {
+      out = hook.result.current.breakOutPane(leafId, 0);
+    });
+    expect(out).toBe("space-changed");
+    expect(hook.result.current.tabs).toHaveLength(1);
   });
 });

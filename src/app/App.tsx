@@ -1168,13 +1168,16 @@ export default function App() {
   const handleBreakOutPane = useCallback(
     (leafId: number, gapIndex: number) => {
       const undo = breakOutPane(leafId, gapIndex);
-      if (!undo) {
-        // Reachable: the drag lasts as long as the user holds the button, and
-        // a shell exiting in that time collapses the split under it (either
-        // the sibling, leaving this pane alone, or the pane itself). The ghost
-        // and the insertion indicator have already promised a new tab, so say
-        // what happened rather than swallow the gesture.
-        toast.error("The split closed while you were dragging");
+      // Both refusals come from the ground moving under a drag that lasts as
+      // long as the user holds the button. The ghost and the insertion
+      // indicator have already promised a new tab, so say what happened rather
+      // than swallow the gesture.
+      if (typeof undo === "string") {
+        toast.error(
+          undo === "space-changed"
+            ? "You changed space while dragging, so the pane stayed put"
+            : "The split closed while you were dragging",
+        );
         return;
       }
       useAgentStore.getState().moveLeavesToTab([leafId], undo.tabId);

@@ -241,6 +241,12 @@ export function syncTabToLeaf(tab: TerminalTab, leafId: number): TerminalTab {
 
 export type MergeRefusal = "cap" | "incompatible" | "invalid";
 
+/** Why a pane did not become a tab of its own. `collapsed`: the split it came
+ *  from closed under the drag (a shell exited, either the pane's own or its
+ *  sibling's). `space-changed`: the user switched space while dragging, so the
+ *  strip the drop was measured against is no longer the pane's own. */
+export type BreakOutRefusal = "collapsed" | "space-changed";
+
 /** What a break-out leaves behind so it can be undone: the pane, the tab it was
  *  born into, and the source tab's layout as it stood. The whole tree, not just
  *  the neighbor it sat against: re-attaching to a neighbor restores the side but
@@ -1438,21 +1444,32 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   // to return. Both gestures are one-off (a drop, a toast button), so the extra
   // synchronous render costs nothing that was not going to happen anyway.
   const breakOutPane = useCallback(
-    (leafId: number, gapIndex: number): BrokenOutPane | null => {
+    (leafId: number, gapIndex: number): BrokenOutPane | BreakOutRefusal => {
       const tabId = nextIdRef.current++;
-      let undo: BrokenOutPane | null = null;
+      let result: BrokenOutPane | BreakOutRefusal = "collapsed";
       flushSync(() => {
         setTabs((prev) => {
+          const src = prev.find(
+            (t) => t.kind === "terminal" && hasLeaf(t.paneTree, leafId),
+          );
+          // The gap was measured against the strip on screen, and the space
+          // shortcuts keep working during a drag (the listeners are on the
+          // window and never see the keys). If the strip has moved on to
+          // another space, it no longer describes where this pane would go.
+          if (src && src.spaceId !== activeSpaceIdRef.current) {
+            result = "space-changed";
+            return prev;
+          }
           const out = breakOutPaneFromTabs(prev, leafId, tabId, gapIndex);
           if (!out) return prev;
-          undo = out.undo;
+          result = out.undo;
           // Inside the success branch: outside it, a refusal would leave
           // `activeId` naming a tab that was never created.
           setActiveId(tabId);
           return out.tabs;
         });
       });
-      return undo;
+      return result;
     },
     [],
   );
