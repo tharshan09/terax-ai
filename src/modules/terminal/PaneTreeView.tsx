@@ -165,7 +165,18 @@ export const PaneTreeView = memo(function PaneTreeViewImpl(props: Props) {
                 className={dividerActive ? "bg-primary/70" : undefined}
               />
             )}
-            <ResizablePanel id={`pane-slot-${slotId}`} minSize="10%">
+            {/* Two namespaces, because a split subtree is named after its
+                first leaf's slot and that leaf's own panel carries the same
+                slot: one id string would put it on two elements at once, and
+                the separator's aria-controls resolves ids document-wide. */}
+            <ResizablePanel
+              id={
+                child.kind === "split"
+                  ? `pane-group-${slotId}`
+                  : `pane-slot-${slotId}`
+              }
+              minSize="10%"
+            >
               <PaneTreeView {...props} node={child} split />
             </ResizablePanel>
           </Fragment>
