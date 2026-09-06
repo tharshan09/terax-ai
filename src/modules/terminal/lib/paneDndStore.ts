@@ -5,10 +5,15 @@ import type { DropEdge } from "./panes";
  *  pane is inserted there, or in its middle, meaning the two trade places. */
 export type PaneDropSpot = DropEdge | "center";
 
+/** How the two panes of a swap are laid out relative to each other, so the
+ *  glyph can point the way they will actually trade. Only meaningful when the
+ *  spot is the middle. */
+export type SwapAxis = "horizontal" | "vertical";
+
 /** Where a dragged pane would land: on another pane (edge or middle), or as a
  *  new tab at an insertion gap in the tab strip. */
 export type PaneDropTarget =
-  | { kind: "pane"; leafId: number; spot: PaneDropSpot }
+  | { kind: "pane"; leafId: number; spot: PaneDropSpot; axis?: SwapAxis }
   | { kind: "newTab"; gapIndex: number };
 
 // Drop-target state for pane drag & drop, mirrored into the pane overlays and
@@ -33,7 +38,7 @@ function sameTarget(
   if (a === b) return true;
   if (a === null || b === null) return false;
   if (a.kind === "pane" && b.kind === "pane")
-    return a.leafId === b.leafId && a.spot === b.spot;
+    return a.leafId === b.leafId && a.spot === b.spot && a.axis === b.axis;
   if (a.kind === "newTab" && b.kind === "newTab")
     return a.gapIndex === b.gapIndex;
   return false;

@@ -9,6 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type PaneDropSpot,
   type PaneDropTarget,
+  type SwapAxis,
   usePaneDndStore,
 } from "./paneDndStore";
 import type { DropEdge } from "./panes";
@@ -53,6 +54,20 @@ export function spotAt(el: HTMLElement, x: number, y: number): PaneDropSpot {
  *  Offering that drop would highlight an edge and then do nothing. */
 export function paneLayerOf(el: Element | null | undefined): string | null {
   return el?.closest<HTMLElement>("[data-tab-layer]")?.dataset.tabLayer ?? null;
+}
+
+/**
+ * Whether two panes sit side by side or stacked. Taken from the boxes rather
+ * than from the tree, because what the glyph has to match is what the user
+ * sees. The rects are not zoom-patched, but they are only ever compared with
+ * each other, so the factor cancels.
+ */
+export function swapAxisBetween(a: HTMLElement, b: HTMLElement): SwapAxis {
+  const ra = a.getBoundingClientRect();
+  const rb = b.getBoundingClientRect();
+  const dx = Math.abs(ra.left + ra.right - (rb.left + rb.right));
+  const dy = Math.abs(ra.top + ra.bottom - (rb.top + rb.bottom));
+  return dx >= dy ? "horizontal" : "vertical";
 }
 
 type Handlers = {
@@ -111,6 +126,8 @@ export function useTerminalPaneDnd({ onMove, onSwap, onBreakOut }: Handlers) {
       cleanupRef.current?.();
       const pointerId = e.pointerId;
       const sourceLayer = paneLayerOf(e.currentTarget);
+      const sourceLeafEl =
+        e.currentTarget.closest<HTMLElement>("[data-pane-leaf]");
       const sx = e.clientX;
       const sy = e.clientY;
       let active = false;
@@ -142,10 +159,15 @@ export function useTerminalPaneDnd({ onMove, onSwap, onBreakOut }: Handlers) {
           id !== sourceLeafId &&
           paneLayerOf(leafEl) === sourceLayer
         ) {
+          const spot = spotAt(leafEl, ev.clientX, ev.clientY);
           target = {
             kind: "pane",
             leafId: id,
-            spot: spotAt(leafEl, ev.clientX, ev.clientY),
+            spot,
+            ...(spot === "center" &&
+              sourceLeafEl && {
+                axis: swapAxisBetween(sourceLeafEl, leafEl),
+              }),
           };
         } else {
           const strip = tabStripAt(under);

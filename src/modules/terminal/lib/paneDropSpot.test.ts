@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/zoomResizeFix", () => ({ getResizeZoomFactor: () => 1 }));
 
-import { spotAt } from "./useTerminalPaneDnd";
+import { spotAt, swapAxisBetween } from "./useTerminalPaneDnd";
 
 /** A pane at (0,0) 300x300, so a third is exactly 100px. */
 function pane(): HTMLElement {
@@ -48,5 +48,42 @@ describe("spotAt", () => {
     expect(["top", "left"]).toContain(spotAt(el, 20, 20));
     expect(spotAt(el, 20, 60)).toBe("left");
     expect(spotAt(el, 60, 20)).toBe("top");
+  });
+});
+
+describe("swapAxisBetween", () => {
+  const box = (left: number, top: number, w = 100, h = 100): HTMLElement => {
+    const el = document.createElement("div");
+    el.getBoundingClientRect = () =>
+      ({
+        left,
+        top,
+        right: left + w,
+        bottom: top + h,
+        width: w,
+        height: h,
+      }) as DOMRect;
+    return el;
+  };
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("calls two panes beside each other horizontal", () => {
+    expect(swapAxisBetween(box(0, 0), box(200, 0))).toBe("horizontal");
+    expect(swapAxisBetween(box(200, 0), box(0, 0))).toBe("horizontal");
+  });
+
+  it("calls two panes above each other vertical", () => {
+    expect(swapAxisBetween(box(0, 0), box(0, 200))).toBe("vertical");
+    expect(swapAxisBetween(box(0, 200), box(0, 0))).toBe("vertical");
+  });
+
+  it("takes the larger separation when a pair is offset both ways", () => {
+    // Mostly side by side, slightly staggered.
+    expect(swapAxisBetween(box(0, 0), box(300, 40))).toBe("horizontal");
+    // Mostly stacked, slightly staggered.
+    expect(swapAxisBetween(box(0, 0), box(40, 300))).toBe("vertical");
   });
 });

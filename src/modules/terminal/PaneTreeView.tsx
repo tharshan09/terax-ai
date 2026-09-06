@@ -6,7 +6,10 @@ import {
 import { cn } from "@/lib/utils";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { WorkspaceEnv } from "@/modules/workspace";
-import { ArrowDataTransferHorizontalIcon } from "@hugeicons/core-free-icons";
+import {
+  ArrowDataTransferHorizontalIcon,
+  ArrowDataTransferVerticalIcon,
+} from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type { SearchAddon } from "@xterm/addon-search";
 import { Fragment, memo, type PointerEvent as ReactPointerEvent } from "react";
@@ -231,6 +234,11 @@ function PaneDropOverlay({ leafId }: { leafId: number }) {
       s.target.spot === "center" &&
       s.sourceLeafId === leafId,
   );
+  // The pair may sit side by side or stacked; the glyph points the way they
+  // will actually trade.
+  const stacked = usePaneDndStore(
+    (s) => s.target?.kind === "pane" && s.target.axis === "vertical",
+  );
   if (spot === "center" || swapPartner) {
     return (
       <div className="pointer-events-none absolute inset-0 z-[19]">
@@ -245,7 +253,11 @@ function PaneDropOverlay({ leafId }: { leafId: number }) {
           {spot === "center" && (
             <span className="rounded-full bg-background/85 p-2 text-primary shadow-sm backdrop-blur-sm">
               <HugeiconsIcon
-                icon={ArrowDataTransferHorizontalIcon}
+                icon={
+                  stacked
+                    ? ArrowDataTransferVerticalIcon
+                    : ArrowDataTransferHorizontalIcon
+                }
                 size={22}
                 strokeWidth={2}
               />
