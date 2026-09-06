@@ -71,8 +71,8 @@ export function swapAxisBetween(a: HTMLElement, b: HTMLElement): SwapAxis {
 }
 
 /** The pair's axis, or undefined when the source pane is not on screen to be
- *  measured. The overlay then keeps whichever glyph it had, rather than being
- *  handed a direction nobody computed. */
+ *  measured. The overlay draws no glyph at all then, rather than falling back
+ *  to one direction and promising a trade that may go the other way. */
 function axisFrom(a: HTMLElement | null, b: HTMLElement): SwapAxis | undefined {
   return a ? swapAxisBetween(a, b) : undefined;
 }

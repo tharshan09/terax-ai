@@ -252,9 +252,11 @@ function PaneDropOverlay({ leafId }: { leafId: number }) {
       s.sourceLeafId === leafId,
   );
   // The pair may sit side by side or stacked; the glyph points the way they
-  // will actually trade.
-  const stacked = usePaneDndStore(
-    (s) => s.target?.kind === "pane" && s.target.axis === "vertical",
+  // will actually trade. Null when the source pane could not be measured, and
+  // then no glyph is drawn at all: the frames still name the pair, which is the
+  // part that matters, and guessing a direction is what this exists to avoid.
+  const axis = usePaneDndStore((s) =>
+    s.target?.kind === "pane" ? (s.target.axis ?? null) : null,
   );
   if (spot === "center" || swapPartner) {
     return (
@@ -267,11 +269,11 @@ function PaneDropOverlay({ leafId }: { leafId: number }) {
             spot === "center" ? "bg-primary/10" : "border-dashed",
           )}
         >
-          {spot === "center" && (
+          {spot === "center" && axis !== null && (
             <span className="rounded-full bg-background/85 p-2 text-primary shadow-sm backdrop-blur-sm">
               <HugeiconsIcon
                 icon={
-                  stacked
+                  axis === "vertical"
                     ? ArrowDataTransferVerticalIcon
                     : ArrowDataTransferHorizontalIcon
                 }
