@@ -260,8 +260,10 @@ Kein `Cmd+Z`. In einem Terminal ist das eine Taste, die in die Shell gehoert.
 
 Stattdessen ein Toast mit Knopf, sechs Sekunden, und nur bei den beiden Operationen,
 die eine Tab-Grenze ueberschreiten: **Ausbrechen** und **Tab zu Tab**. Dort ist der
-Pane nach einem Fehlgriff aus dem Blick, und die Rueckabwicklung ist exakt: derselbe
-Leaf zurueck an denselben Ziel-Leaf auf dieselbe Kante.
+Pane nach einem Fehlgriff aus dem Blick. Die Rueckabwicklung merkt sich den Nachbarn
+und die Seite (`panes.leafAnchor`) und haengt denselben Leaf dort wieder an. Sass der
+Pane neben einem Pane, ist das exakt; sass er neben einem tieferen Teilbaum, stimmt
+die Seite, aber nicht zwingend die alten Proportionen.
 
 Innerhalb eines Tabs braucht es nichts. Der Pane ist sichtbar, und die Geste ist in
 einer Sekunde wiederholt. Tauschen ist ohnehin selbstinvers.
