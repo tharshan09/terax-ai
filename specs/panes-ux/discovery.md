@@ -194,6 +194,13 @@ behandelt, je nachdem was tatsaechlich kaputt geht:
   aber **ohne den Fokus zu holen**. Wer weitergezogen ist, wird nicht von einem Pane
   zurueckgerissen, den er nicht mehr ansieht. Dieselbe Regel gilt beim Rueckgaengig.
 
+Und das Gegenstueck auf der Pane-Seite: wechselt der aktive Tab mitten im Drag, wird
+die Ebene des neuen Tabs anklickbar und seine Panes tauchen im Hit-Test auf. Ein Drop
+dort kann nicht gelingen, `movePane` verlangt beide Leaves im selben Tab. Also wird er
+gar nicht erst angeboten (`paneLayerOf`), statt eine Kante hervorzuheben und beim
+Loslassen nichts zu tun. Das ist die Hausregel aus `canMergeTabs`: ein unmoegliches
+Ziel darf nicht aufleuchten.
+
 Mit einer Ausnahme: der **Space-Wechsler** links ist ausgeschnitten
 (`TAB_STRIP_ZONE_OFF_ATTR`). Genau dort zielt man hin, wenn etwas in einen ANDEREN
 Space soll, und er nimmt bereits gezogene Tabs entgegen. Ein Pane, der dort landet,

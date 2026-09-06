@@ -75,6 +75,10 @@ const TerminalTabLayer = memo(function TerminalTabLayer({
         pointerEvents: tabVisible ? "auto" : "none",
       }}
       aria-hidden={!tabVisible}
+      // Marks which tab a pane belongs to, so a pane drag can tell a drop on a
+      // sibling pane from one on a pane that only became reachable because the
+      // active tab changed under it.
+      data-tab-layer={tab.id}
     >
       <PaneTreeView
         node={tab.paneTree}

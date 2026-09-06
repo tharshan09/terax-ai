@@ -24,6 +24,15 @@ function edgeAt(el: HTMLElement, x: number, y: number): DropEdge {
   );
 }
 
+/** Which tab's layer `el` sits in, or null outside any. A pane can only move
+ *  next to a pane in the SAME tab, and an inactive layer is normally
+ *  unreachable anyway — but the tab and space shortcuts keep working while the
+ *  button is held, so another tab's panes can become hit-testable mid-drag.
+ *  Offering that drop would highlight an edge and then do nothing. */
+export function paneLayerOf(el: Element | null | undefined): string | null {
+  return el?.closest<HTMLElement>("[data-tab-layer]")?.dataset.tabLayer ?? null;
+}
+
 type Handlers = {
   /** Drop landed on another pane: move the leaf beside it, on `edge`. */
   onMove: (sourceLeafId: number, targetLeafId: number, edge: DropEdge) => void;
@@ -74,6 +83,7 @@ export function useTerminalPaneDnd({ onMove, onBreakOut }: Handlers) {
       // both and commit twice; abort the older drag rather than run two.
       cleanupRef.current?.();
       const pointerId = e.pointerId;
+      const sourceLayer = paneLayerOf(e.currentTarget);
       const sx = e.clientX;
       const sy = e.clientY;
       let active = false;
@@ -92,7 +102,12 @@ export function useTerminalPaneDnd({ onMove, onBreakOut }: Handlers) {
         const under = document.elementFromPoint(ev.clientX, ev.clientY);
         const leafEl = under?.closest<HTMLElement>("[data-pane-leaf]");
         const id = leafEl ? Number(leafEl.dataset.paneLeaf) : Number.NaN;
-        if (leafEl && Number.isFinite(id) && id !== sourceLeafId) {
+        if (
+          leafEl &&
+          Number.isFinite(id) &&
+          id !== sourceLeafId &&
+          paneLayerOf(leafEl) === sourceLayer
+        ) {
           target = {
             kind: "pane",
             leafId: id,
