@@ -122,9 +122,19 @@ export function TabBar({
   const mergeTargetId = dropTarget?.kind === "merge" ? dropTarget.id : null;
   // A pane dragged onto the strip breaks out into a tab of its own. It lands in
   // the same insertion gaps a tab reorder uses, so it reuses the same indicator.
-  const paneDropGap = usePaneDndStore((s) =>
+  const paneDropTab = usePaneDndStore((s) =>
+    s.target?.kind === "newTab" ? s.sourceTabId : null,
+  );
+  const paneDropAt = usePaneDndStore((s) =>
     s.target?.kind === "newTab" ? s.target.gapIndex : null,
   );
+  // Only when this strip is the pane's own. The strip lists one space and the
+  // space shortcuts keep working during a drag, so checking at render time is
+  // what keeps a stale target from painting a line in the wrong space.
+  const paneDropGap =
+    paneDropTab !== null && tabs.some((t) => String(t.id) === paneDropTab)
+      ? paneDropAt
+      : null;
   const tabById = useMemo(() => new Map(tabs.map((t) => [t.id, t])), [tabs]);
   const [showAllLanguages, setShowAllLanguages] = useState(false);
   const drag = useRef<{

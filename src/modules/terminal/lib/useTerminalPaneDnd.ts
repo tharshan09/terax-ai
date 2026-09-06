@@ -100,7 +100,7 @@ export function useTerminalPaneDnd({ onMove, onBreakOut }: Handlers) {
           if (Math.hypot(ev.clientX - sx, ev.clientY - sy) < THRESHOLD) return;
           active = true;
           setDragging(true);
-          store.setDrag(sourceLeafId);
+          store.setDrag(sourceLeafId, sourceLayer);
         }
         placeGhost(ev.clientX, ev.clientY);
         const under = document.elementFromPoint(ev.clientX, ev.clientY);
@@ -148,7 +148,13 @@ export function useTerminalPaneDnd({ onMove, onBreakOut }: Handlers) {
         }
       };
       const up = (ev: PointerEvent) => {
-        if (ev.pointerId === pointerId) end(true);
+        if (ev.pointerId !== pointerId) return;
+        // Re-read what is under the pointer before committing. The target is
+        // otherwise only computed on movement, and the world does not hold
+        // still while a button is held: a space shortcut or a closing tab can
+        // make the remembered target point somewhere it no longer belongs.
+        move(ev);
+        end(true);
       };
       const cancel = (ev: PointerEvent) => {
         if (ev.pointerId === pointerId) end(false);

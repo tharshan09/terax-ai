@@ -203,7 +203,18 @@ Ziel darf nicht aufleuchten.
 - Leisten-Ziel: die Leiste zeigt einen Space. Steht der Tab des Panes nicht darin, sagt
   sie nichts darueber, wohin der Pane gehoert. Sie leuchtet nicht auf (`stripHasTab`).
 
-Der Wachposten in `breakOutPane` bleibt als zweite Reihe. Er liest den sichtbaren Space
+Beides darf sich aber nicht darauf verlassen, dass der Zeiger sich bewegt. Wer die
+Taste haelt und stillhaelt, waehrend sich die Welt aendert, haette sonst ein Ziel von
+vorhin vor sich. Deshalb zwei Dinge:
+
+- Beim Loslassen wird noch einmal nachgesehen, was unter dem Zeiger liegt. Das faengt
+  auch den Fall ab, dass ein Tab derselben Leiste inzwischen zugegangen ist und die
+  gemerkte Luecke daneben zeigt.
+- Die Leiste prueft beim Rendern, ob der gezogene Pane ueberhaupt zu ihr gehoert
+  (`sourceTabId` im Store). Damit verschwindet der Strich in dem Moment, in dem die
+  Leiste einen anderen Space zeigt, und nicht erst bei der naechsten Mausbewegung.
+
+Der Wachposten in `breakOutPane` bleibt als dritte Reihe. Er liest den sichtbaren Space
 aus dem Spaces-Store, nicht aus `activeSpaceIdRef`: den schreibt ein Effekt, er hinkt
 einem Wechsel also genau um den Commit hinterher, um den es hier geht.
 

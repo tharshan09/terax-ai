@@ -13,8 +13,12 @@ export type PaneDropTarget =
 // unchanged highlight never re-renders even while the pointer keeps moving.
 type PaneDndState = {
   sourceLeafId: number | null;
+  /** The tab the dragged pane belongs to, so a surface can tell at render time
+   *  whether the drag concerns it at all. The tab strip needs that: it only
+   *  lists one space, and the space can change while the button is held. */
+  sourceTabId: string | null;
   target: PaneDropTarget | null;
-  setDrag: (sourceLeafId: number | null) => void;
+  setDrag: (sourceLeafId: number | null, sourceTabId?: string | null) => void;
   setTarget: (target: PaneDropTarget | null) => void;
 };
 
@@ -33,8 +37,10 @@ function sameTarget(
 
 export const usePaneDndStore = create<PaneDndState>((set) => ({
   sourceLeafId: null,
+  sourceTabId: null,
   target: null,
-  setDrag: (sourceLeafId) => set({ sourceLeafId, target: null }),
+  setDrag: (sourceLeafId, sourceTabId = null) =>
+    set({ sourceLeafId, sourceTabId, target: null }),
   setTarget: (target) =>
     set((s) => (sameTarget(s.target, target) ? s : { target })),
 }));
