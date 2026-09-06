@@ -70,6 +70,13 @@ export function swapAxisBetween(a: HTMLElement, b: HTMLElement): SwapAxis {
   return dx >= dy ? "horizontal" : "vertical";
 }
 
+/** The pair's axis, or undefined when the source pane is not on screen to be
+ *  measured. The overlay then keeps whichever glyph it had, rather than being
+ *  handed a direction nobody computed. */
+function axisFrom(a: HTMLElement | null, b: HTMLElement): SwapAxis | undefined {
+  return a ? swapAxisBetween(a, b) : undefined;
+}
+
 type Handlers = {
   /** Drop landed near another pane's edge: move the leaf beside it, there. */
   onMove: (sourceLeafId: number, targetLeafId: number, edge: DropEdge) => void;
@@ -126,8 +133,14 @@ export function useTerminalPaneDnd({ onMove, onSwap, onBreakOut }: Handlers) {
       cleanupRef.current?.();
       const pointerId = e.pointerId;
       const sourceLayer = paneLayerOf(e.currentTarget);
-      const sourceLeafEl =
-        e.currentTarget.closest<HTMLElement>("[data-pane-leaf]");
+      // Looked up on every move, not captured once: a sibling's shell can exit
+      // mid-drag, collapsing a split, and the source pane then gets a new DOM
+      // node. Measuring the detached one returns a zero rect, which would
+      // quietly settle the swap glyph on "horizontal" whatever the layout.
+      const sourceLeafNow = () =>
+        document.querySelector<HTMLElement>(
+          `[data-pane-leaf="${sourceLeafId}"]`,
+        );
       const sx = e.clientX;
       const sy = e.clientY;
       let active = false;
@@ -164,10 +177,9 @@ export function useTerminalPaneDnd({ onMove, onSwap, onBreakOut }: Handlers) {
             kind: "pane",
             leafId: id,
             spot,
-            ...(spot === "center" &&
-              sourceLeafEl && {
-                axis: swapAxisBetween(sourceLeafEl, leafEl),
-              }),
+            ...(spot === "center" && {
+              axis: axisFrom(sourceLeafNow(), leafEl),
+            }),
           };
         } else {
           const strip = tabStripAt(under);

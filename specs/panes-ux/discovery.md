@@ -441,16 +441,6 @@ erst mitbringt. Wer C direkt nach A baut, baut die Mitte-Zone hinterher zweimal 
 
 ---
 
-## 5b. Offen: nur das Ausbrechen sagt, wenn es nicht geht
-
-Ein Drag kann von der Welt ueberholt werden, und beim **Ausbrechen** sagt das
-Programm es dann (`collapsed`, `space-changed`). **Verschieben** und **Tauschen**
-tun das nicht: verschwindet der gezogene Pane mitten im Zug, greift beim Loslassen
-die `hasLeaf`-Sperre und es passiert stillschweigend nichts, obwohl das Overlay
-gerade noch etwas versprochen hat. Beim Verschieben ist das Bestand, beim Tauschen
-neu, aber aus derselben Vorlage. Eine Welle, die alle drei mit einer Stimme
-sprechen laesst, waere die ehrlichere Loesung als ein Sonderfall mehr.
-
 ## 5a. Nebenbefund: ein Split setzt die Nachbarn zurueck
 
 Beim Vermessen des Tauschs aufgefallen und **nicht** von dieser Welle verursacht:
@@ -461,6 +451,16 @@ Panel-ids einer Gruppe, und an der Stelle des geteilten Panes steht danach eine
 Gruppe statt eines Blatts, also eine andere id. Ein Slot, der den Uebergang
 Blatt -> Gruppe uebersteht, waere denkbar, kollidiert aber mit der Eindeutigkeit
 der ids (siehe `PaneTreeView`). Eigenes Thema, eigene Welle.
+
+## 5b. Offen: nur das Ausbrechen sagt, wenn es nicht geht
+
+Ein Drag kann von der Welt ueberholt werden, und beim **Ausbrechen** sagt das
+Programm es dann (`collapsed`, `space-changed`). **Verschieben** und **Tauschen**
+tun das nicht: verschwindet der gezogene Pane mitten im Zug, greift beim Loslassen
+die `hasLeaf`-Sperre und es passiert stillschweigend nichts, obwohl das Overlay
+gerade noch etwas versprochen hat. Beim Verschieben ist das Bestand, beim Tauschen
+neu, aber aus derselben Vorlage. Eine Welle, die alle drei mit einer Stimme
+sprechen laesst, waere die ehrlichere Loesung als ein Sonderfall mehr.
 
 ## 6. Was hier bewusst nicht drin ist
 
