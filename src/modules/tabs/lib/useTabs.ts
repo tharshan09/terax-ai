@@ -1471,6 +1471,10 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     (leafId: number, gapIndex: number): BrokenOutPane | BreakOutRefusal => {
       let tabId: number | null = null;
       let result: BrokenOutPane | BreakOutRefusal = "collapsed";
+      // Read once, out here: the updater must answer from `prev` alone, or a
+      // re-invocation would re-read a store that has moved on and decide
+      // differently from the run whose verdict the caller gets.
+      const visible = visibleSpaceId(activeSpaceIdRef.current);
       flushSync(() => {
         setTabs((prev) => {
           const src = prev.find(
@@ -1485,7 +1489,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
           // precisely the window being guarded. The ref stands in only before
           // the store is hydrated, when it holds `null` and knows nothing.
           // The hit-test suppresses the drop first; this is the backstop.
-          if (src && src.spaceId !== visibleSpaceId(activeSpaceIdRef.current)) {
+          if (src && src.spaceId !== visible) {
             result = "space-changed";
             return prev;
           }
@@ -1515,6 +1519,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   const undoBreakOutPane = useCallback(
     (undo: BrokenOutPane): MergeRefusal | null => {
       let refusal: MergeRefusal | null = null;
+      const visible = visibleSpaceId(activeSpaceIdRef.current);
       flushSync(() => {
         setTabs((prev) => {
           const next = undoBreakOut(prev, undo);
@@ -1536,7 +1541,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
             // staying, so hand the strip a neighbor instead. The empty-space
             // refusal above means there is one; the source tab is the fallback
             // that keeps `activeId` valid should that ever stop holding.
-            if (back?.spaceId === visibleSpaceId(activeSpaceIdRef.current)) {
+            if (back?.spaceId === visible) {
               return undo.sourceTabId;
             }
             return nextActiveInSpace(prev, undo.tabId) ?? undo.sourceTabId;
