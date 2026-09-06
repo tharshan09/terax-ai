@@ -6,22 +6,47 @@ import {
 } from "@/modules/tabs/lib/tabStripGap";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { type PaneDropTarget, usePaneDndStore } from "./paneDndStore";
+import {
+  type PaneDropSpot,
+  type PaneDropTarget,
+  type SwapAxis,
+  usePaneDndStore,
+} from "./paneDndStore";
 import type { DropEdge } from "./panes";
 
 // Only turn a press into a drag past this many px, so a click on the handle
 // doesn't accidentally move a pane.
 const THRESHOLD = 6;
 
-// Which edge of `el` the pointer is nearest — decides where the moved pane
-// lands (left/right split, or top/bottom). The leaf wrapper carries
-// `data-pane-leaf` (not `data-panel`), so its rect is NOT zoom-patched; scale it
-// into the zoomed pointer space before measuring.
-function edgeAt(el: HTMLElement, x: number, y: number): DropEdge {
+// The middle third in both axes means "trade places"; nearer an edge means
+// "insert there". A third is wide enough that the boundary does not flicker
+// under a shaking hand, so no hysteresis is needed.
+//
+// Exported because the overlay draws this exact box: a frame larger than the
+// region that actually swaps would teach the wrong target, and releasing just
+// inside it would insert instead, rebuilding the split and discarding the very
+// sizes the swap exists to keep.
+export const CENTER_INSET = 1 / 3;
+const CENTER_LO = CENTER_INSET;
+const CENTER_HI = 1 - CENTER_INSET;
+
+// Where in `el` the pointer sits: which edge it is nearest, or the centre. This
+// decides between inserting the dragged pane beside this one and swapping the
+// two. The leaf wrapper carries `data-pane-leaf` (not `data-panel`), so its
+// rect is NOT zoom-patched; scale it into the zoomed pointer space first.
+export function spotAt(el: HTMLElement, x: number, y: number): PaneDropSpot {
   const r = el.getBoundingClientRect();
   const z = getResizeZoomFactor();
   const px = (x - r.left * z) / (r.width * z || 1);
   const py = (y - r.top * z) / (r.height * z || 1);
+  if (
+    px >= CENTER_LO &&
+    px <= CENTER_HI &&
+    py >= CENTER_LO &&
+    py <= CENTER_HI
+  ) {
+    return "center";
+  }
   const dist = { left: px, right: 1 - px, top: py, bottom: 1 - py };
   return (Object.keys(dist) as DropEdge[]).reduce((a, b) =>
     dist[b] < dist[a] ? b : a,
@@ -37,9 +62,44 @@ export function paneLayerOf(el: Element | null | undefined): string | null {
   return el?.closest<HTMLElement>("[data-tab-layer]")?.dataset.tabLayer ?? null;
 }
 
+/** How far apart the two panes must lean on one axis before that axis is called
+ *  the one they trade along. Below it the pair is diagonal. */
+const AXIS_DOMINANCE = 2;
+
+/**
+ * Whether two panes sit side by side or stacked, or undefined when they sit
+ * diagonally and neither arrow would be true. Taken from the boxes rather than
+ * from the tree, because what the glyph has to match is what the user sees. The
+ * rects are not zoom-patched, but they are only ever compared with each other,
+ * so the factor cancels.
+ */
+export function swapAxisBetween(
+  a: HTMLElement,
+  b: HTMLElement,
+): SwapAxis | undefined {
+  const ra = a.getBoundingClientRect();
+  const rb = b.getBoundingClientRect();
+  const dx = Math.abs(ra.left + ra.right - (rb.left + rb.right));
+  const dy = Math.abs(ra.top + ra.bottom - (rb.top + rb.bottom));
+  if (dx > dy * AXIS_DOMINANCE) return "horizontal";
+  if (dy > dx * AXIS_DOMINANCE) return "vertical";
+  return undefined;
+}
+
+/** The pair's axis, or undefined when the source pane is not on screen to be
+ *  measured, or when the two sit diagonally. The overlay draws no glyph at all
+ *  then, rather than picking a direction and promising a trade that goes
+ *  another way. */
+function axisFrom(a: HTMLElement | null, b: HTMLElement): SwapAxis | undefined {
+  return a ? swapAxisBetween(a, b) : undefined;
+}
+
 type Handlers = {
-  /** Drop landed on another pane: move the leaf beside it, on `edge`. */
+  /** Drop landed near another pane's edge: move the leaf beside it, there. */
   onMove: (sourceLeafId: number, targetLeafId: number, edge: DropEdge) => void;
+  /** Drop landed in the middle of another pane: the two trade places, which
+   *  keeps the sizes an insert would rebuild. */
+  onSwap: (sourceLeafId: number, targetLeafId: number) => void;
   /** Drop landed on the tab strip: the leaf becomes a tab of its own at
    *  `gapIndex` (the same insertion gaps a tab reorder uses). */
   onBreakOut: (sourceLeafId: number, gapIndex: number) => void;
@@ -54,13 +114,15 @@ type Handlers = {
  *  An inactive tab's layer is `pointer-events: none`, so its panes are never
  *  under the cursor: dropping onto a pane in ANOTHER tab is not reachable from
  *  here, which is why the strip is the way across. */
-export function useTerminalPaneDnd({ onMove, onBreakOut }: Handlers) {
+export function useTerminalPaneDnd({ onMove, onSwap, onBreakOut }: Handlers) {
   const [dragging, setDragging] = useState(false);
   const ghostElRef = useRef<HTMLDivElement | null>(null);
   const lastPosRef = useRef({ x: 0, y: 0 });
   const cleanupRef = useRef<(() => void) | null>(null);
   const onMoveRef = useRef(onMove);
   onMoveRef.current = onMove;
+  const onSwapRef = useRef(onSwap);
+  onSwapRef.current = onSwap;
   const onBreakOutRef = useRef(onBreakOut);
   onBreakOutRef.current = onBreakOut;
 
@@ -88,6 +150,14 @@ export function useTerminalPaneDnd({ onMove, onBreakOut }: Handlers) {
       cleanupRef.current?.();
       const pointerId = e.pointerId;
       const sourceLayer = paneLayerOf(e.currentTarget);
+      // Looked up on every move, not captured once: a sibling's shell can exit
+      // mid-drag, collapsing a split, and the source pane then gets a new DOM
+      // node. Measuring the detached one returns a zero rect, which would
+      // quietly settle the swap glyph on "horizontal" whatever the layout.
+      const sourceLeafNow = () =>
+        document.querySelector<HTMLElement>(
+          `[data-pane-leaf="${sourceLeafId}"]`,
+        );
       const sx = e.clientX;
       const sy = e.clientY;
       let active = false;
@@ -119,10 +189,14 @@ export function useTerminalPaneDnd({ onMove, onBreakOut }: Handlers) {
           id !== sourceLeafId &&
           paneLayerOf(leafEl) === sourceLayer
         ) {
+          const spot = spotAt(leafEl, ev.clientX, ev.clientY);
           target = {
             kind: "pane",
             leafId: id,
-            edge: edgeAt(leafEl, ev.clientX, ev.clientY),
+            spot,
+            ...(spot === "center" && {
+              axis: axisFrom(sourceLeafNow(), leafEl),
+            }),
           };
         } else {
           const strip = tabStripAt(under);
@@ -148,10 +222,12 @@ export function useTerminalPaneDnd({ onMove, onBreakOut }: Handlers) {
         store.setDrag(null);
         setDragging(false);
         if (!active || !commit || !target) return;
-        if (target.kind === "pane") {
-          onMoveRef.current(sourceLeafId, target.leafId, target.edge);
-        } else {
+        if (target.kind !== "pane") {
           onBreakOutRef.current(sourceLeafId, target.gapIndex);
+        } else if (target.spot === "center") {
+          onSwapRef.current(sourceLeafId, target.leafId);
+        } else {
+          onMoveRef.current(sourceLeafId, target.leafId, target.spot);
         }
       };
       const up = (ev: PointerEvent) => {

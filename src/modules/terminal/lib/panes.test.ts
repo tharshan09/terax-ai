@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   attachSubtree,
   findLeafCwd,
+  firstLeafSlotId,
   leafIds,
   moveLeaf,
   type PaneNode,
   sameLayout,
   setLeafTmuxSession,
+  slotOf,
+  swapLeaves,
   withLeavesFrom,
 } from "./panes";
 
@@ -318,5 +321,86 @@ describe("sameLayout", () => {
     expect(sameLayout(leaf(2), split(1, "row", leaf(2), leaf(3)))).toBe(false);
     expect(sameLayout(leaf(2), leaf(3))).toBe(false);
     expect(sameLayout(leaf(2), leaf(2))).toBe(true);
+  });
+});
+
+describe("swapLeaves", () => {
+  const leaf = (id: number, cwd?: string): PaneNode => ({
+    kind: "leaf",
+    id,
+    cwd,
+  });
+  const split = (
+    id: number,
+    dir: "row" | "col",
+    ...children: PaneNode[]
+  ): PaneNode => ({ kind: "split", id, dir, children });
+  const slots = (n: PaneNode): number[] =>
+    n.kind === "leaf" ? [slotOf(n)] : n.children.flatMap(slots);
+
+  it("exchanges two siblings without touching the split", () => {
+    const tree = split(1, "row", leaf(2, "/a"), leaf(3, "/b"));
+    const out = swapLeaves(tree, 2, 3);
+    expect(leafIds(out)).toEqual([3, 2]);
+    expect(out.kind === "split" && out.id).toBe(1);
+    expect(out.kind === "split" && out.dir).toBe("row");
+  });
+
+  it("hands each pane the slot it moves into, so the sizes stay put", () => {
+    const tree = split(1, "row", leaf(2, "/a"), leaf(3, "/b"));
+    const out = swapLeaves(tree, 2, 3);
+    // The panes changed places; the slots, which name the panels the resize
+    // library sizes, did not.
+    expect(slots(tree)).toEqual([2, 3]);
+    expect(slots(out)).toEqual([2, 3]);
+    expect(findLeafCwd(out, 2)).toBe("/a");
+    expect(findLeafCwd(out, 3)).toBe("/b");
+  });
+
+  it("keeps the slot order across levels too", () => {
+    // row[ col[2,3], 4 ]: swapping 3 and 4 moves a pane out of the column and
+    // another into it. Both groups must keep their panel ids in order.
+    const tree = split(1, "row", split(5, "col", leaf(2), leaf(3)), leaf(4));
+    const out = swapLeaves(tree, 3, 4);
+    expect(leafIds(out)).toEqual([2, 4, 3]);
+    expect(slots(out)).toEqual(slots(tree));
+    expect(firstLeafSlotId(out)).toBe(firstLeafSlotId(tree));
+  });
+
+  it("carries each leaf's own contents along", () => {
+    const tree = split(
+      1,
+      "row",
+      { kind: "leaf", id: 2, cwd: "/a", tmuxSession: "one" },
+      leaf(3, "/b"),
+    );
+    const out = swapLeaves(tree, 2, 3);
+    expect(findLeafCwd(out, 2)).toBe("/a");
+    expect(findLeafCwd(out, 3)).toBe("/b");
+    expect(leafIds(out)).toEqual([3, 2]);
+  });
+
+  it("leaves the tree alone for the same leaf or an unknown one", () => {
+    const tree = split(1, "row", leaf(2), leaf(3));
+    expect(swapLeaves(tree, 2, 2)).toBe(tree);
+    expect(swapLeaves(tree, 2, 99)).toBe(tree);
+    expect(swapLeaves(tree, 99, 2)).toBe(tree);
+  });
+
+  it("is its own inverse, slots included", () => {
+    const tree = split(1, "row", split(5, "col", leaf(2), leaf(3)), leaf(4));
+    const back = swapLeaves(swapLeaves(tree, 3, 4), 3, 4);
+    expect(leafIds(back)).toEqual(leafIds(tree));
+    expect(slots(back)).toEqual(slots(tree));
+  });
+
+  it("keeps the identity of branches the pair is not in", () => {
+    // PaneTreeView is memoized on the node: cloning untouched branches would
+    // re-render every pane in the tab instead of the two that moved.
+    const untouched = split(9, "col", leaf(6), leaf(7));
+    const tree = split(1, "row", split(5, "col", leaf(2), leaf(3)), untouched);
+    const out = swapLeaves(tree, 2, 3);
+    expect(out).not.toBe(tree);
+    expect(out.kind === "split" && out.children[1]).toBe(untouched);
   });
 });

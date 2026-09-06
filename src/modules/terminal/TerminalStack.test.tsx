@@ -65,6 +65,7 @@ function element(tabs: TerminalTab[], activeId: number) {
       onExit={noop}
       onFocusLeaf={noop}
       movePane={noop}
+      swapPanes={noop}
       breakOutPane={noop}
     />
   );
@@ -122,5 +123,125 @@ describe("TerminalStack tab-switch render isolation (W3)", () => {
     for (const i of [1, 2, 3, 4, 6, 10, 20]) {
       expect(paneRenderCounts.get(LEAF_BASE + i)).toBe(1);
     }
+  });
+});
+
+describe("panel ids", () => {
+  // The resize group observes its box on mount; jsdom has no ResizeObserver,
+  // and the other tests in this file never render a group.
+  beforeEach(() => {
+    globalThis.ResizeObserver ??= class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+  });
+  afterEach(cleanup);
+
+  it("gives every panel of a three-level tree its own id", () => {
+    // A group, its first child group and their shared first leaf all resolve to
+    // the same first-leaf slot, so naming groups after that slot collides at
+    // every level, not just between a group and its leaf.
+    const tab: TerminalTab = {
+      id: 1,
+      kind: "terminal",
+      spaceId: "a",
+      title: "shell",
+      activeLeafId: 10,
+      paneTree: {
+        kind: "split",
+        id: 100,
+        dir: "row",
+        children: [
+          {
+            kind: "split",
+            id: 101,
+            dir: "col",
+            children: [
+              {
+                kind: "split",
+                id: 102,
+                dir: "row",
+                children: [
+                  { kind: "leaf", id: 10 },
+                  { kind: "leaf", id: 11 },
+                ],
+              },
+              { kind: "leaf", id: 12 },
+            ],
+          },
+          { kind: "leaf", id: 13 },
+        ],
+      },
+    };
+    const { container } = render(
+      <TerminalStack
+        tabs={[tab]}
+        activeId={1}
+        registerHandle={noop}
+        onSearchReady={noopSearch}
+        onCwd={noop}
+        onExit={noop}
+        onFocusLeaf={noop}
+        movePane={noop}
+        swapPanes={noop}
+        breakOutPane={noop}
+      />,
+    );
+    const ids = [...container.querySelectorAll('[id^="pane-"]')].map(
+      (e) => e.id,
+    );
+    expect(ids.length).toBe(6);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("gives a nested split's group and its first leaf distinct ids", () => {
+    // A subtree is named after its first leaf's SLOT, and that leaf's own panel
+    // carries the same slot. One id string would land on two elements at once,
+    // and a separator's aria-controls resolves ids document-wide, so the inner
+    // divider would claim to resize the whole column.
+    const tab: TerminalTab = {
+      id: 1,
+      kind: "terminal",
+      spaceId: "a",
+      title: "shell",
+      activeLeafId: 10,
+      paneTree: {
+        kind: "split",
+        id: 100,
+        dir: "row",
+        children: [
+          { kind: "leaf", id: 10 },
+          {
+            kind: "split",
+            id: 101,
+            dir: "col",
+            children: [
+              { kind: "leaf", id: 11 },
+              { kind: "leaf", id: 12 },
+            ],
+          },
+        ],
+      },
+    };
+    const { container } = render(
+      <TerminalStack
+        tabs={[tab]}
+        activeId={1}
+        registerHandle={noop}
+        onSearchReady={noopSearch}
+        onCwd={noop}
+        onExit={noop}
+        onFocusLeaf={noop}
+        movePane={noop}
+        swapPanes={noop}
+        breakOutPane={noop}
+      />,
+    );
+    const ids = [...container.querySelectorAll('[id^="pane-"]')].map(
+      (e) => e.id,
+    );
+    expect(ids.length).toBeGreaterThan(1);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 });

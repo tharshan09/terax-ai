@@ -23,6 +23,7 @@ type Props = {
   onExit: TerminalStackProps["onExit"];
   onFocusLeaf: TerminalStackProps["onFocusLeaf"];
   movePane: TerminalStackProps["movePane"];
+  swapPanes: TerminalStackProps["swapPanes"];
   breakOutPane: TerminalStackProps["breakOutPane"];
   registerEditorHandle: EditorStackProps["registerHandle"];
   onEditorDirtyChange: EditorStackProps["onDirtyChange"];
@@ -58,6 +59,7 @@ export const WorkspaceSurface = memo(function WorkspaceSurface({
   onExit,
   onFocusLeaf,
   movePane,
+  swapPanes,
   breakOutPane,
   registerEditorHandle,
   onEditorDirtyChange,
@@ -98,6 +100,7 @@ export const WorkspaceSurface = memo(function WorkspaceSurface({
           onExit={onExit}
           onFocusLeaf={onFocusLeaf}
           movePane={movePane}
+          swapPanes={swapPanes}
           breakOutPane={breakOutPane}
         />
       </div>

@@ -6,11 +6,22 @@ import {
 import { cn } from "@/lib/utils";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { WorkspaceEnv } from "@/modules/workspace";
+import {
+  ArrowDataTransferHorizontalIcon,
+  ArrowDataTransferVerticalIcon,
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import type { SearchAddon } from "@xterm/addon-search";
 import { Fragment, memo, type PointerEvent as ReactPointerEvent } from "react";
 import { useTerminalDropStore } from "./lib/dropStore";
 import { usePaneDndStore } from "./lib/paneDndStore";
-import { type DropEdge, leafIds, type PaneNode } from "./lib/panes";
+import { CENTER_INSET } from "./lib/useTerminalPaneDnd";
+import {
+  type DropEdge,
+  firstLeafSlotId,
+  leafIds,
+  type PaneNode,
+} from "./lib/panes";
 import { TerminalPane, type TerminalPaneHandle } from "./TerminalPane";
 
 type LeafBundle = {
@@ -140,18 +151,38 @@ export const PaneTreeView = memo(function PaneTreeViewImpl(props: Props) {
           marker === "divider" &&
           ((prev !== undefined && leafIds(prev).includes(props.activeLeafId)) ||
             leafIds(child).includes(props.activeLeafId));
+        // Keyed and named by the subtree's first SLOT, not by the node id and
+        // not by the leaf: splitting a leaf in place mints a fresh split id
+        // that would otherwise remount the surviving pane, and swapping two
+        // panes would otherwise reorder the group's panel ids and drag the
+        // sizes along with them. A swapped pane keeps its mount but is handed
+        // another leaf, so its session re-binds even though it does not remount.
+        const slotId = firstLeafSlotId(child);
         return (
-          // Keyed by the subtree's first leaf, not the node id: when a leaf is
-          // split in place, the replacing split node gets a fresh id and would
-          // otherwise remount the surviving pane.
-          <Fragment key={leafIds(child)[0]}>
+          <Fragment key={slotId}>
             {i > 0 && (
               <ResizableHandle
                 withHandle
                 className={dividerActive ? "bg-primary/70" : undefined}
               />
             )}
-            <ResizablePanel id={`pane-${child.id}`} minSize="10%">
+            {/* A leaf's panel is named after its SLOT, so a swap leaves the
+                group's panel list untouched and the sizes stay put. A group's
+                panel takes the split node's own id instead: naming it after
+                its first leaf's slot would collide with that leaf's panel, and
+                with any group between them, since they all resolve to the same
+                first leaf. Split ids are unique and a swap never rebuilds a
+                split node, so this is stable for the same reason. DOM ids are
+                document-wide, and the separator points at its panel through
+                aria-controls. */}
+            <ResizablePanel
+              id={
+                child.kind === "split"
+                  ? `pane-group-${child.id}`
+                  : `pane-slot-${slotId}`
+              }
+              minSize="10%"
+            >
               <PaneTreeView {...props} node={child} split />
             </ResizablePanel>
           </Fragment>
@@ -205,20 +236,71 @@ const EDGE_POS: Record<DropEdge, string> = {
   bottom: "inset-x-0 bottom-0 h-1/2",
 };
 
-// Highlights the half of the target pane where a dragged pane would land.
+// Shows what a drop would do. Near an edge the dragged pane is inserted there,
+// so the half it would take is filled in. In the middle the two panes trade
+// places, which is a different kind of thing and so gets a different shape: a
+// frame around each of the pair, left open, with the glyph on the target.
 function PaneDropOverlay({ leafId }: { leafId: number }) {
-  const edge = usePaneDndStore((s) =>
+  const spot = usePaneDndStore((s) =>
     s.target?.kind === "pane" && s.target.leafId === leafId
-      ? s.target.edge
+      ? s.target.spot
       : null,
   );
-  if (!edge) return null;
+  const swapPartner = usePaneDndStore(
+    (s) =>
+      s.target?.kind === "pane" &&
+      s.target.spot === "center" &&
+      s.sourceLeafId === leafId,
+  );
+  // The pair may sit side by side or stacked; the glyph points the way they
+  // will actually trade. Null when the source pane could not be measured, and
+  // then no glyph is drawn at all: the frames still name the pair, which is the
+  // part that matters, and guessing a direction is what this exists to avoid.
+  const axis = usePaneDndStore((s) =>
+    s.target?.kind === "pane" && s.target.leafId === leafId
+      ? (s.target.axis ?? null)
+      : null,
+  );
+  if (spot === "center" || swapPartner) {
+    return (
+      <div className="pointer-events-none absolute inset-0 z-[19]">
+        <div
+          // The target's frame is exactly the region that swaps, so releasing
+          // inside it always means what it shows. The partner is no target at
+          // all, so it outlines itself instead of drawing a box nobody can aim
+          // at: it only says which pane is the other half of the pair.
+          style={
+            spot === "center" ? { inset: `${CENTER_INSET * 100}%` } : undefined
+          }
+          className={cn(
+            "absolute grid place-items-center rounded-lg border-2 border-primary",
+            spot === "center" ? "bg-primary/10" : "inset-1 border-dashed",
+          )}
+        >
+          {spot === "center" && axis !== null && (
+            <span className="rounded-full bg-background/85 p-2 text-primary shadow-sm backdrop-blur-sm">
+              <HugeiconsIcon
+                icon={
+                  axis === "vertical"
+                    ? ArrowDataTransferVerticalIcon
+                    : ArrowDataTransferHorizontalIcon
+                }
+                size={22}
+                strokeWidth={2}
+              />
+            </span>
+          )}
+        </div>
+      </div>
+    );
+  }
+  if (!spot) return null;
   return (
     <div className="pointer-events-none absolute inset-0 z-[19]">
       <div
         className={cn(
           "absolute rounded-md border-2 border-primary bg-primary/20",
-          EDGE_POS[edge],
+          EDGE_POS[spot],
         )}
       />
     </div>

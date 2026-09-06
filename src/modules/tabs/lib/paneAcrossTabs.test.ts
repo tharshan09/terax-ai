@@ -1,4 +1,10 @@
-import { findLeafCwd, type PaneNode } from "@/modules/terminal/lib/panes";
+import {
+  findLeafCwd,
+  leafIds,
+  type PaneNode,
+  slotOf,
+  swapLeaves,
+} from "@/modules/terminal/lib/panes";
 import { describe, expect, it } from "vitest";
 import {
   breakOutPaneFromTabs,
@@ -341,5 +347,61 @@ describe("canBreakOutPane", () => {
         breakOutPaneFromTabs(tabs, id, 7, 0) !== null,
       );
     }
+  });
+});
+
+describe("slot bookkeeping across the whole grammar", () => {
+  const allSlots = (n: PaneNode): number[] =>
+    n.kind === "leaf" ? [slotOf(n)] : n.children.flatMap(allSlots);
+  const slotsOf = (tabs: Tab[]): number[] =>
+    tabs.flatMap((t) => (t.kind === "terminal" ? allSlots(t.paneTree) : []));
+
+  // The pane-slot-* / pane-group-* naming is sound while slots stay UNIQUE: a
+  // duplicate would put one DOM id on two elements and one React key on two
+  // siblings. Uniqueness is the whole property, and it is global rather than
+  // per tab: a swapped pane carries the slot it inherited when it leaves for
+  // another tab, so a tab can legitimately hold a slot whose original leaf is
+  // no longer in it. Swapping is the only thing that moves a slot, but panes
+  // also travel between tabs, so the sequence covers both.
+  it("keeps slots unique across every tab", () => {
+    let tabs: Tab[] = [
+      term(1, row(leaf(10), leaf(11), leaf(12))),
+      term(2, leaf(20)),
+    ];
+    const check = (label: string) => {
+      const slots = slotsOf(tabs);
+      expect(new Set(slots).size, `${label}: duplicate slot`).toBe(
+        slots.length,
+      );
+    };
+    check("start");
+
+    tabs = tabs.map((t) =>
+      t.id === 1 && t.kind === "terminal"
+        ? ({ ...t, paneTree: swapLeaves(t.paneTree, 10, 12) } as Tab)
+        : t,
+    );
+    check("after swap");
+
+    // Break out the pane that INHERITED a slot, not the one still sitting in
+    // its own: that is the case where a slot and its original leaf part ways.
+    const out = breakOutPaneFromTabs(tabs, 12, 7, 1);
+    if (!out) throw new Error("expected a break-out");
+    tabs = out.tabs;
+    check("after break-out");
+
+    const src = tabs.find((t) => t.id === 1);
+    const born = tabs.find((t) => t.id === 7);
+    if (src?.kind !== "terminal" || born?.kind !== "terminal") {
+      throw new Error("expected two terminal tabs");
+    }
+    expect(leafIds(born.paneTree)).toEqual([12]);
+    expect(allSlots(born.paneTree)).toEqual([10]);
+    expect(allSlots(src.paneTree)).toEqual([11, 12]);
+
+    const back = undoBreakOut(tabs, out.undo);
+    if (typeof back === "string") throw new Error(`refused: ${back}`);
+    tabs = back;
+    check("after undo");
   });
 });

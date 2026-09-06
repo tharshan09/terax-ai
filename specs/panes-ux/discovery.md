@@ -133,22 +133,41 @@ dasselbe, ab drei nicht mehr. Vor allem bleiben beim Tausch die Groessen erhalte
 beim Einfuegen nicht. Genau deshalb heisst der Upstream-Nachzug `460657a`
 "preserve pane layout during swaps".
 
-Ruhe in der Anzeige: es leuchtet immer nur ein Ziel. Kante wie heute, halber Pane
-gefuellt. Mitte bekommt eine eigene Form, damit die beiden Bedeutungen nicht
+Ruhe in der Anzeige: es leuchtet immer nur ein **Ziel**. Kante wie heute, halber
+Pane gefuellt. Mitte bekommt eine eigene Form, damit die beiden Bedeutungen nicht
 ineinander uebergehen:
 
 ```
-Kante (heute)                      Mitte (neu)
+Kante                              Mitte
 +-------------------------+        +-------------------------+
-|#########|               |        |   +-----------------+   |
-|#########|   Ziel-Pane   |        |   |                 |   |
-|#########|               |        |   |       <->       |   |
-+-------------------------+        |   |                 |   |
- halbe Flaeche gefuellt            |   +-----------------+   |
-                                   +-------------------------+
-                                    Rahmen mit Doppelpfeil,
-                                    Flaeche bleibt frei
+|#########|               |        |                         |
+|#########|   Ziel-Pane   |        |      +-----------+      |
+|#########|               |        |      |    <->    |      |
+|#########|               |        |      +-----------+      |
++-------------------------+        |                         |
+ halbe Flaeche gefuellt            +-------------------------+
+                                    der Kasten IST das
+                                    mittlere Drittel
 ```
+
+Zwei Dinge sind beim Bauen anders geworden als im ersten Entwurf, beide mit
+Grund.
+
+**Der Kasten ist genau die Zone.** Erst war er grosszuegig eingerueckt und damit
+viel groesser als die Flaeche, die wirklich tauscht; wer sichtbar innerhalb des
+Rahmens loslaesst, haette einen Kanten-Einschub bekommen. Beide kommen jetzt aus
+einer Konstante (`CENTER_INSET`), koennen also nicht auseinanderlaufen.
+
+**Der Partner umrandet sich selbst.** Ein Tausch betrifft zwei Panes, und welche
+zwei es sind, ist die eigentliche Frage des Nutzers. Er bekommt aber bewusst
+NICHT denselben Kasten: der Kasten bedeutet „hier darfst du loslassen", und der
+Partner ist kein Ziel. Also eine gestrichelte Umrandung des ganzen Panes, ohne
+Symbol. Das widerspricht dem „nur ein Ziel" nicht, denn Ziel bleibt genau eines.
+
+Das Symbol zeigt in die Richtung, in der die beiden tatsaechlich tauschen,
+nebeneinander waagerecht, uebereinander senkrecht. Liegen sie diagonal, oder ist
+der gezogene Pane gerade nicht messbar, wird **kein** Symbol gezeichnet: eine
+Richtung zu behaupten, die niemand berechnet hat, waere schlimmer als keine.
 
 Das mittlere Drittel ist gross genug, dass an der Grenze nichts flackert. Eine
 Hysterese ist nicht noetig.
@@ -359,8 +378,8 @@ Pro Welle ein Branch und ein PR, Review-Gate `/code-review high`, dann die Gates
 
 | # | Inhalt | Umfang | Warum an dieser Stelle |
 |---|---|---|---|
-| A | **Ausbrechen** in einen eigenen Tab (D3 halb, D5, D7) | mittel | Groesster Nutzen, und es baut das dritte Drop-Ziel, auf dem B aufsetzt. |
-| B | **Tauschen** per Drop-Mitte (D2) | klein | Vervollstaendigt die Grammatik *innerhalb* eines Tabs, bevor sie ueber Tabs hinweg gilt. Anzahlneutral, also ohne Grenzen-Mathematik. |
+| A | **Ausbrechen** in einen eigenen Tab (D3 halb, D5, D7) | mittel | Groesster Nutzen, und es baut das dritte Drop-Ziel, auf dem B aufsetzt. **GEMERGT** (PR #81, `61fa496`) |
+| B | **Tauschen** per Drop-Mitte (D2) | klein | Vervollstaendigt die Grammatik *innerhalb* eines Tabs, bevor sie ueber Tabs hinweg gilt. Anzahlneutral, also ohne Grenzen-Mathematik. **GEBAUT** |
 | C | **Pane von Tab A nach Tab B** (D3 ganz, D6) | mittel | Braucht A (Drop-Ziel Tab-Leiste) und erbt aus B den Tausch ueber Tab-Grenzen gratis. Bringt das allgemeine Primitiv (`movePaneIntoTab`) und die gemeinsame Zulaessigkeitspruefung mit seiner Geste, statt sie in A vorwegzunehmen. |
 | D | **Greifflaeche** (D8) | klein | Reine Optik und Treffsicherheit, keine Zustandslogik. |
 | E | **Tastatur** `Cmd+Alt+Pfeil` (D4) | klein bis mittel | Handarbeit statt Cherry-Pick, funktioniert unabhaengig von allem anderen. |
@@ -432,6 +451,27 @@ erst mitbringt. Wer C direkt nach A baut, baut die Mitte-Zone hinterher zweimal 
    `npx biome format --write <pfade>`.
 
 ---
+
+## 5a. Nebenbefund: ein Split setzt die Nachbarn zurueck
+
+Beim Vermessen des Tauschs aufgefallen und **nicht** von dieser Welle verursacht:
+teilt man einen Pane, verlieren seine Geschwister ihre gezogenen Breiten. Gemessen
+775/274, nach einem Split des rechten Panes 524/524. Ursache ist dieselbe Mechanik
+wie beim Tausch: die Resize-Bibliothek merkt sich ein Layout unter der Liste der
+Panel-ids einer Gruppe, und an der Stelle des geteilten Panes steht danach eine
+Gruppe statt eines Blatts, also eine andere id. Ein Slot, der den Uebergang
+Blatt -> Gruppe uebersteht, waere denkbar, kollidiert aber mit der Eindeutigkeit
+der ids (siehe `PaneTreeView`). Eigenes Thema, eigene Welle.
+
+## 5b. Offen: nur das Ausbrechen sagt, wenn es nicht geht
+
+Ein Drag kann von der Welt ueberholt werden, und beim **Ausbrechen** sagt das
+Programm es dann (`collapsed`, `space-changed`). **Verschieben** und **Tauschen**
+tun das nicht: verschwindet der gezogene Pane mitten im Zug, greift beim Loslassen
+die `hasLeaf`-Sperre und es passiert stillschweigend nichts, obwohl das Overlay
+gerade noch etwas versprochen hat. Beim Verschieben ist das Bestand, beim Tauschen
+neu, aber aus derselben Vorlage. Eine Welle, die alle drei mit einer Stimme
+sprechen laesst, waere die ehrlichere Loesung als ein Sonderfall mehr.
 
 ## 6. Was hier bewusst nicht drin ist
 

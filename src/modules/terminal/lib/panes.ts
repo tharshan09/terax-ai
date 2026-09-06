@@ -3,7 +3,19 @@ export type PaneId = number;
 export type SplitDir = "row" | "col";
 
 export type PaneNode =
-  | { kind: "leaf"; id: PaneId; cwd?: string; tmuxSession?: string }
+  | {
+      kind: "leaf";
+      id: PaneId;
+      /** The position this pane occupies in its enclosing split, as opposed to
+       *  which pane it is. The resize library keys its sizes by panel id, so
+       *  the panel is named after the SLOT: two panes that trade places inherit
+       *  each other's slot, the group's panel list is unchanged, and the sizes
+       *  stay where the user dragged them instead of travelling with the pane.
+       *  Absent means the pane has never moved and its own id names its slot. */
+      slotId?: PaneId;
+      cwd?: string;
+      tmuxSession?: string;
+    }
   | {
       kind: "split";
       id: PaneId;
@@ -18,6 +30,25 @@ export function isLeaf(n: PaneNode): n is Extract<PaneNode, { kind: "leaf" }> {
 export function leafIds(n: PaneNode): PaneId[] {
   if (isLeaf(n)) return [n.id];
   return n.children.flatMap(leafIds);
+}
+
+/** The slot a leaf sits in; its own id until it has traded places with someone. */
+export function slotOf(n: Extract<PaneNode, { kind: "leaf" }>): PaneId {
+  return n.slotId ?? n.id;
+}
+
+/** The slot naming `n`'s position in its parent: a subtree is identified by the
+ *  slot of its first leaf, which is what keeps a panel's id (and its React key,
+ *  and so its bound terminal) stable while the panes inside it move.
+ *
+ *  A childless split should not exist (`removeLeaf` returns null rather than
+ *  leaving one), but this names both a React key and a panel id, so it falls
+ *  back to the node's own id instead of throwing and taking the tree's whole
+ *  render down with it. */
+export function firstLeafSlotId(n: PaneNode): PaneId {
+  if (isLeaf(n)) return slotOf(n);
+  const first = n.children[0];
+  return first === undefined ? n.id : firstLeafSlotId(first);
 }
 
 export function findLeafCwd(n: PaneNode, id: PaneId): string | undefined {
@@ -330,4 +361,52 @@ export function withLeavesFrom(
     ...shape,
     children: shape.children.map((c) => withLeavesFrom(c, sources)),
   };
+}
+
+/**
+ * Exchange two leaves in place. Both keep their ids, so their live sessions go
+ * with them, and every split node keeps its direction and its children's order.
+ *
+ * Each pane also inherits the SLOT it moves into. That is what holds the layout
+ * still: the resize library keys sizes by panel id, and the panel is named
+ * after the slot, so the group sees the same panels in the same order and the
+ * widths stay put. Without it they travel with the panes and the divider jumps.
+ *
+ * The terminals are not left alone, though: a pane keeps its React identity but
+ * is handed a different `leafId`, so both sessions re-bind (detach, release the
+ * renderer slot, attach, acquire). Measured in the running app, both take back
+ * the very slot that still retained their buffer and nothing is serialised
+ * (`snapshotCharsTotal` and the slot owners are unchanged across a swap), so no
+ * live grid is replayed from a snapshot. Worth knowing all the same: this is an
+ * unconditional release on a path the pool otherwise gates while a leaf is busy
+ * or on the alternate screen.
+ *
+ * Returns the tree unchanged when the two are the same leaf or either is
+ * missing.
+ */
+export function swapLeaves(tree: PaneNode, a: PaneId, b: PaneId): PaneNode {
+  if (a === b) return tree;
+  const nodeA = findLeafNode(tree, a);
+  const nodeB = findLeafNode(tree, b);
+  if (!nodeA || !nodeB) return tree;
+  const put = (n: PaneNode): PaneNode => {
+    if (isLeaf(n)) {
+      if (n.id === a) return { ...nodeB, slotId: slotOf(n) };
+      if (n.id === b) return { ...nodeA, slotId: slotOf(n) };
+      return n;
+    }
+    // Keep the identity of every branch the pair is not in, like setLeafCwd
+    // does: PaneTreeView is memoized on the node, so cloning the whole spine
+    // would re-render every pane in the tab. It only pays off when the dragged
+    // pane was already the focused one, mind: otherwise `syncTabToLeaf` moves
+    // `activeLeafId`, and that prop reaches every pane anyway.
+    let changed = false;
+    const children = n.children.map((c) => {
+      const u = put(c);
+      if (u !== c) changed = true;
+      return u;
+    });
+    return changed ? { ...n, children } : n;
+  };
+  return put(tree);
 }
