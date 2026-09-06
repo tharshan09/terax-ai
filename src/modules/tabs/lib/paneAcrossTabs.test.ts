@@ -2,6 +2,7 @@ import { findLeafCwd, type PaneNode } from "@/modules/terminal/lib/panes";
 import { describe, expect, it } from "vitest";
 import {
   breakOutPaneFromTabs,
+  canBreakOutPane,
   insertTabAtSpaceGap,
   type Tab,
   type TerminalTab,
@@ -320,5 +321,25 @@ describe("undoBreakOut", () => {
     const born = out?.tabs.find((t) => t.id === 7);
     if (born?.kind !== "terminal") throw new Error("expected a terminal tab");
     expect(born.title).toBe("litha");
+  });
+});
+
+describe("canBreakOutPane", () => {
+  it("answers the precondition without building anything", () => {
+    const tabs = [term(1, row(leaf(10), leaf(11))), term(2, leaf(20))];
+    expect(canBreakOutPane(tabs, 11)).toBe(true);
+    // A lone pane already IS the tab.
+    expect(canBreakOutPane(tabs, 20)).toBe(false);
+    // A pane whose shell exited mid-drag is in no tab at all.
+    expect(canBreakOutPane(tabs, 99)).toBe(false);
+  });
+
+  it("agrees with breakOutPaneFromTabs", () => {
+    const tabs = [term(1, row(leaf(10), leaf(11))), term(2, leaf(20))];
+    for (const id of [10, 11, 20, 99]) {
+      expect(canBreakOutPane(tabs, id)).toBe(
+        breakOutPaneFromTabs(tabs, id, 7, 0) !== null,
+      );
+    }
   });
 });

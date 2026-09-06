@@ -325,6 +325,18 @@ export function insertTabAtSpaceGap(
   return [...tabs.slice(0, insertAt), tab, ...tabs.slice(insertAt)];
 }
 
+/** Whether `leafId` names a pane that could become a tab of its own: it exists,
+ *  and it is not already alone in its tab (a lone pane IS the tab, so breaking
+ *  it out would change nothing). The precondition of
+ *  {@link breakOutPaneFromTabs}, separate so a caller can answer it before
+ *  spending a tab id on a drop that cannot happen. */
+export function canBreakOutPane(tabs: Tab[], leafId: number): boolean {
+  const src = tabs.find(
+    (t) => t.kind === "terminal" && hasLeaf(t.paneTree, leafId),
+  );
+  return src?.kind === "terminal" && countLeaves(src.paneTree) >= 2;
+}
+
 /** Pull `leafId` out of its split into a brand-new tab with id `newTabId`,
  *  placed at `gapIndex` in its space's strip. The leaf object moves untouched,
  *  so its PTY and any managed tmux session travel with it: the caller must NOT
@@ -340,8 +352,7 @@ export function breakOutPaneFromTabs(
   const src = tabs.find(
     (t) => t.kind === "terminal" && hasLeaf(t.paneTree, leafId),
   );
-  // A lone pane already IS the tab; breaking it out would change nothing.
-  if (src?.kind !== "terminal" || countLeaves(src.paneTree) < 2) return null;
+  if (src?.kind !== "terminal" || !canBreakOutPane(tabs, leafId)) return null;
   const leaf = findLeafNode(src.paneTree, leafId);
   const rest = removeLeaf(src.paneTree, leafId);
   if (!leaf || rest === null) return null;
@@ -1478,9 +1489,10 @@ export function useTabs(initial?: Partial<TerminalTab>) {
             result = "space-changed";
             return prev;
           }
-          // Past the guards, so a refused drop does not burn an id. Cached in
-          // the closure rather than taken fresh, so a repeated run of this
-          // updater reuses the same id instead of minting another.
+          // Past every refusal, so none of them burns an id. Cached in the
+          // closure rather than taken fresh, so a repeated run of this updater
+          // reuses the same id instead of minting another.
+          if (!canBreakOutPane(prev, leafId)) return prev;
           if (tabId === null) tabId = nextIdRef.current++;
           const born = tabId;
           const out = breakOutPaneFromTabs(prev, leafId, born, gapIndex);

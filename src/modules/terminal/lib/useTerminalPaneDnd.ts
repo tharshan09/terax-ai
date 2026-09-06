@@ -94,9 +94,16 @@ export function useTerminalPaneDnd({ onMove, onBreakOut }: Handlers) {
       let target: PaneDropTarget | null = null;
       const store = usePaneDndStore.getState();
 
-      const move = (ev: PointerEvent) => {
+      // `activate` is what separates the two callers: a pointermove may turn a
+      // press into a drag, the release may only confirm one that is already
+      // running. Without that, a press and release far enough apart with no
+      // move delivered in between (coalesced events, a region that swallows
+      // them) would start and commit a drag in one go, with no ghost and no
+      // indicator ever shown.
+      const move = (ev: PointerEvent, activate = true) => {
         if (ev.pointerId !== pointerId) return;
         if (!active) {
+          if (!activate) return;
           if (Math.hypot(ev.clientX - sx, ev.clientY - sy) < THRESHOLD) return;
           active = true;
           setDragging(true);
@@ -153,7 +160,7 @@ export function useTerminalPaneDnd({ onMove, onBreakOut }: Handlers) {
         // otherwise only computed on movement, and the world does not hold
         // still while a button is held: a space shortcut or a closing tab can
         // make the remembered target point somewhere it no longer belongs.
-        move(ev);
+        move(ev, false);
         end(true);
       };
       const cancel = (ev: PointerEvent) => {
