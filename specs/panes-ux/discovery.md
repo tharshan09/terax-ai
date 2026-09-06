@@ -140,23 +140,34 @@ ineinander uebergehen:
 ```
 Kante                              Mitte
 +-------------------------+        +-------------------------+
-|#########|               |        | +---------------------+ |
-|#########|   Ziel-Pane   |        | |                     | |
-|#########|               |        | |         <->         | |
-+-------------------------+        | |                     | |
- halbe Flaeche gefuellt            | +---------------------+ |
-                                   +-------------------------+
-                                    Rahmen, schwach getoent,
-                                    Symbol in der Mitte
+|#########|               |        |                         |
+|#########|   Ziel-Pane   |        |      +-----------+      |
+|#########|               |        |      |    <->    |      |
+|#########|               |        |      +-----------+      |
++-------------------------+        |                         |
+ halbe Flaeche gefuellt            +-------------------------+
+                                    der Kasten IST das
+                                    mittlere Drittel
 ```
 
-Beim Bauen ist eine Abweichung vom ersten Entwurf dazugekommen, und sie ist
-Absicht: der **Partner** bekommt denselben Rahmen, nur gestrichelt und ohne
-Symbol. Ein Tausch betrifft zwei Panes, und welche zwei es sind, ist die
-eigentliche Frage des Nutzers. Das widerspricht dem „nur ein Ziel" nicht, denn
-Ziel ist weiterhin genau eines; der zweite Rahmen benennt kein Ziel, sondern die
-andere Haelfte des Paars. Das Symbol zeigt ausserdem in die Richtung, in der die
-beiden tatsaechlich tauschen, nebeneinander waagerecht, uebereinander senkrecht.
+Zwei Dinge sind beim Bauen anders geworden als im ersten Entwurf, beide mit
+Grund.
+
+**Der Kasten ist genau die Zone.** Erst war er grosszuegig eingerueckt und damit
+viel groesser als die Flaeche, die wirklich tauscht; wer sichtbar innerhalb des
+Rahmens loslaesst, haette einen Kanten-Einschub bekommen. Beide kommen jetzt aus
+einer Konstante (`CENTER_INSET`), koennen also nicht auseinanderlaufen.
+
+**Der Partner umrandet sich selbst.** Ein Tausch betrifft zwei Panes, und welche
+zwei es sind, ist die eigentliche Frage des Nutzers. Er bekommt aber bewusst
+NICHT denselben Kasten: der Kasten bedeutet „hier darfst du loslassen", und der
+Partner ist kein Ziel. Also eine gestrichelte Umrandung des ganzen Panes, ohne
+Symbol. Das widerspricht dem „nur ein Ziel" nicht, denn Ziel bleibt genau eines.
+
+Das Symbol zeigt in die Richtung, in der die beiden tatsaechlich tauschen,
+nebeneinander waagerecht, uebereinander senkrecht. Liegen sie diagonal, oder ist
+der gezogene Pane gerade nicht messbar, wird **kein** Symbol gezeichnet: eine
+Richtung zu behaupten, die niemand berechnet hat, waere schlimmer als keine.
 
 Das mittlere Drittel ist gross genug, dass an der Grenze nichts flackert. Eine
 Hysterese ist nicht noetig.
