@@ -380,7 +380,16 @@ export function swapLeaves(tree: PaneNode, a: PaneId, b: PaneId): PaneNode {
       if (n.id === b) return { ...nodeA, slotId: slotOf(n) };
       return n;
     }
-    return { ...n, children: n.children.map(put) };
+    // Keep the identity of every branch the pair is not in, like setLeafCwd
+    // does: PaneTreeView is memoized on the node, so cloning the whole spine
+    // would re-render every pane in the tab instead of the two that moved.
+    let changed = false;
+    const children = n.children.map((c) => {
+      const u = put(c);
+      if (u !== c) changed = true;
+      return u;
+    });
+    return changed ? { ...n, children } : n;
   };
   return put(tree);
 }

@@ -393,4 +393,14 @@ describe("swapLeaves", () => {
     expect(leafIds(back)).toEqual(leafIds(tree));
     expect(slots(back)).toEqual(slots(tree));
   });
+
+  it("keeps the identity of branches the pair is not in", () => {
+    // PaneTreeView is memoized on the node: cloning untouched branches would
+    // re-render every pane in the tab instead of the two that moved.
+    const untouched = split(9, "col", leaf(6), leaf(7));
+    const tree = split(1, "row", split(5, "col", leaf(2), leaf(3)), untouched);
+    const out = swapLeaves(tree, 2, 3);
+    expect(out).not.toBe(tree);
+    expect(out.kind === "split" && out.children[1]).toBe(untouched);
+  });
 });

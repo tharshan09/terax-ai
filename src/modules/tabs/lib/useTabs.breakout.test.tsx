@@ -230,4 +230,26 @@ describe("useTabs break-out through React", () => {
     const after = hook.result.current.tabs.find((t) => t.id === tabId);
     expect(after?.kind === "terminal" && after.paneTree).toBe(tree);
   });
+
+  // The pane subtree is keyed by SLOT, so a swap re-points a mounted pane at
+  // another leaf instead of remounting it. Any React state living inside that
+  // subtree is therefore positional, and the blocks overlay holds exactly such
+  // state (a block id, a watermark flag). It is safe only because a blocks tab
+  // can never hold a split, so its panes can never be swapped. This test guards
+  // that assumption: if splitting a blocks tab is ever allowed, it fails here
+  // rather than silently handing one pane's search bar to another.
+  it("refuses to split a blocks tab, which is what keeps pane state per leaf", () => {
+    const hook = renderHook(() => useTabs());
+    let blocksTab = 0;
+    act(() => {
+      blocksTab = hook.result.current.newBlockTab();
+    });
+    let created: number | null = 0;
+    act(() => {
+      created = hook.result.current.splitActivePane(blocksTab, "row");
+    });
+    expect(created).toBeNull();
+    const t = hook.result.current.tabs.find((x) => x.id === blocksTab);
+    expect(t?.kind === "terminal" && leafIds(t.paneTree)).toHaveLength(1);
+  });
 });

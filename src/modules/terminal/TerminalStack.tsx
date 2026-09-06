@@ -184,10 +184,16 @@ function TerminalStackInner({
 }
 
 // Subscribes on its own so the label can follow the drop target without
-// re-rendering the whole stack on every pointer move.
+// re-rendering the whole stack on every pointer move. It has to name the same
+// thing the overlay under the cursor is showing, or the two contradict.
 function PaneDragGhostLabel() {
-  const newTab = usePaneDndStore((s) => s.target?.kind === "newTab");
-  return <>{newTab ? "New tab" : "Move pane"}</>;
+  const label = usePaneDndStore((s) => {
+    const t = s.target;
+    if (!t) return "Move pane";
+    if (t.kind === "newTab") return "New tab";
+    return t.spot === "center" ? "Swap panes" : "Move pane";
+  });
+  return <>{label}</>;
 }
 
 export const TerminalStack = memo(TerminalStackInner);
