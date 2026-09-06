@@ -154,7 +154,8 @@ export const PaneTreeView = memo(function PaneTreeViewImpl(props: Props) {
         // not by the leaf: splitting a leaf in place mints a fresh split id
         // that would otherwise remount the surviving pane, and swapping two
         // panes would otherwise reorder the group's panel ids and drag the
-        // sizes along with them.
+        // sizes along with them. A swapped pane keeps its mount but is handed
+        // another leaf, so its session re-binds even though it does not remount.
         const slotId = firstLeafSlotId(child);
         return (
           <Fragment key={slotId}>

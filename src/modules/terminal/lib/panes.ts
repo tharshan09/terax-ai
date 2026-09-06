@@ -39,9 +39,16 @@ export function slotOf(n: Extract<PaneNode, { kind: "leaf" }>): PaneId {
 
 /** The slot naming `n`'s position in its parent: a subtree is identified by the
  *  slot of its first leaf, which is what keeps a panel's id (and its React key,
- *  and so its mounted terminal) stable while the panes inside it move. */
+ *  and so its bound terminal) stable while the panes inside it move.
+ *
+ *  A childless split should not exist (`removeLeaf` returns null rather than
+ *  leaving one), but this names both a React key and a panel id, so it falls
+ *  back to the node's own id instead of throwing and taking the tree's whole
+ *  render down with it. */
 export function firstLeafSlotId(n: PaneNode): PaneId {
-  return isLeaf(n) ? slotOf(n) : firstLeafSlotId(n.children[0]);
+  if (isLeaf(n)) return slotOf(n);
+  const first = n.children[0];
+  return first === undefined ? n.id : firstLeafSlotId(first);
 }
 
 export function findLeafCwd(n: PaneNode, id: PaneId): string | undefined {
@@ -360,11 +367,19 @@ export function withLeavesFrom(
  * Exchange two leaves in place. Both keep their ids, so their live sessions go
  * with them, and every split node keeps its direction and its children's order.
  *
- * Each pane also inherits the SLOT it moves into. That is what actually holds
- * the layout still: the resize library keys sizes by panel id, and the panel is
- * named after the slot, so the group sees the same panels in the same order and
- * neither the sizes nor the mounted terminals are disturbed. Without it the
- * widths travel with the panes and the divider jumps on every swap.
+ * Each pane also inherits the SLOT it moves into. That is what holds the layout
+ * still: the resize library keys sizes by panel id, and the panel is named
+ * after the slot, so the group sees the same panels in the same order and the
+ * widths stay put. Without it they travel with the panes and the divider jumps.
+ *
+ * The terminals are not left alone, though: a pane keeps its React identity but
+ * is handed a different `leafId`, so both sessions re-bind (detach, release the
+ * renderer slot, attach, acquire). Measured in the running app, both take back
+ * the very slot that still retained their buffer and nothing is serialised
+ * (`snapshotCharsTotal` and the slot owners are unchanged across a swap), so no
+ * live grid is replayed from a snapshot. Worth knowing all the same: this is an
+ * unconditional release on a path the pool otherwise gates while a leaf is busy
+ * or on the alternate screen.
  *
  * Returns the tree unchanged when the two are the same leaf or either is
  * missing.

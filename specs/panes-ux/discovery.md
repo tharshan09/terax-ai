@@ -133,22 +133,30 @@ dasselbe, ab drei nicht mehr. Vor allem bleiben beim Tausch die Groessen erhalte
 beim Einfuegen nicht. Genau deshalb heisst der Upstream-Nachzug `460657a`
 "preserve pane layout during swaps".
 
-Ruhe in der Anzeige: es leuchtet immer nur ein Ziel. Kante wie heute, halber Pane
-gefuellt. Mitte bekommt eine eigene Form, damit die beiden Bedeutungen nicht
+Ruhe in der Anzeige: es leuchtet immer nur ein **Ziel**. Kante wie heute, halber
+Pane gefuellt. Mitte bekommt eine eigene Form, damit die beiden Bedeutungen nicht
 ineinander uebergehen:
 
 ```
-Kante (heute)                      Mitte (neu)
+Kante                              Mitte
 +-------------------------+        +-------------------------+
-|#########|               |        |   +-----------------+   |
-|#########|   Ziel-Pane   |        |   |                 |   |
-|#########|               |        |   |       <->       |   |
-+-------------------------+        |   |                 |   |
- halbe Flaeche gefuellt            |   +-----------------+   |
+|#########|               |        | +---------------------+ |
+|#########|   Ziel-Pane   |        | |                     | |
+|#########|               |        | |         <->         | |
++-------------------------+        | |                     | |
+ halbe Flaeche gefuellt            | +---------------------+ |
                                    +-------------------------+
-                                    Rahmen mit Doppelpfeil,
-                                    Flaeche bleibt frei
+                                    Rahmen, schwach getoent,
+                                    Symbol in der Mitte
 ```
+
+Beim Bauen ist eine Abweichung vom ersten Entwurf dazugekommen, und sie ist
+Absicht: der **Partner** bekommt denselben Rahmen, nur gestrichelt und ohne
+Symbol. Ein Tausch betrifft zwei Panes, und welche zwei es sind, ist die
+eigentliche Frage des Nutzers. Das widerspricht dem „nur ein Ziel" nicht, denn
+Ziel ist weiterhin genau eines; der zweite Rahmen benennt kein Ziel, sondern die
+andere Haelfte des Paars. Das Symbol zeigt ausserdem in die Richtung, in der die
+beiden tatsaechlich tauschen, nebeneinander waagerecht, uebereinander senkrecht.
 
 Das mittlere Drittel ist gross genug, dass an der Grenze nichts flackert. Eine
 Hysterese ist nicht noetig.

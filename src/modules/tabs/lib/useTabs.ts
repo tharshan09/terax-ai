@@ -1413,8 +1413,14 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     if (a === b) return;
     setTabs((curr) =>
       curr.map((t) => {
+        // The blocks guard belongs here, next to the code that depends on it:
+        // a swapped pane keeps its mount and is handed another leaf, so any
+        // React state inside it is positional, and the blocks overlay holds
+        // exactly that. splitActivePane already refuses to split a blocks tab,
+        // which is why no such pane can be reached today.
         if (
           t.kind !== "terminal" ||
+          t.blocks ||
           !hasLeaf(t.paneTree, a) ||
           !hasLeaf(t.paneTree, b)
         )
