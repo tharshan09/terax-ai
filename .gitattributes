@@ -1,2 +1,5 @@
 # Pipeline-generated files (collapsed in GitHub PR diffs)
-specs/**          linguist-generated=true
+specs/**/gates/**      linguist-generated=true
+specs/**/evidence/**   linguist-generated=true
+specs/**/retro/**      linguist-generated=true
+specs/**/codebase-scan.md linguist-generated=true

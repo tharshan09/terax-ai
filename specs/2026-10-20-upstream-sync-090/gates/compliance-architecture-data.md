@@ -5,7 +5,7 @@
 | Geprüft | `specs/2026-10-20-upstream-sync-090/architecture.md`, `discovery.md`, `codebase-scan.md` (keine `wireframes.md`, keine `bindings.md`, kein Reconcile) |
 | Prüfdatum | 2026-10-27 |
 | Lauf | Perspektive `data` (offener Lauf, kein Delta) |
-| Worktree | `/Users/zipmend/Documents/private/projects/terax-ai/.claude/worktrees/upstream-sync-090` (Branch `upstream-sync-090`), `upstream/main` = `640e8b2` |
+| Worktree | `.claude/worktrees/upstream-sync-090` (Branch `upstream-sync-090`), `upstream/main` = `640e8b2` |
 | Evidenz-Domäne | Zwischenablage-Datenformat (NSPasteboard), Dateinamen/Pfade (DF-1..DF-3, BR-1), Dateisystem-Semantik lokal + SSH-Host, IP-Adressformate (BR-16), Manifeste/Lockfiles/Registry-Stände (Slice 7, BR-19, BR-20), persistierte Settings |
 | Messwerkzeuge | `git show` auf Upstream-Commits, Quelltext der Crates in `~/.cargo/registry`, kompilierte Rust-Sonden (`rustc`) gegen Upstream-`net/ip.rs`, privates NSPasteboard über JXA, `python3`-Sonde lokal (APFS) und auf `litha-claude` (Linux), `pnpm install --lockfile-only` in einer Scratch-Kopie, npm-Registry, crates.io-API |
 
