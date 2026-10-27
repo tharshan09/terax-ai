@@ -49,6 +49,7 @@ import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { isHtmlPath, isMarkdownPath } from "@/lib/utils";
 import {
+  isEditorShortcutDisabled,
   useGlobalShortcuts,
   type ShortcutHandlers,
   type ShortcutId,
@@ -975,6 +976,9 @@ export default function App() {
       "view.zenMode": () => setZenMode((v) => !v),
       "editor.undo": () => editorRefs.current.get(activeId)?.undo(),
       "editor.redo": () => editorRefs.current.get(activeId)?.redo(),
+      "editor.save": () => {
+        void editorRefs.current.get(activeId)?.save();
+      },
     }),
     [
       activeId,
@@ -1004,9 +1008,7 @@ export default function App() {
 
   const shortcutsDisabled = useCallback(
     (id: ShortcutId, e: KeyboardEvent) => {
-      if (id === "editor.undo" || id === "editor.redo") {
-        return activeTab?.kind !== "editor";
-      }
+      if (isEditorShortcutDisabled(id, activeTab?.kind)) return true;
       if (id === "ai.askSelection") {
         const target =
           (e.target as HTMLElement | null) ?? document.activeElement;
