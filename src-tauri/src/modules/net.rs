@@ -113,27 +113,35 @@ async fn classify_and_collect_safe_ips(
     Ok(ips)
 }
 
-// Names the client looks up itself, redirect hops to another host included,
-// pass the same classification as the request target.
+// Redirect hops to another name get the target's classification; proxy hosts
+// resolve unclassified so a proxy on a private address keeps working.
 struct GuardedResolver {
     allow_private: bool,
     lookup: Lookup,
+    proxy_hosts: Vec<String>,
 }
 
 impl Resolve for GuardedResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let (allow_private, lookup) = (self.allow_private, self.lookup);
+        let is_proxy = self
+            .proxy_hosts
+            .iter()
+            .any(|proxy| proxy.eq_ignore_ascii_case(name.as_str()));
         Box::pin(async move {
             let host = Host::Domain(name.as_str());
-            let ips = classify_and_collect_safe_ips(&host, allow_private, lookup).await?;
+            let ips = if is_proxy {
+                resolve_and_classify(&host, lookup).await?.1
+            } else {
+                classify_and_collect_safe_ips(&host, allow_private, lookup).await?
+            };
             let addrs: Addrs = Box::new(ips.into_iter().map(|ip| SocketAddr::new(ip, 0)));
             Ok::<_, Box<dyn std::error::Error + Send + Sync>>(addrs)
         })
     }
 }
 
-// Connect to exactly the classified addresses instead of looking the name up
-// again; port 0 is replaced by the URL's port.
+// Reuse the classified addresses, not a second lookup; reqwest fills in port 0.
 fn pin_to(builder: ClientBuilder, host: &Host<&str>, ips: &[IpAddr]) -> ClientBuilder {
     let Host::Domain(name) = *host else {
         return builder;
@@ -142,14 +150,38 @@ fn pin_to(builder: ClientBuilder, host: &Host<&str>, ips: &[IpAddr]) -> ClientBu
     builder.resolve_to_addrs(name, &addrs)
 }
 
-// SECURITY: no proxy. A proxy resolves the target itself, past the pinning and
-// the GuardedResolver, and its own host name would have to pass the guard.
-fn direct_client() -> ClientBuilder {
-    reqwest::Client::builder().no_proxy()
+// Hosts of the proxies reqwest may take from the environment. Behind a proxy the
+// proxy resolves the target itself, so rebinding there is not caught.
+fn proxy_host_names(var: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    [
+        ["ALL_PROXY", "all_proxy"],
+        ["HTTP_PROXY", "http_proxy"],
+        ["HTTPS_PROXY", "https_proxy"],
+    ]
+    .into_iter()
+    .filter_map(|names| names.into_iter().find_map(&var))
+    .filter_map(|value| proxy_domain(&value))
+    .collect()
+}
+
+fn proxy_domain(value: &str) -> Option<String> {
+    let url = if value.contains("://") {
+        Url::parse(value)
+    } else {
+        Url::parse(&format!("http://{value}"))
+    }
+    .ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    match url.host()? {
+        Host::Domain(name) => Some(name.to_owned()),
+        Host::Ipv4(_) | Host::Ipv6(_) => None,
+    }
 }
 
 fn probe_client(host: &Host<&str>, ips: &[IpAddr]) -> Result<reqwest::Client, String> {
-    let builder = direct_client()
+    let builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::none());
     pin_to(builder, host, ips)
@@ -221,31 +253,41 @@ fn build_request(
     Ok(req)
 }
 
-fn build_safe_client(
+fn safe_client_builder(
     allow_private: bool,
     host: &Host<&str>,
     safe_ips: &[IpAddr],
     lookup: Lookup,
-) -> Result<reqwest::Client, String> {
-    let builder = direct_client()
+    proxy_hosts: Vec<String>,
+) -> ClientBuilder {
+    let builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .dns_resolver(Arc::new(GuardedResolver {
             allow_private,
             lookup,
+            proxy_hosts,
         }));
-    pin_to(builder, host, safe_ips)
-        .redirect(reqwest::redirect::Policy::custom(
-            move |attempt| match redirect_decision(
-                attempt.url(),
-                attempt.previous().last(),
-                attempt.previous().len(),
-                allow_private,
-            ) {
-                RedirectDecision::Follow => attempt.follow(),
-                RedirectDecision::Stop => attempt.stop(),
-                RedirectDecision::TooMany => attempt.error("too many redirects"),
-            },
-        ))
+    pin_to(builder, host, safe_ips).redirect(reqwest::redirect::Policy::custom(move |attempt| {
+        match redirect_decision(
+            attempt.url(),
+            attempt.previous().last(),
+            attempt.previous().len(),
+            allow_private,
+        ) {
+            RedirectDecision::Follow => attempt.follow(),
+            RedirectDecision::Stop => attempt.stop(),
+            RedirectDecision::TooMany => attempt.error("too many redirects"),
+        }
+    }))
+}
+
+fn build_safe_client(
+    allow_private: bool,
+    host: &Host<&str>,
+    safe_ips: &[IpAddr],
+) -> Result<reqwest::Client, String> {
+    let proxy_hosts = proxy_host_names(|name| std::env::var(name).ok());
+    safe_client_builder(allow_private, host, safe_ips, system_lookup, proxy_hosts)
         .build()
         .map_err(|e| e.to_string())
 }
@@ -306,7 +348,7 @@ pub async fn ai_http_request(
     let host = parsed.host().ok_or_else(|| "missing host".to_string())?;
     let safe_ips = classify_and_collect_safe_ips(&host, allow_private, system_lookup).await?;
 
-    let client = build_safe_client(allow_private, &host, &safe_ips, system_lookup)?;
+    let client = build_safe_client(allow_private, &host, &safe_ips)?;
 
     let req = build_request(&client, &method, parsed, headers, body)?;
     let resp = req.send().await.map_err(|e| e.to_string())?;
@@ -370,7 +412,7 @@ pub async fn ai_http_stream(
         }
     };
 
-    let client = match build_safe_client(allow_private, &host, &safe_ips, system_lookup) {
+    let client = match build_safe_client(allow_private, &host, &safe_ips) {
         Ok(c) => c,
         Err(e) => {
             let _ = on_event.send(AiStreamEvent::Error { message: e.clone() });
@@ -430,10 +472,8 @@ pub async fn ai_http_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsString;
     use std::io::{Read, Write};
     use std::net::{Ipv4Addr, TcpListener};
-    use std::sync::{Mutex, MutexGuard};
     use std::thread::JoinHandle;
 
     fn no_dns(host: &str) -> io::Result<Vec<IpAddr>> {
@@ -443,7 +483,7 @@ mod tests {
     fn fake_dns(host: &str) -> io::Result<Vec<IpAddr>> {
         let records: &[&str] = match host {
             "metadata-alias.test" => &["169.254.169.254"],
-            "loopback-alias.test" => &["127.0.0.1"],
+            "loopback-alias.test" | "localhost" => &["127.0.0.1"],
             "private-then-loopback.test" => &["10.0.0.1", "127.0.0.1"],
             "loopback-then-private.test" => &["127.0.0.1", "10.0.0.1"],
             "public-and-metadata.test" => &["8.8.8.8", "fd00:ec2::254"],
@@ -505,47 +545,23 @@ mod tests {
 
     fn loopback_client(lookup: Lookup) -> reqwest::Client {
         let origin = Host::Ipv4(Ipv4Addr::LOCALHOST);
-        build_safe_client(true, &origin, &[Ipv4Addr::LOCALHOST.into()], lookup).unwrap()
+        safe_client_builder(
+            true,
+            &origin,
+            &[Ipv4Addr::LOCALHOST.into()],
+            lookup,
+            Vec::new(),
+        )
+        .no_proxy()
+        .build()
+        .unwrap()
     }
 
-    static PROXY_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    const PROXY_VARS: [&str; 3] = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"];
-    const NO_PROXY_VARS: [&str; 2] = ["NO_PROXY", "no_proxy"];
-
-    // Points every proxy variable at a host that cannot resolve; dropping it
-    // restores the previous environment before the lock is released.
-    struct UnreachableProxyEnv {
-        saved: Vec<(&'static str, Option<OsString>)>,
-        _lock: MutexGuard<'static, ()>,
-    }
-
-    impl UnreachableProxyEnv {
-        fn set() -> Self {
-            let lock = PROXY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let saved = PROXY_VARS
-                .iter()
-                .chain(&NO_PROXY_VARS)
-                .map(|&k| (k, std::env::var_os(k)))
-                .collect();
-            for k in PROXY_VARS {
-                std::env::set_var(k, "http://proxy.invalid:3128");
-            }
-            for k in NO_PROXY_VARS {
-                std::env::remove_var(k);
-            }
-            Self { saved, _lock: lock }
-        }
-    }
-
-    impl Drop for UnreachableProxyEnv {
-        fn drop(&mut self) {
-            for (k, v) in &self.saved {
-                match v {
-                    Some(v) => std::env::set_var(k, v),
-                    None => std::env::remove_var(k),
-                }
-            }
+    fn env(vars: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |name| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_owned())
         }
     }
 
@@ -674,6 +690,7 @@ mod tests {
             let resolver = GuardedResolver {
                 allow_private,
                 lookup: fake_dns,
+                proxy_hosts: Vec::new(),
             };
             rt.block_on(resolver.resolve(name.parse().unwrap()))
                 .map(|addrs| addrs.collect::<Vec<_>>())
@@ -718,31 +735,73 @@ mod tests {
     }
 
     #[test]
-    fn clients_connect_directly_even_with_proxy_variables_set() {
-        let (port, server) = serve(|_| vec![LANDED.to_string(), LANDED.to_string()]);
-        let origin = Host::Ipv4(Ipv4Addr::LOCALHOST);
-        let ips = [IpAddr::from(Ipv4Addr::LOCALHOST)];
-        let (safe, probe) = {
-            let _env = UnreachableProxyEnv::set();
-            (
-                build_safe_client(true, &origin, &ips, no_dns).unwrap(),
-                probe_client(&origin, &ips).unwrap(),
-            )
+    fn proxy_hosts_are_read_from_the_injected_environment() {
+        assert_eq!(
+            proxy_host_names(env(&[
+                ("ALL_PROXY", "socks5://socks.corp:1080"),
+                ("HTTP_PROXY", "http://user:pw@LocalHost:3128"),
+                ("http_proxy", "http://shadowed.corp:3128"),
+                ("https_proxy", "proxy.corp:8080"),
+            ])),
+            ["localhost", "proxy.corp"]
+        );
+        assert!(proxy_host_names(env(&[("HTTPS_PROXY", "http://10.0.0.1:3128")])).is_empty());
+        assert!(proxy_host_names(env(&[("HTTP_PROXY", "")])).is_empty());
+        assert!(proxy_host_names(env(&[])).is_empty());
+    }
+
+    #[test]
+    fn guarded_resolver_lets_proxy_hosts_through_and_guards_every_other_name() {
+        let rt = runtime();
+        let resolve = |name: &str, proxy_hosts: &[&str]| {
+            let resolver = GuardedResolver {
+                allow_private: false,
+                lookup: fake_dns,
+                proxy_hosts: proxy_hosts.iter().map(|h| h.to_string()).collect(),
+            };
+            rt.block_on(resolver.resolve(name.parse().unwrap()))
+                .map(|addrs| addrs.collect::<Vec<_>>())
+                .map_err(|e| e.to_string())
+        };
+        assert_eq!(
+            resolve("localhost", &["localhost"]).unwrap(),
+            vec![SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)]
+        );
+        let refused = resolve("localhost", &[]).unwrap_err();
+        assert!(refused.contains("requires explicit opt-in"), "{refused}");
+        let refused = resolve("loopback-alias.test", &["localhost"]).unwrap_err();
+        assert!(refused.contains("requires explicit opt-in"), "{refused}");
+        assert_eq!(
+            resolve("metadata-alias.test", &["localhost"]).unwrap_err(),
+            "host not allowed: metadata-alias.test"
+        );
+    }
+
+    #[test]
+    fn a_proxy_on_loopback_is_reachable_without_private_access() {
+        let (port, server) = serve(|_| vec![LANDED.to_string()]);
+        let target = url("http://public.test/");
+        let host = target.host().unwrap();
+        let ips = [IpAddr::from(Ipv4Addr::new(8, 8, 8, 8))];
+        let client = |proxy_hosts: Vec<String>| {
+            let proxy = reqwest::Proxy::http(format!("http://localhost:{port}")).unwrap();
+            safe_client_builder(false, &host, &ips, fake_dns, proxy_hosts)
+                .proxy(proxy)
+                .build()
+                .unwrap()
         };
         let rt = runtime();
-        for client in [safe, probe] {
-            let body = rt.block_on(async {
-                let resp = client
-                    .get(format!("http://127.0.0.1:{port}/"))
-                    .send()
-                    .await
-                    .map_err(|e| error_chain(&e))
-                    .unwrap();
-                assert_eq!(resp.status(), 200);
-                resp.text().await.unwrap()
-            });
-            assert_eq!(body, "landed");
-        }
+        let err = rt
+            .block_on(client(Vec::new()).get(target.clone()).send())
+            .unwrap_err();
+        let chain = error_chain(&err);
+        assert!(chain.contains("requires explicit opt-in"), "{chain}");
+        let resp = rt
+            .block_on(client(vec!["localhost".into()]).get(target).send())
+            .map_err(|e| error_chain(&e))
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(rt.block_on(resp.text()).unwrap(), "landed");
         server.join().unwrap();
     }
 

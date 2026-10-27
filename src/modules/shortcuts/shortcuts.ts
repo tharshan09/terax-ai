@@ -336,8 +336,7 @@ export const SHORTCUTS: Shortcut[] = [
       { [MOD_PROP]: true, shift: true, key: "z" },
     ],
   },
-  // Mod+S at the app layer so WKWebView cannot steal "Save Page". CodeMirror
-  // also binds Mod-s; the global capture handler runs first and stops the event.
+  // Claimed at the app layer so Mod+S never reaches the WebView's Save Page.
   {
     id: "editor.save",
     label: "Save file",

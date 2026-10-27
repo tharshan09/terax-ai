@@ -60,7 +60,7 @@ export type EditorPaneHandle = {
   /** Apply CodeMirror's undo/redo commands. */
   undo: () => void;
   redo: () => void;
-  /** Rejects when the write fails; calls `onSaved` only after a real write. */
+  /** Rejects when the write fails; useDocument has already toasted it. */
   save: () => Promise<void>;
 };
 
@@ -71,7 +71,6 @@ type Props = {
   workspace?: WorkspaceEnv;
   overrideLanguage?: string | null;
   onDirtyChange?: (dirty: boolean) => void;
-  onSaved?: () => void;
   onClose?: () => void;
 };
 
@@ -83,8 +82,7 @@ function formatBytes(n: number): string {
 
 export const EditorPane = forwardRef<EditorPaneHandle, Props>(
   function EditorPane(props, ref) {
-    const { path, workspace, overrideLanguage, onDirtyChange, onSaved, onClose } =
-      props;
+    const { path, workspace, overrideLanguage, onDirtyChange, onClose } = props;
 
     const { doc, onChange, save, reload } = useDocument({
       path,
@@ -138,21 +136,12 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
         unsubPrefs();
       };
     }, []);
-    // Stabilize save + onSaved via refs so the extensions array never changes
-    // identity — a new identity makes @uiw/react-codemirror reconfigure the
-    // whole state, wiping the language compartment.
+    // A stable save keeps the extensions identity fixed; a new one makes
+    // @uiw/react-codemirror reconfigure the state and wipe the language.
     const saveRef = useRef(save);
     saveRef.current = save;
-    const onSavedRef = useRef(onSaved);
-    onSavedRef.current = onSaved;
     const onCloseRef = useRef(onClose);
     onCloseRef.current = onClose;
-
-    // saveRef rejects on failure (useDocument toasts it); onSaved needs a real
-    // write, not a clean buffer or a write withheld by a disk conflict.
-    const saveAndNotify = useCallback(async () => {
-      if ((await saveRef.current()) === "written") onSavedRef.current?.();
-    }, []);
 
     const pathRef = useRef(path);
     pathRef.current = path;
@@ -193,7 +182,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
         ),
         vimHandlersExtension(() => ({
           save: () => {
-            void saveAndNotify().catch(() => {});
+            void saveRef.current().catch(() => {});
           },
           close: () => onCloseRef.current?.(),
         })),
@@ -238,20 +227,19 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
           getPath: () => pathRef.current,
           getLanguage: () => languageRef.current,
         }),
-        // Still reached when editor.save is rebound or on key repeat, which
-        // the global handler lets through.
+        // Fallback for when editor.save is rebound away from Mod+S.
         keymap.of([
           {
             key: "Mod-s",
             preventDefault: true,
             run: () => {
-              void saveAndNotify().catch(() => {});
+              void saveRef.current().catch(() => {});
               return true;
             },
           },
         ]),
       ],
-      [saveAndNotify],
+      [],
     );
 
     useEffect(() => {
@@ -352,9 +340,11 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
           const view = cmRef.current?.view;
           if (view) redo(view);
         },
-        save: saveAndNotify,
+        save: async () => {
+          await saveRef.current();
+        },
       }),
-      [path, applyPendingGoto, saveAndNotify],
+      [path, applyPendingGoto],
     );
 
     // Media (image/video/audio/pdf) renders through the asset protocol, whose

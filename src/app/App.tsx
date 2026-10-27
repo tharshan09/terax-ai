@@ -11,7 +11,6 @@ import { usePresence } from "@/lib/usePresence";
 import { quoteShellArg } from "@/lib/shellQuote";
 import { useUiFonts } from "@/lib/useUiFonts";
 import { useZoom } from "@/lib/useZoom";
-import { isWindowHidden } from "@/lib/windowVisibility";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   AgentMissionControl,
@@ -476,7 +475,7 @@ export default function App() {
     let cancelled = false;
     let inFlight = false;
     const tick = () => {
-      if (cancelled || inFlight || isWindowHidden()) return;
+      if (cancelled || inFlight || document.hidden) return;
       inFlight = true;
       tmuxPaneCwd(workspace, tmuxPollSession)
         .then((path) => {

@@ -135,11 +135,8 @@ fn embedded_ipv4(s: &[u16; 8]) -> Option<[Option<Ipv4Addr>; 2]> {
     }
 }
 
-// ISATAP (RFC 5214) carries the IPv4 tunnel endpoint in the interface ID, under
-// any prefix, so it can hide behind an otherwise public /64; every u/g bit
-// combination counts.
-// Conservative on purpose: a lookalike IID over a private IPv4 needs opt-in, as
-// a real tunnel endpoint cannot be ruled out from the address alone.
+// ISATAP (RFC 5214) hides an IPv4 endpoint in the IID under any prefix; a
+// lookalike IID counts too, as the address alone cannot rule out a tunnel.
 fn isatap_ipv4(s: &[u16; 8]) -> Option<Ipv4Addr> {
     match *s {
         [_, _, _, _, 0 | 0x0100 | 0x0200 | 0x0300, 0x5efe, hi, lo] => Some(v4(hi, lo)),
