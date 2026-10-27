@@ -4,7 +4,7 @@ import { IS_MAC, USE_CUSTOM_WINDOW_CONTROLS } from "@/lib/platform";
 import { useUiFonts } from "@/lib/useUiFonts";
 import type { SettingsTab } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import { usePageSaveGuard } from "@/modules/shortcuts/lib/usePageSaveGuard";
+import { usePageSaveGuard } from "@/modules/shortcuts";
 import {
   AiScanIcon,
   InformationCircleIcon,

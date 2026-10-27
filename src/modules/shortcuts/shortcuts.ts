@@ -73,6 +73,9 @@ export type Shortcut = {
   allowRepeat?: boolean;
 };
 
+/** The platform Mod+S: editor.save's default and the WebView's "Save Page" key. */
+export const MOD_S: KeyBinding = { [MOD_PROP]: true, key: "s" };
+
 export const SHORTCUTS: Shortcut[] = [
   {
     id: "commandPalette.open",
@@ -340,7 +343,7 @@ export const SHORTCUTS: Shortcut[] = [
     id: "editor.save",
     label: "Save file",
     group: "Editor",
-    defaultBindings: [{ [MOD_PROP]: true, key: "s" }],
+    defaultBindings: [MOD_S],
   },
 ];
 
