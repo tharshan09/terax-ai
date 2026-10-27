@@ -109,15 +109,20 @@ mod tests {
             &ns(&folder),
             true,
         )));
-        let reference = NSURL::fileURLWithPath(&ns(&referenced))
-            .fileReferenceURL()
-            .expect("file reference url");
-        assert!(reference
-            .absoluteString()
-            .unwrap()
-            .to_string()
-            .starts_with("file:///.file/id="));
-        items.push(url_item(&reference));
+        // Finder writes file-reference URLs; they resolve to the name as stored.
+        let reference_to = |p: &std::path::Path| {
+            let reference = NSURL::fileURLWithPath(&ns(p))
+                .fileReferenceURL()
+                .expect("file reference url");
+            assert!(reference
+                .absoluteString()
+                .unwrap()
+                .to_string()
+                .starts_with("file:///.file/id="));
+            url_item(&reference)
+        };
+        items.push(reference_to(&folder));
+        items.push(reference_to(&referenced));
         let text = NSPasteboardItem::new();
         assert!(
             text.setString_forType(&NSString::from_str("hello"), unsafe {
@@ -130,10 +135,26 @@ mod tests {
         write(&pasteboard, &items);
         let expected: Vec<String> = files
             .iter()
-            .chain([&folder, &referenced])
+            .chain([&folder, &folder, &referenced])
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
-        assert_eq!(read_file_paths(&pasteboard), expected);
+        let got = read_file_paths(&pasteboard);
+        assert_eq!(got.len(), expected.len(), "{got:?}");
+        // A plain path URL from fileURLWithPath carries the decomposed (NFD)
+        // spelling, which APFS resolves to the same entry. Compare it by
+        // identity; every other item, including the Finder-style reference
+        // to the same folder, must match the on-disk name exactly.
+        use std::os::unix::fs::MetadataExt;
+        let id = |p: &str| {
+            let m = std::fs::metadata(p).unwrap();
+            (m.dev(), m.ino())
+        };
+        for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
+            assert_eq!(id(g), id(e), "item {i}: {g:?} vs {e:?}");
+            if i != 2 {
+                assert_eq!(g, e, "item {i}");
+            }
+        }
 
         pasteboard.clearContents();
         assert!(read_file_paths(&pasteboard).is_empty());
