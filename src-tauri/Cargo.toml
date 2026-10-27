@@ -45,10 +45,9 @@ reqwest = { version = "0.12", default-features = false, features = [
 	"rustls-tls",
 	"stream",
 ] }
-url = "2"
 bytes = "1"
 futures-util = "0.3"
-tokio = { version = "1", default-features = false, features = ["rt", "time"] }
+tokio = { version = "1", default-features = false, features = ["rt"] }
 tempfile = "3"
 notify = "8.2.0"
 

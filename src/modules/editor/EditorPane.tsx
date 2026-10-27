@@ -60,7 +60,7 @@ export type EditorPaneHandle = {
   /** Apply CodeMirror's undo/redo commands. */
   undo: () => void;
   redo: () => void;
-  /** The save behind Mod+S and :w; rejects when the write fails. */
+  /** The save behind Mod+S and :w; never rejects, useDocument toasts a failed write. */
   save: () => Promise<void>;
 };
 
@@ -145,10 +145,11 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
     saveRef.current = save;
     const onSavedRef = useRef(onSaved);
     onSavedRef.current = onSaved;
-    // onSaved only after a real write: saveRef rejects on failure (useDocument
-    // toasts it) and resolves false when a disk conflict withheld the write.
+    // onSaved only after a real write: a failure is already toasted by
+    // useDocument, a disk conflict resolves false.
     const saveAndNotify = useCallback(async () => {
-      if (await saveRef.current()) onSavedRef.current?.();
+      const written = await saveRef.current().catch(() => false);
+      if (written) onSavedRef.current?.();
     }, []);
     const onCloseRef = useRef(onClose);
     onCloseRef.current = onClose;
@@ -192,7 +193,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
         ),
         vimHandlersExtension(() => ({
           save: () => {
-            void saveAndNotify().catch(() => {});
+            void saveAndNotify();
           },
           close: () => onCloseRef.current?.(),
         })),

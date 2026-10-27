@@ -1,16 +1,12 @@
 use std::collections::HashMap;
-use std::future::Future;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use bytes::Bytes;
 use futures_util::StreamExt;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, LOCATION};
-use reqwest::{ClientBuilder, Method, StatusCode};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::{Method, Url};
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
-use url::{Host, Url};
 
 mod ip;
 use ip::{ip_kind, IpKind};
@@ -28,22 +24,6 @@ const HEADER_BLOCKLIST: &[&str] = &[
     "expect",
 ];
 
-const MAX_REDIRECTS: usize = 10;
-const CLIENT_CACHE_SIZE: usize = 8;
-const DRAIN_LIMIT: usize = 64 * 1024;
-const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
-
-const PAYLOAD_HEADERS: [&str; 2] = ["content-type", "content-encoding"];
-
-// Any other caller header may carry a key (x-api-key, x-goog-api-key, ...).
-const CROSS_ORIGIN_HEADERS: [&str; 5] = [
-    "accept",
-    "accept-encoding",
-    "accept-language",
-    "content-type",
-    "user-agent",
-];
-
 fn is_blocked_host_name(host: &str) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     matches!(
@@ -52,204 +32,89 @@ fn is_blocked_host_name(host: &str) -> bool {
     )
 }
 
-fn host_ip<S>(host: &Host<S>) -> Option<IpAddr> {
-    match *host {
-        Host::Ipv4(ip) => Some(ip.into()),
-        Host::Ipv6(ip) => Some(ip.into()),
-        Host::Domain(_) => None,
-    }
-}
-
-fn worst_kind(ips: &[IpAddr]) -> Option<IpKind> {
-    ips.iter().map(|ip| ip_kind(*ip)).reduce(IpKind::worse)
-}
-
-trait Dns {
-    fn lookup(&self, name: String) -> impl Future<Output = Result<Vec<IpAddr>, String>> + Send;
-}
-
-struct SystemDns;
-
-impl Dns for SystemDns {
-    async fn lookup(&self, name: String) -> Result<Vec<IpAddr>, String> {
-        tokio::task::spawn_blocking(move || {
-            (name.as_str(), 0u16)
-                .to_socket_addrs()
-                .map(|it| it.map(|a| a.ip()).collect())
-        })
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| format!("dns: {e}"))
-    }
-}
-
 /// Resolve `host` once and return both its safety classification and the
 /// concrete IPs we resolved. Callers can pin reqwest to these IPs to defeat
 /// DNS rebinding (where a second lookup returns a different address).
-async fn resolve_and_classify(
-    host: &Host<String>,
-    dns: &impl Dns,
-) -> Result<(IpKind, Vec<IpAddr>), String> {
-    let ips = match host_ip(host) {
-        Some(ip) => vec![ip],
-        None => dns.lookup(host.to_string()).await?,
-    };
-    let worst = worst_kind(&ips).ok_or("dns: no addresses")?;
-    Ok((worst, ips))
+async fn resolve_and_classify(host: &str) -> Result<(IpKind, Vec<IpAddr>), String> {
+    // Direct literal? Skip DNS. `Url::host_str` keeps the brackets of IPv6.
+    if let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>() {
+        return Ok((ip_kind(ip), vec![ip]));
+    }
+    let host_owned = host.to_string();
+    let lookup = tokio::task::spawn_blocking(move || {
+        (host_owned.as_str(), 0u16)
+            .to_socket_addrs()
+            .map(|it| it.map(|a| a.ip()).collect::<Vec<_>>())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("dns: {e}"))?;
+    if lookup.is_empty() {
+        return Err("dns: no addresses".into());
+    }
+    let mut worst = IpKind::Public;
+    for ip in &lookup {
+        let k = ip_kind(*ip);
+        worst = match (worst, k) {
+            (_, IpKind::BlockedMetadata) => IpKind::BlockedMetadata,
+            (IpKind::BlockedMetadata, _) => IpKind::BlockedMetadata,
+            (IpKind::Public, x) => x,
+            (x, IpKind::Public) => x,
+            (a, _) => a,
+        };
+    }
+    Ok((worst, lookup))
 }
 
-fn parse_url(url: &str) -> Result<Url, String> {
-    Url::parse(url).map_err(|e| format!("invalid url: {e}"))
-}
-
-fn check_url_shape(url: &Url) -> Result<Host<&str>, String> {
-    match url.scheme() {
+fn validate_url(url: &str, allow_private: bool) -> Result<Url, String> {
+    let parsed = Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
+    match parsed.scheme() {
         "http" | "https" => {}
         s => return Err(format!("scheme not allowed: {s}")),
     }
-    if !url.username().is_empty() || url.password().is_some() {
+    if parsed.username() != "" || parsed.password().is_some() {
         return Err("userinfo in url is not allowed".into());
     }
-    let host = url.host().ok_or_else(|| "missing host".to_string())?;
-    if matches!(host, Host::Domain(name) if is_blocked_host_name(name)) {
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "missing host".to_string())?;
+    if is_blocked_host_name(host) {
         return Err(format!("host not allowed: {host}"));
     }
-    Ok(host)
+    // The actual IP classification has to be async — caller does it.
+    let _ = allow_private;
+    Ok(parsed)
 }
 
-fn admit(host: &Host<String>, kind: IpKind, allow_private: bool) -> Result<(), String> {
-    match kind {
-        IpKind::Public => Ok(()),
-        IpKind::Private | IpKind::Loopback if allow_private => Ok(()),
-        IpKind::BlockedMetadata => Err(format!("host not allowed: {host}")),
-        IpKind::Private | IpKind::Loopback => Err(format!(
-            "host {host} resolves to a private/loopback address; this endpoint requires explicit opt-in",
-        )),
-    }
-}
-
-/// The returned IPs pin reqwest to exactly the addresses `admit` judged, so a
-/// second lookup cannot rebind the host.
-async fn resolve_and_admit(
-    host: &Host<String>,
+/// Classify the host AND return safe IPs to pin reqwest's resolver to.
+/// Defeats DNS rebinding (second-lookup-returns-different-IP) by reusing
+/// exactly the addresses that passed `ip_kind`.
+async fn classify_and_collect_safe_ips(
+    host: &str,
     allow_private: bool,
-    dns: &impl Dns,
-) -> Result<(IpKind, Vec<IpAddr>), String> {
-    let (worst, ips) = resolve_and_classify(host, dns).await?;
-    admit(host, worst, allow_private)?;
-    Ok((worst, ips))
-}
-
-// Local models never go through an env proxy. Residual risk only for public
-// targets: behind an env proxy the proxy resolves them again.
-fn uses_env_proxy(kind: IpKind) -> bool {
-    kind == IpKind::Public
-}
-
-// Reuse the classified addresses, not a second lookup; reqwest fills in port 0.
-fn pin_to(builder: ClientBuilder, host: &Host<String>, ips: &[IpAddr]) -> ClientBuilder {
-    let Host::Domain(name) = host else {
-        return builder;
-    };
-    let addrs: Vec<SocketAddr> = ips.iter().map(|ip| SocketAddr::new(*ip, 0)).collect();
-    builder.resolve_to_addrs(name, &addrs)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Timeouts {
-    Ai,
-    Ping,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct ClientKey {
-    host: Host<String>,
-    ips: Vec<IpAddr>,
-    kind: IpKind,
-    timeouts: Timeouts,
-}
-
-async fn admit_url(
-    url: &Url,
-    allow_private: bool,
-    timeouts: Timeouts,
-    dns: &impl Dns,
-) -> Result<ClientKey, String> {
-    let host = check_url_shape(url)?.to_owned();
-    let (kind, mut ips) = resolve_and_admit(&host, allow_private, dns).await?;
-    // DNS record order and repeats must not split the client cache.
-    ips.sort_unstable();
-    ips.dedup();
-    Ok(ClientKey {
-        host,
-        ips,
-        kind,
-        timeouts,
-    })
-}
-
-fn build_client(key: &ClientKey) -> Result<reqwest::Client, String> {
-    let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
-    let mut builder = match key.timeouts {
-        Timeouts::Ai => builder.connect_timeout(Duration::from_secs(10)),
-        Timeouts::Ping => builder.timeout(Duration::from_secs(5)),
-    };
-    if !uses_env_proxy(key.kind) {
-        builder = builder.no_proxy();
-    }
-    pin_to(builder, &key.host, &key.ips)
-        .build()
-        .map_err(|e| e.to_string())
-}
-
-struct Lru<K, V> {
-    capacity: usize,
-    entries: Vec<(K, V)>,
-}
-
-impl<K: PartialEq, V: Clone> Lru<K, V> {
-    const fn new(capacity: usize) -> Self {
-        Self {
-            capacity,
-            entries: Vec::new(),
+) -> Result<Vec<IpAddr>, String> {
+    let (worst, ips) = resolve_and_classify(host).await?;
+    match worst {
+        IpKind::BlockedMetadata => return Err(format!("host not allowed: {host}")),
+        IpKind::Loopback | IpKind::Private if !allow_private => {
+            return Err(format!(
+                "host {host} resolves to a private/loopback address; this endpoint requires explicit opt-in",
+            ));
         }
+        _ => {}
     }
-
-    fn get(&mut self, key: &K) -> Option<V> {
-        let i = self.entries.iter().position(|(k, _)| k == key)?;
-        let entry = self.entries.remove(i);
-        let value = entry.1.clone();
-        self.entries.push(entry);
-        Some(value)
+    let safe: Vec<IpAddr> = ips
+        .into_iter()
+        .filter(|ip| match ip_kind(*ip) {
+            IpKind::BlockedMetadata => false,
+            IpKind::Loopback | IpKind::Private => allow_private,
+            IpKind::Public => true,
+        })
+        .collect();
+    if safe.is_empty() {
+        return Err(format!("host {host}: no safe IPs"));
     }
-
-    /// An entry cached in the meantime wins over `value`.
-    fn insert(&mut self, key: K, value: V) -> V {
-        if let Some(cached) = self.get(&key) {
-            return cached;
-        }
-        if self.entries.len() >= self.capacity {
-            self.entries.remove(0);
-        }
-        self.entries.push((key, value.clone()));
-        value
-    }
-}
-
-static CLIENTS: Mutex<Lru<ClientKey, reqwest::Client>> = Mutex::new(Lru::new(CLIENT_CACHE_SIZE));
-
-fn clients() -> MutexGuard<'static, Lru<ClientKey, reqwest::Client>> {
-    CLIENTS.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-// Building loads the TLS roots, so it runs outside the lock.
-fn client_for(key: ClientKey) -> Result<reqwest::Client, String> {
-    let cached = clients().get(&key);
-    if let Some(client) = cached {
-        return Ok(client);
-    }
-    let client = build_client(&key)?;
-    Ok(clients().insert(key, client))
+    Ok(safe)
 }
 
 fn sanitize_headers(headers: Option<HashMap<String, String>>) -> Result<HeaderMap, String> {
@@ -277,12 +142,22 @@ pub async fn lm_ping(base_url: String) -> Result<u16, String> {
     if trimmed.is_empty() {
         return Err("empty base url".into());
     }
-    let probe = parse_url(&format!("{trimmed}/models"))?;
-    let client = client_for(admit_url(&probe, true, Timeouts::Ping, &SystemDns).await?)?;
+    let probe = format!("{trimmed}/models");
+    let parsed = validate_url(&probe, true)?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "missing host".to_string())?
+        .to_string();
+    let safe_ips = classify_and_collect_safe_ips(&host, true).await?;
 
-    // Any answer, a 3xx included, means the server is reachable.
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none());
+    let addrs: Vec<SocketAddr> = safe_ips.iter().map(|ip| SocketAddr::new(*ip, 0)).collect();
+    builder = builder.resolve_to_addrs(&host, &addrs);
+    let client = builder.build().map_err(|e| e.to_string())?;
     client
-        .get(probe)
+        .get(parsed)
         .send()
         .await
         .map(|r| r.status().as_u16())
@@ -298,138 +173,109 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 
-#[derive(Debug)]
-struct Hop {
+fn build_request(
+    client: &reqwest::Client,
+    method: &str,
     url: Url,
-    method: Method,
-    headers: HeaderMap,
-    body: Option<Bytes>,
+    headers: Option<HashMap<String, String>>,
+    body: Option<Vec<u8>>,
+) -> Result<reqwest::RequestBuilder, String> {
+    let method = Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
+    let mut req = client.request(method, url);
+    let map = sanitize_headers(headers)?;
+    req = req.headers(map);
+    if let Some(b) = body {
+        req = req.body(b);
+    }
+    Ok(req)
 }
 
-impl Hop {
-    fn first(
-        url: &str,
-        method: &str,
-        headers: Option<HashMap<String, String>>,
-        body: Option<Vec<u8>>,
-    ) -> Result<Self, String> {
-        Ok(Self {
-            url: parse_url(url)?,
-            method: Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?,
-            headers: sanitize_headers(headers)?,
-            body: body.map(Bytes::from),
-        })
-    }
+#[derive(Debug, PartialEq, Eq)]
+enum RedirectDecision {
+    Follow,
+    Stop,
+    TooMany,
 }
 
-fn keep_only(headers: &HeaderMap, allowed: &[&str]) -> HeaderMap {
-    headers
-        .iter()
-        .filter(|(name, _)| allowed.contains(&name.as_str()))
-        .map(|(name, value)| (name.clone(), value.clone()))
-        .collect()
-}
-
-// reqwest 0.12's method and body rules; an origin change strips the caller's
-// headers for the rest of the chain. No Referer: a URL may carry an API key.
-fn next_hop(
-    current: &Hop,
-    status: StatusCode,
-    location: Option<&HeaderValue>,
-    followed: usize,
-) -> Result<Option<Hop>, String> {
-    let keeps_payload = match status {
-        StatusCode::MOVED_PERMANENTLY | StatusCode::FOUND => current.method != Method::POST,
-        StatusCode::TEMPORARY_REDIRECT | StatusCode::PERMANENT_REDIRECT => true,
-        StatusCode::SEE_OTHER => false,
-        _ => return Ok(None),
-    };
-    // An unfollowable Location hands the 3xx back to the caller, like reqwest.
-    let Some(url) = location
-        .and_then(|value| std::str::from_utf8(value.as_bytes()).ok())
-        .and_then(|value| current.url.join(value).ok())
-        .filter(|url| check_url_shape(url).is_ok())
-    else {
-        return Ok(None);
-    };
-    if followed >= MAX_REDIRECTS {
-        return Err("too many redirects".into());
+/// Without `allow_private` a redirect may not leave the pinned host, so a
+/// public API cannot bounce a request onto an internal address.
+fn redirect_decision(
+    next: &Url,
+    last_previous: Option<&Url>,
+    previous_len: usize,
+    allow_private: bool,
+) -> RedirectDecision {
+    if previous_len > 10 {
+        return RedirectDecision::TooMany;
     }
-    if current.url.scheme() == "https" && url.scheme() == "http" {
-        return Err("redirect from https to http refused".into());
+    match next.scheme() {
+        "http" | "https" => {}
+        _ => return RedirectDecision::Stop,
     }
-    let mut next = Hop {
-        url,
-        method: current.method.clone(),
-        headers: current.headers.clone(),
-        body: current.body.clone(),
+    if next.username() != "" || next.password().is_some() {
+        return RedirectDecision::Stop;
+    }
+    let Some(host) = next.host_str() else {
+        return RedirectDecision::Stop;
     };
-    if !keeps_payload {
-        if next.method != Method::HEAD {
-            next.method = Method::GET;
+    if is_blocked_host_name(host) {
+        return RedirectDecision::Stop;
+    }
+    if let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>() {
+        let kind = ip_kind(ip);
+        if kind == IpKind::BlockedMetadata {
+            return RedirectDecision::Stop;
         }
-        next.body = None;
-        for name in PAYLOAD_HEADERS {
-            next.headers.remove(name);
+        if !allow_private && matches!(kind, IpKind::Loopback | IpKind::Private) {
+            return RedirectDecision::Stop;
         }
-    }
-    if next.url.origin() != current.url.origin() {
-        next.headers = keep_only(&next.headers, &CROSS_ORIGIN_HEADERS);
-    }
-    Ok(Some(next))
-}
-
-// A body read to its end hands the connection back to the pool for the next
-// hop; a large or slow one is dropped together with its connection.
-async fn drain(mut response: reqwest::Response) {
-    if response
-        .content_length()
-        .is_some_and(|len| len > DRAIN_LIMIT as u64)
-    {
-        return;
-    }
-    let _ = tokio::time::timeout(DRAIN_TIMEOUT, async {
-        let mut read = 0;
-        while let Ok(Some(chunk)) = response.chunk().await {
-            read += chunk.len();
-            if read > DRAIN_LIMIT {
-                return;
+    } else if !allow_private {
+        if let Some(prev) = last_previous {
+            if prev.host_str() != Some(host) {
+                return RedirectDecision::Stop;
             }
         }
-    })
-    .await;
+    }
+    RedirectDecision::Follow
 }
 
-// reqwest would resolve a redirect target itself, unclassified and unpinned, so
-// every hop passes admit_url and gets a client for its own address class.
-async fn send_guarded(
-    dns: &impl Dns,
-    allow_private: bool,
-    mut hop: Hop,
-) -> Result<reqwest::Response, String> {
-    let mut followed = 0;
-    loop {
-        let client = client_for(admit_url(&hop.url, allow_private, Timeouts::Ai, dns).await?)?;
-        let mut request = client
-            .request(hop.method.clone(), hop.url.clone())
-            .headers(hop.headers.clone());
-        if let Some(body) = &hop.body {
-            request = request.body(body.clone());
+// Same rule as upstream 11343a1: with private access a redirect to another host
+// name is followed without DNS classification, and reqwest resolves it unpinned.
+fn redirect_policy(allow_private: bool) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        match redirect_decision(
+            attempt.url(),
+            attempt.previous().last(),
+            attempt.previous().len(),
+            allow_private,
+        ) {
+            RedirectDecision::Follow => attempt.follow(),
+            RedirectDecision::Stop => attempt.stop(),
+            RedirectDecision::TooMany => attempt.error("too many redirects"),
         }
-        let response = request.send().await.map_err(|e| e.to_string())?;
-        let Some(next) = next_hop(
-            &hop,
-            response.status(),
-            response.headers().get(LOCATION),
-            followed,
-        )?
-        else {
-            return Ok(response);
-        };
-        drain(response).await;
-        hop = next;
-        followed += 1;
+    })
+}
+
+fn build_safe_client(
+    allow_private: bool,
+    pinned: &[(String, Vec<IpAddr>)],
+) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(10));
+    // Pin reqwest's resolver to the IPs we just classified. Without this,
+    // reqwest's own DNS lookup could return a different (private/metadata) IP
+    // for the same hostname between classify and connect — classic DNS
+    // rebinding attack. We pin port 0 because reqwest fills in the actual
+    // port from the URL when wiring up the override map.
+    for (host, ips) in pinned {
+        let addrs: Vec<SocketAddr> = ips.iter().map(|ip| SocketAddr::new(*ip, 0)).collect();
+        if !addrs.is_empty() {
+            builder = builder.resolve_to_addrs(host, &addrs);
+        }
     }
+    builder
+        .redirect(redirect_policy(allow_private))
+        .build()
+        .map_err(|e| e.to_string())
 }
 
 fn header_map_to_strings(headers: &HeaderMap) -> HashMap<String, String> {
@@ -442,17 +288,6 @@ fn header_map_to_strings(headers: &HeaderMap) -> HashMap<String, String> {
     out
 }
 
-async fn read_response(response: reqwest::Response) -> Result<HttpResponse, String> {
-    let status = response.status().as_u16();
-    let headers = header_map_to_strings(response.headers());
-    let body = response.bytes().await.map_err(|e| e.to_string())?.to_vec();
-    Ok(HttpResponse {
-        status,
-        headers,
-        body,
-    })
-}
-
 #[tauri::command]
 pub async fn ai_http_request(
     url: String,
@@ -461,9 +296,27 @@ pub async fn ai_http_request(
     body: Option<Vec<u8>>,
     allow_private_network: Option<bool>,
 ) -> Result<HttpResponse, String> {
-    let hop = Hop::first(&url, &method, headers, body)?;
-    let response = send_guarded(&SystemDns, allow_private_network.unwrap_or(false), hop).await?;
-    read_response(response).await
+    let allow_private = allow_private_network.unwrap_or(false);
+    let parsed = validate_url(&url, allow_private)?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "missing host".to_string())?
+        .to_string();
+    let safe_ips = classify_and_collect_safe_ips(&host, allow_private).await?;
+
+    let client = build_safe_client(allow_private, &[(host, safe_ips)])?;
+
+    let req = build_request(&client, &method, parsed, headers, body)?;
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+
+    let status = resp.status().as_u16();
+    let headers = header_map_to_strings(resp.headers());
+    let body = resp.bytes().await.map_err(|e| e.to_string())?.to_vec();
+    Ok(HttpResponse {
+        status,
+        headers,
+        body,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -509,17 +362,25 @@ async fn stream_events(
     body: Option<Vec<u8>>,
     allow_private: bool,
 ) -> Result<(), String> {
-    let hop = Hop::first(url, method, headers, body)?;
-    let response = send_guarded(&SystemDns, allow_private, hop).await?;
+    let parsed = validate_url(url, allow_private)?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "missing host".to_string())?
+        .to_string();
+    let safe_ips = classify_and_collect_safe_ips(&host, allow_private).await?;
 
-    let _ = on_event.send(AiStreamEvent::Headers {
-        status: response.status().as_u16(),
-        headers: header_map_to_strings(response.headers()),
-    });
+    let client = build_safe_client(allow_private, &[(host, safe_ips)])?;
 
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let bytes = chunk.map_err(|e| e.to_string())?.to_vec();
+    let req = build_request(&client, method, parsed, headers, body)?;
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+
+    let status = resp.status().as_u16();
+    let headers = header_map_to_strings(resp.headers());
+    let _ = on_event.send(AiStreamEvent::Headers { status, headers });
+
+    let mut stream = resp.bytes_stream();
+    while let Some(item) = stream.next().await {
+        let bytes = item.map_err(|e| e.to_string())?.to_vec();
         if on_event.send(AiStreamEvent::Chunk { bytes }).is_err() {
             // Channel dropped (frontend aborted): stop streaming.
             return Ok(());
@@ -534,15 +395,12 @@ async fn stream_events(
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::io::{Read, Write};
-    use std::net::{Ipv4Addr, TcpListener, TcpStream};
+    use std::net::{Ipv4Addr, Ipv6Addr};
     use std::sync::{Arc, Mutex};
-    use std::thread::JoinHandle;
     use tauri::ipc::InvokeResponseBody;
 
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
-            .enable_all()
             .build()
             .unwrap()
     }
@@ -550,120 +408,6 @@ mod tests {
     fn url(s: &str) -> Url {
         Url::parse(s).unwrap()
     }
-
-    fn shape(s: &str) -> Result<Host<String>, String> {
-        check_url_shape(&parse_url(s)?).map(|host| host.to_owned())
-    }
-
-    fn host_of(s: &str) -> Host<String> {
-        shape(s).unwrap()
-    }
-
-    struct FakeDns(&'static [(&'static str, &'static str)]);
-
-    impl Dns for FakeDns {
-        async fn lookup(&self, name: String) -> Result<Vec<IpAddr>, String> {
-            Ok(self
-                .0
-                .iter()
-                .filter(|(record, _)| *record == name)
-                .map(|(_, ip)| ip.parse().unwrap())
-                .collect())
-        }
-    }
-
-    const ALIASES: FakeDns = FakeDns(&[
-        ("loopback-alias.test", "127.0.0.1"),
-        ("metadata-alias.test", "169.254.169.254"),
-        ("keep-alive.test", "127.0.0.1"),
-    ]);
-
-    fn hop(method: &str, target: &str, headers: &[(&str, &str)], body: Option<&str>) -> Hop {
-        let headers = headers
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        Hop::first(
-            target,
-            method,
-            Some(headers),
-            body.map(|b| b.as_bytes().to_vec()),
-        )
-        .unwrap()
-    }
-
-    fn follow(current: &Hop, status: u16, location: &str) -> Hop {
-        let status = StatusCode::from_u16(status).unwrap();
-        let location = HeaderValue::from_str(location).unwrap();
-        next_hop(current, status, Some(&location), 0)
-            .unwrap()
-            .unwrap()
-    }
-
-    fn fetch(
-        rt: &tokio::runtime::Runtime,
-        allow_private: bool,
-        start: Hop,
-    ) -> Result<HttpResponse, String> {
-        rt.block_on(async {
-            read_response(send_guarded(&ALIASES, allow_private, start).await?).await
-        })
-    }
-
-    fn read_request(stream: &mut TcpStream) -> String {
-        let mut raw = Vec::new();
-        let mut buf = [0u8; 512];
-        let head_end = loop {
-            if let Some(i) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
-                break i + 4;
-            }
-            let n = stream.read(&mut buf).unwrap();
-            if n == 0 {
-                return String::from_utf8_lossy(&raw).into_owned();
-            }
-            raw.extend_from_slice(&buf[..n]);
-        };
-        let head = String::from_utf8_lossy(&raw[..head_end]).to_ascii_lowercase();
-        let body_len = head
-            .lines()
-            .find_map(|line| line.strip_prefix("content-length:"))
-            .map_or(0, |len| len.trim().parse::<usize>().unwrap());
-        while raw.len() < head_end + body_len {
-            let n = stream.read(&mut buf).unwrap();
-            if n == 0 {
-                break;
-            }
-            raw.extend_from_slice(&buf[..n]);
-        }
-        String::from_utf8_lossy(&raw).into_owned()
-    }
-
-    fn serve(
-        responses: impl FnOnce(u16) -> Vec<String> + Send + 'static,
-    ) -> (u16, JoinHandle<Vec<String>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let server = std::thread::spawn(move || {
-            responses(port)
-                .into_iter()
-                .map(|response| {
-                    let (mut stream, _) = listener.accept().unwrap();
-                    let request = read_request(&mut stream);
-                    stream.write_all(response.as_bytes()).unwrap();
-                    request
-                })
-                .collect()
-        });
-        (port, server)
-    }
-
-    fn redirect_to(name: &str, port: u16) -> String {
-        format!(
-            "HTTP/1.1 302 Found\r\nLocation: http://{name}:{port}/landed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        )
-    }
-
-    const LANDED: &str = "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nlanded";
 
     fn recording_channel() -> (Channel<AiStreamEvent>, Arc<Mutex<Vec<serde_json::Value>>>) {
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -748,520 +492,13 @@ mod tests {
     }
 
     #[test]
-    fn embedded_ipv4_literals_cannot_smuggle_internal_hosts_past_the_guard() {
-        let rt = runtime();
-        for (literal, kind) in [
-            ("[::ffff:127.0.0.1]", IpKind::Loopback),
-            ("[::ffff:169.254.169.254]", IpKind::BlockedMetadata),
-            ("[::ffff:10.0.0.1]", IpKind::Private),
-            ("[64:ff9b::7f00:1]", IpKind::Loopback),
-            ("[2002:7f00:1::]", IpKind::Loopback),
-            ("[::127.0.0.1]", IpKind::Loopback),
-        ] {
-            let host = host_of(&format!("http://{literal}/"));
-            let (found, _) = rt
-                .block_on(resolve_and_classify(&host, &SystemDns))
-                .unwrap();
-            assert_eq!(found, kind, "{literal}");
-            let refused = rt.block_on(resolve_and_admit(&host, false, &SystemDns));
-            assert!(refused.is_err(), "{literal} must need explicit opt-in");
-            let opted_in = rt.block_on(resolve_and_admit(&host, true, &SystemDns));
-            assert_eq!(
-                opted_in.is_err(),
-                kind == IpKind::BlockedMetadata,
-                "{literal}: metadata stays blocked even with opt-in"
-            );
-        }
-        let (kind, _) = rt
-            .block_on(resolve_and_classify(
-                &host_of("http://[::ffff:8.8.8.8]/"),
-                &SystemDns,
-            ))
-            .unwrap();
-        assert_eq!(kind, IpKind::Public);
-    }
-
-    #[test]
-    fn dns_records_take_the_most_dangerous_class_in_any_order() {
-        for (records, kind) in [
-            (&["10.0.0.1", "127.0.0.1"][..], IpKind::Loopback),
-            (&["127.0.0.1", "10.0.0.1"][..], IpKind::Loopback),
-            (&["8.8.8.8", "fd00:ec2::254"][..], IpKind::BlockedMetadata),
-        ] {
-            let ips: Vec<IpAddr> = records.iter().map(|r| r.parse().unwrap()).collect();
-            assert_eq!(worst_kind(&ips), Some(kind), "{records:?}");
-        }
-        assert_eq!(worst_kind(&[]), None);
-    }
-
-    #[test]
-    fn every_hop_passes_the_same_address_check_as_the_first() {
-        let rt = runtime();
-        let admit = |target: &str, allow_private: bool| {
-            rt.block_on(admit_url(
-                &url(target),
-                allow_private,
-                Timeouts::Ai,
-                &ALIASES,
-            ))
-        };
-        let refused = admit("http://loopback-alias.test/", false).unwrap_err();
-        assert!(refused.contains("requires explicit opt-in"), "{refused}");
-        let admitted = admit("http://loopback-alias.test/", true).unwrap();
-        assert_eq!(
-            (admitted.kind, admitted.ips),
-            (IpKind::Loopback, vec![IpAddr::from(Ipv4Addr::LOCALHOST)])
-        );
-        assert_eq!(
-            admit("http://metadata-alias.test/", true).unwrap_err(),
-            "host not allowed: metadata-alias.test"
-        );
-        assert_eq!(
-            admit("ftp://loopback-alias.test/", true).unwrap_err(),
-            "scheme not allowed: ftp"
-        );
-        for target in [
-            "http://[::ffff:169.254.169.254]/",
-            "http://[fd00:ec2::254]/",
-        ] {
-            let refused = admit(target, true).unwrap_err();
-            assert!(refused.starts_with("host not allowed: "), "{target}");
-        }
-        let refused = admit("http://[::1]/", false).unwrap_err();
-        assert!(refused.contains("requires explicit opt-in"), "{refused}");
-        assert_eq!(admit("http://[::1]/", true).unwrap().kind, IpKind::Loopback);
-    }
-
-    #[test]
-    fn a_redirect_to_another_name_on_loopback_is_followed_with_private_access() {
-        let (port, server) =
-            serve(|port| vec![redirect_to("loopback-alias.test", port), LANDED.to_string()]);
-        let rt = runtime();
-        let start = hop(
-            "GET",
-            &format!("http://127.0.0.1:{port}/"),
-            &[("Authorization", "Bearer k")],
-            None,
-        );
-        let resp = fetch(&rt, true, start).unwrap();
-        assert_eq!(resp.status, 200);
-        assert_eq!(resp.body, b"landed");
-        let requests = server.join().unwrap();
-        assert!(
-            requests[0].contains("authorization: Bearer k"),
-            "{}",
-            requests[0]
-        );
-        assert!(requests[1].starts_with("GET /landed "), "{}", requests[1]);
-        assert!(
-            requests[1].contains(&format!("host: loopback-alias.test:{port}")),
-            "{}",
-            requests[1]
-        );
-        assert!(!requests[1].contains("authorization"), "{}", requests[1]);
-    }
-
-    #[test]
-    fn a_redirect_to_a_name_on_a_metadata_address_is_refused_even_with_private_access() {
-        let (port, server) = serve(|port| vec![redirect_to("metadata-alias.test", port)]);
-        let rt = runtime();
-        let start = hop("GET", &format!("http://127.0.0.1:{port}/"), &[], None);
-        assert_eq!(
-            fetch(&rt, true, start).unwrap_err(),
-            "host not allowed: metadata-alias.test"
-        );
-        assert_eq!(server.join().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn a_307_sends_the_method_and_body_again() {
-        let (port, server) = serve(|_| {
-            vec![
-                "HTTP/1.1 307 Temporary Redirect\r\nLocation: /again\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
-                LANDED.to_string(),
-            ]
-        });
-        let rt = runtime();
-        let body = r#"{"q":1}"#;
-        let start = hop(
-            "POST",
-            &format!("http://127.0.0.1:{port}/"),
-            &[("Content-Type", "application/json")],
-            Some(body),
-        );
-        assert_eq!(fetch(&rt, true, start).unwrap().status, 200);
-        let requests = server.join().unwrap();
-        assert!(requests[1].starts_with("POST /again "), "{}", requests[1]);
-        assert!(
-            requests[1].contains("content-type: application/json"),
-            "{}",
-            requests[1]
-        );
-        assert!(requests[1].ends_with(body), "{}", requests[1]);
-    }
-
-    #[test]
-    fn the_stream_follows_a_redirect_and_forwards_the_final_response() {
-        let (port, server) = serve(|port| vec![redirect_to("127.0.0.1", port), LANDED.to_string()]);
-        let rt = runtime();
-        let (channel, events) = recording_channel();
-        rt.block_on(ai_http_stream(
-            format!("http://127.0.0.1:{port}/"),
-            "GET".into(),
-            None,
-            None,
-            Some(true),
-            channel,
-        ))
-        .unwrap();
-        let events = events.lock().unwrap();
-        assert_eq!(events[0]["kind"], "headers");
-        assert_eq!(events[0]["status"], 200);
-        let body: Vec<u8> = events
-            .iter()
-            .filter(|event| event["kind"] == "chunk")
-            .flat_map(|event| event["bytes"].as_array().unwrap().clone())
-            .map(|byte| u8::try_from(byte.as_u64().unwrap()).unwrap())
-            .collect();
-        assert_eq!(body, b"landed");
-        assert_eq!(events.last(), Some(&json!({ "kind": "end" })));
-        server.join().unwrap();
-    }
-
-    #[test]
-    fn a_refused_stream_reports_its_error_exactly_once() {
-        let (port, server) = serve(|port| vec![redirect_to("169.254.169.254", port)]);
-        let rt = runtime();
-        let (channel, events) = recording_channel();
-        let refused = rt
-            .block_on(ai_http_stream(
-                format!("http://127.0.0.1:{port}/"),
-                "GET".into(),
-                None,
-                None,
-                Some(true),
-                channel,
-            ))
-            .unwrap_err();
-        assert_eq!(refused, "host not allowed: 169.254.169.254");
-        assert_eq!(
-            *events.lock().unwrap(),
-            vec![json!({ "kind": "error", "message": refused })]
-        );
-        server.join().unwrap();
-    }
-
-    #[test]
-    fn lm_ping_reports_the_3xx_of_a_redirecting_server_as_reachable() {
-        let (port, server) = serve(|port| vec![redirect_to("127.0.0.1", port)]);
-        let rt = runtime();
-        let status = rt.block_on(lm_ping(format!("http://127.0.0.1:{port}/")));
-        assert_eq!(status.unwrap(), 302);
-        let requests = server.join().unwrap();
-        assert!(requests[0].starts_with("GET /models "), "{}", requests[0]);
-    }
-
-    #[test]
-    fn redirects_rewrite_the_method_and_body_like_reqwest() {
-        let json = [("Content-Type", "application/json")];
-        let post = hop("POST", "http://127.0.0.1:1234/v1", &json, Some("{}"));
-        for status in [301, 302, 303] {
-            let next = follow(&post, status, "/v2");
-            assert_eq!(next.method, Method::GET, "{status}");
-            assert_eq!(next.body, None, "{status}");
-            assert!(next.headers.get("content-type").is_none(), "{status}");
-        }
-        let put = hop("PUT", "http://127.0.0.1:1234/v1", &json, Some("{}"));
-        for (start, status) in [
-            (&post, 307),
-            (&post, 308),
-            (&put, 301),
-            (&put, 302),
-            (&put, 307),
-        ] {
-            let next = follow(start, status, "/v2");
-            assert_eq!(next.method, start.method, "{status}");
-            assert_eq!(next.body.as_deref(), Some(&b"{}"[..]), "{status}");
-            assert_eq!(next.headers["content-type"], "application/json", "{status}");
-        }
-        assert_eq!(follow(&put, 303, "/v2").method, Method::GET);
-        let head = hop("HEAD", "http://127.0.0.1:1234/v1", &[], None);
-        assert_eq!(follow(&head, 303, "/v2").method, Method::HEAD);
-    }
-
-    #[test]
-    fn caller_headers_outside_the_allowlist_are_dropped_once_the_origin_changes() {
-        const SECRETS: [&str; 6] = [
-            "authorization",
-            "x-api-key",
-            "api-key",
-            "x-goog-api-key",
-            "cookie",
-            "x-terax-custom",
-        ];
-        let headers = [
-            ("Authorization", "Bearer k"),
-            ("X-Api-Key", "k1"),
-            ("Api-Key", "k2"),
-            ("X-Goog-Api-Key", "k3"),
-            ("Cookie", "s=1"),
-            ("X-Terax-Custom", "c"),
-            ("Accept", "application/json"),
-            ("Accept-Language", "de"),
-            ("User-Agent", "terax"),
-        ];
-        let start = hop("GET", "https://api.example.com/v1", &headers, None);
-        for target in ["/v2", "https://api.example.com:443/v2"] {
-            let next = follow(&start, 302, target);
-            for name in SECRETS {
-                assert!(next.headers.contains_key(name), "{target}: {name}");
-            }
-        }
-        for target in [
-            "https://cdn.example.com/v1",
-            "https://api.example.com:8443/v1",
-        ] {
-            let next = follow(&start, 302, target);
-            for name in SECRETS {
-                assert!(!next.headers.contains_key(name), "{target}: {name}");
-            }
-            assert_eq!(next.headers["accept"], "application/json", "{target}");
-            assert_eq!(next.headers["accept-language"], "de", "{target}");
-            assert_eq!(next.headers["user-agent"], "terax", "{target}");
-        }
-        let plain = hop("GET", "http://h.test:8080/", &headers, None);
-        let upgraded = follow(&plain, 307, "https://h.test:8080/");
-        assert!(!upgraded.headers.contains_key("x-api-key"));
-        let away = follow(&start, 302, "https://cdn.example.com/a");
-        let back = follow(&away, 302, "https://api.example.com/b");
-        for name in SECRETS {
-            assert!(!back.headers.contains_key(name), "{name} stays dropped");
-        }
-    }
-
-    #[test]
-    fn a_redirect_from_https_to_http_is_refused() {
-        let start = hop("GET", "https://api.example.com/v1", &[], None);
-        for location in ["http://api.example.com/v1", "http://127.0.0.1:1234/"] {
-            let location = HeaderValue::from_str(location).unwrap();
-            assert_eq!(
-                next_hop(&start, StatusCode::FOUND, Some(&location), 0).unwrap_err(),
-                "redirect from https to http refused"
-            );
-        }
-    }
-
-    #[test]
-    fn a_location_failing_the_url_shape_check_is_not_followed() {
-        let start = hop("GET", "http://127.0.0.1:1234/", &[], None);
-        for location in [
-            "ftp://127.0.0.1/",
-            "file:///etc/passwd",
-            "http://user:pw@127.0.0.1:1234/",
-            "http://metadata.google.internal/computeMetadata/v1/",
-            "//metadata./",
-        ] {
-            let value = HeaderValue::from_str(location).unwrap();
-            let next = next_hop(&start, StatusCode::FOUND, Some(&value), 0);
-            assert!(next.unwrap().is_none(), "{location}");
-        }
-        let metadata_ip = HeaderValue::from_static("http://169.254.169.254/");
-        let next = next_hop(&start, StatusCode::FOUND, Some(&metadata_ip), 0);
-        assert!(
-            next.unwrap().is_some(),
-            "addresses are refused by admit_url, not here"
-        );
-    }
-
-    #[test]
-    fn an_unfollowable_redirect_reaches_the_caller_unchanged() {
-        let (port, server) = serve(|_| {
-            vec!["HTTP/1.1 302 Found\r\nLocation: http://metadata.google.internal/\r\nContent-Length: 5\r\nConnection: close\r\n\r\nmoved".to_string()]
-        });
-        let rt = runtime();
-        let start = hop("GET", &format!("http://127.0.0.1:{port}/"), &[], None);
-        let resp = fetch(&rt, true, start).unwrap();
-        assert_eq!(resp.status, 302);
-        assert_eq!(resp.headers["location"], "http://metadata.google.internal/");
-        assert_eq!(resp.body, b"moved");
-        assert_eq!(server.join().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn a_small_redirect_body_is_read_so_the_next_hop_reuses_the_connection() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            read_request(&mut stream);
-            stream
-                .write_all(b"HTTP/1.1 302 Found\r\nLocation: /landed\r\nContent-Length: 5\r\n\r\n")
-                .unwrap();
-            // hyper itself drains a body that is already buffered.
-            std::thread::sleep(Duration::from_millis(50));
-            stream.write_all(b"moved").unwrap();
-            let reused = read_request(&mut stream).starts_with("GET /landed ");
-            if !reused {
-                (stream, _) = listener.accept().unwrap();
-                read_request(&mut stream);
-            }
-            stream.write_all(LANDED.as_bytes()).unwrap();
-            reused
-        });
-        let rt = runtime();
-        let start = hop("GET", &format!("http://keep-alive.test:{port}/"), &[], None);
-        assert_eq!(fetch(&rt, true, start).unwrap().body, b"landed");
-        assert!(
-            server.join().unwrap(),
-            "the second hop opened a new connection"
-        );
-    }
-
-    #[test]
-    fn the_client_key_ignores_the_order_and_repeats_of_dns_records() {
-        const SHUFFLED: FakeDns = FakeDns(&[
-            ("pool.test", "10.0.0.2"),
-            ("pool.test", "10.0.0.1"),
-            ("pool.test", "10.0.0.2"),
-        ]);
-        const SORTED: FakeDns = FakeDns(&[("pool.test", "10.0.0.1"), ("pool.test", "10.0.0.2")]);
-        let rt = runtime();
-        let key = |dns: &FakeDns| {
-            rt.block_on(admit_url(
-                &url("http://pool.test/"),
-                true,
-                Timeouts::Ai,
-                dns,
-            ))
-            .unwrap()
-        };
-        let shuffled = key(&SHUFFLED);
-        let expected: [IpAddr; 2] = ["10.0.0.1".parse().unwrap(), "10.0.0.2".parse().unwrap()];
-        assert_eq!(shuffled.ips, expected);
-        assert_eq!(shuffled, key(&SORTED));
-    }
-
-    #[test]
-    fn the_eleventh_redirect_is_an_error_like_in_reqwest() {
-        let start = hop("GET", "http://127.0.0.1:1234/", &[], None);
-        let location = HeaderValue::from_static("/again");
-        let next = next_hop(
-            &start,
-            StatusCode::FOUND,
-            Some(&location),
-            MAX_REDIRECTS - 1,
-        );
-        assert!(next.unwrap().is_some());
-        let next = next_hop(&start, StatusCode::FOUND, Some(&location), MAX_REDIRECTS);
-        assert_eq!(next.unwrap_err(), "too many redirects");
-    }
-
-    #[test]
-    fn only_redirects_with_a_usable_location_are_followed() {
-        let start = hop("GET", "http://127.0.0.1:1234/", &[], None);
-        let location = HeaderValue::from_static("/again");
-        for status in [200, 300, 304, 305] {
-            let status = StatusCode::from_u16(status).unwrap();
-            let next = next_hop(&start, status, Some(&location), 0);
-            assert!(next.unwrap().is_none(), "{status}");
-        }
-        let broken = HeaderValue::from_static("http://[::1");
-        assert!(next_hop(&start, StatusCode::FOUND, Some(&broken), 0)
-            .unwrap()
-            .is_none());
-        assert!(next_hop(&start, StatusCode::FOUND, None, MAX_REDIRECTS)
-            .unwrap()
-            .is_none());
-    }
-
-    #[test]
-    fn relative_locations_resolve_against_the_current_url() {
-        let start = hop("GET", "http://127.0.0.1:1234/v1/chat?x=1", &[], None);
-        for (location, expected) in [
-            ("/v2/models", "http://127.0.0.1:1234/v2/models"),
-            ("models", "http://127.0.0.1:1234/v1/models"),
-            ("?page=2", "http://127.0.0.1:1234/v1/chat?page=2"),
-            ("//loopback-alias.test/x", "http://loopback-alias.test/x"),
-            (
-                "https://loopback-alias.test/y",
-                "https://loopback-alias.test/y",
-            ),
-        ] {
-            assert_eq!(
-                follow(&start, 302, location).url.as_str(),
-                expected,
-                "{location}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_client_cache_reuses_a_key_and_keeps_its_bound() {
-        fn get(cache: &mut Lru<u32, u32>, builds: &mut u32, key: u32) -> u32 {
-            cache.get(&key).unwrap_or_else(|| {
-                *builds += 1;
-                cache.insert(key, *builds * 100 + key)
-            })
-        }
-        let mut cache = Lru::new(CLIENT_CACHE_SIZE);
-        let mut builds = 0;
-        let first = get(&mut cache, &mut builds, 0);
-        assert_eq!(get(&mut cache, &mut builds, 0), first);
-        assert_eq!(builds, 1);
-        assert_eq!(
-            cache.insert(0, 999),
-            first,
-            "a racing build keeps the cached one"
-        );
-        for key in 1..CLIENT_CACHE_SIZE as u32 {
-            get(&mut cache, &mut builds, key);
-        }
-        assert_eq!(get(&mut cache, &mut builds, 0), first);
-        get(&mut cache, &mut builds, CLIENT_CACHE_SIZE as u32);
-        assert_eq!(cache.entries.len(), CLIENT_CACHE_SIZE);
-        assert_eq!(builds, CLIENT_CACHE_SIZE as u32 + 1);
-        assert_eq!(get(&mut cache, &mut builds, 0), first);
-        get(&mut cache, &mut builds, 1);
-        assert_eq!(
-            builds,
-            CLIENT_CACHE_SIZE as u32 + 2,
-            "1 was the least recently used"
-        );
-        assert_eq!(cache.entries.len(), CLIENT_CACHE_SIZE);
-    }
-
-    #[test]
-    fn only_public_targets_may_use_an_env_proxy() {
-        assert!(uses_env_proxy(IpKind::Public));
-        for kind in [IpKind::Private, IpKind::Loopback, IpKind::BlockedMetadata] {
-            assert!(!uses_env_proxy(kind), "{kind:?}");
-        }
-    }
-
-    #[test]
-    fn ipv6_literal_urls_are_classified_instead_of_failing_dns() {
-        let rt = runtime();
-        let classify = |url: &str, allow_private: bool| {
-            rt.block_on(resolve_and_admit(&host_of(url), allow_private, &SystemDns))
-        };
-        let refused = classify("http://[::ffff:127.0.0.1]:11434/", false).unwrap_err();
-        assert!(refused.contains("requires explicit opt-in"), "{refused}");
-        assert_eq!(
-            classify("http://[::1]:11434/", true).unwrap(),
-            (IpKind::Loopback, vec!["::1".parse::<IpAddr>().unwrap()])
-        );
-        let blocked = classify("http://[::ffff:169.254.169.254]/", true).unwrap_err();
-        assert!(blocked.starts_with("host not allowed: "), "{blocked}");
-    }
-
-    #[test]
-    fn the_url_shape_check_blocks_userinfo_and_metadata_hostnames() {
+    fn validate_url_blocks_userinfo_and_metadata_hostnames() {
         // URLs with userinfo can confuse browsers / leak creds in redirects.
-        assert!(shape("http://user:pass@example.com/").is_err());
+        assert!(validate_url("http://user:pass@example.com/", true).is_err());
         // Cloud metadata-by-name.
-        assert!(shape("http://metadata.google.internal/").is_err());
-        assert!(shape("http://metadata/").is_err());
-        assert!(shape("http://metadata.azure.com/").is_err());
+        assert!(validate_url("http://metadata.google.internal/", true).is_err());
+        assert!(validate_url("http://metadata/", true).is_err());
+        assert!(validate_url("http://metadata.azure.com/", true).is_err());
     }
 
     #[test]
@@ -1272,19 +509,24 @@ mod tests {
             "http://metadata./",
             "http://metadata.azure.com../",
         ] {
-            let refused = shape(target).unwrap_err();
+            let refused = validate_url(target, true).unwrap_err();
             assert!(
                 refused.starts_with("host not allowed: "),
                 "{target}: {refused}"
+            );
+            assert_eq!(
+                redirect_decision(&url(target), None, 1, true),
+                RedirectDecision::Stop,
+                "{target}"
             );
         }
     }
 
     #[test]
-    fn the_url_shape_check_rejects_non_http_schemes() {
-        assert!(shape("ftp://example.com/").is_err());
-        assert!(shape("file:///etc/passwd").is_err());
-        assert!(shape("javascript:alert(1)").is_err());
+    fn validate_url_rejects_non_http_schemes() {
+        assert!(validate_url("ftp://example.com/", true).is_err());
+        assert!(validate_url("file:///etc/passwd", true).is_err());
+        assert!(validate_url("javascript:alert(1)", true).is_err());
     }
 
     #[test]
@@ -1309,5 +551,315 @@ mod tests {
                 "expected {hop} to be rejected"
             );
         }
+    }
+
+    #[test]
+    fn special_ipv4_ranges_do_not_classify_as_public() {
+        assert_eq!(ip_kind(IpAddr::V4(Ipv4Addr::UNSPECIFIED)), IpKind::Loopback);
+        assert_eq!(ip_kind(IpAddr::V4(Ipv4Addr::BROADCAST)), IpKind::Loopback);
+        assert_eq!(
+            ip_kind(IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1))),
+            IpKind::Loopback
+        );
+    }
+
+    #[test]
+    fn private_range_boundaries_hold_on_ipv4() {
+        assert_eq!(
+            ip_kind(IpAddr::V4(Ipv4Addr::new(172, 31, 255, 255))),
+            IpKind::Private
+        );
+        assert_eq!(
+            ip_kind(IpAddr::V4(Ipv4Addr::new(172, 32, 0, 1))),
+            IpKind::Public
+        );
+        assert_eq!(
+            ip_kind(IpAddr::V4(Ipv4Addr::new(100, 127, 255, 255))),
+            IpKind::Private
+        );
+        assert_eq!(
+            ip_kind(IpAddr::V4(Ipv4Addr::new(100, 128, 0, 1))),
+            IpKind::Public
+        );
+        assert_eq!(
+            ip_kind(IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1))),
+            IpKind::Private
+        );
+        assert_eq!(
+            ip_kind(IpAddr::V4(Ipv4Addr::new(198, 19, 255, 255))),
+            IpKind::Private
+        );
+        assert_eq!(
+            ip_kind(IpAddr::V4(Ipv4Addr::new(198, 20, 0, 1))),
+            IpKind::Public
+        );
+    }
+
+    #[test]
+    fn ipv6_unique_local_and_multicast_are_not_public() {
+        assert_eq!(ip_kind("fd12:3456::1".parse().unwrap()), IpKind::Private);
+        assert_eq!(ip_kind("fc00::1".parse().unwrap()), IpKind::Private);
+        assert_eq!(ip_kind("ff02::1".parse().unwrap()), IpKind::Loopback);
+        assert_eq!(ip_kind("::".parse().unwrap()), IpKind::Loopback);
+        assert_eq!(ip_kind("2606:4700::1111".parse().unwrap()), IpKind::Public);
+    }
+
+    #[test]
+    fn blocked_host_name_match_is_case_insensitive_and_exact() {
+        assert!(is_blocked_host_name("METADATA.google.internal"));
+        assert!(!is_blocked_host_name("metadata.evil.internal"));
+        assert!(!is_blocked_host_name("my-metadata"));
+    }
+
+    #[test]
+    fn validate_url_requires_a_host() {
+        // A URL that parses but carries no host must not slip through.
+        assert!(validate_url("http://", true).is_err());
+    }
+
+    #[test]
+    fn ipv6_literal_hosts_resolve_without_dns() {
+        let rt = runtime();
+        let (kind, ips) = rt.block_on(resolve_and_classify("[::1]")).unwrap();
+        assert_eq!(kind, IpKind::Loopback);
+        assert_eq!(ips, vec![IpAddr::from(Ipv6Addr::LOCALHOST)]);
+        let (kind, _) = rt
+            .block_on(resolve_and_classify("[2606:4700::1111]"))
+            .unwrap();
+        assert_eq!(kind, IpKind::Public);
+    }
+
+    #[test]
+    fn embedded_ipv4_literals_cannot_smuggle_internal_hosts_past_the_guard() {
+        let rt = runtime();
+        for (host, kind) in [
+            ("[::ffff:127.0.0.1]", IpKind::Loopback),
+            ("[::ffff:169.254.169.254]", IpKind::BlockedMetadata),
+            ("[::ffff:10.0.0.1]", IpKind::Private),
+            ("[64:ff9b::7f00:1]", IpKind::Loopback),
+            ("[2002:7f00:1::]", IpKind::Loopback),
+            ("[::127.0.0.1]", IpKind::Loopback),
+        ] {
+            let (found, _) = rt.block_on(resolve_and_classify(host)).unwrap();
+            assert_eq!(found, kind, "{host}");
+            let refused = rt.block_on(classify_and_collect_safe_ips(host, false));
+            assert!(refused.is_err(), "{host} must need explicit opt-in");
+            let opted_in = rt.block_on(classify_and_collect_safe_ips(host, true));
+            assert_eq!(
+                opted_in.is_err(),
+                kind == IpKind::BlockedMetadata,
+                "{host}: metadata stays blocked even with opt-in"
+            );
+        }
+        let (kind, _) = rt
+            .block_on(resolve_and_classify("[::ffff:8.8.8.8]"))
+            .unwrap();
+        assert_eq!(kind, IpKind::Public);
+    }
+
+    #[test]
+    fn ipv6_literal_urls_are_classified_instead_of_failing_dns() {
+        let rt = runtime();
+        let request = |target: &str, allow_private: bool| {
+            rt.block_on(ai_http_request(
+                target.into(),
+                "GET".into(),
+                None,
+                None,
+                Some(allow_private),
+            ))
+            .unwrap_err()
+        };
+        let refused = request("http://[::ffff:127.0.0.1]:11434/", false);
+        assert!(refused.contains("requires explicit opt-in"), "{refused}");
+        let blocked = request("http://[::ffff:169.254.169.254]/", true);
+        assert!(blocked.starts_with("host not allowed: "), "{blocked}");
+        let host = validate_url("http://[::1]:11434/", true)
+            .unwrap()
+            .host_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            rt.block_on(classify_and_collect_safe_ips(&host, true)),
+            Ok(vec![IpAddr::from(Ipv6Addr::LOCALHOST)])
+        );
+    }
+
+    #[test]
+    fn a_failed_stream_reports_its_error_exactly_once() {
+        let rt = runtime();
+        for (target, method) in [
+            ("http://[::ffff:169.254.169.254]/", "GET"),
+            ("http://8.8.8.8/", "NOT A METHOD"),
+        ] {
+            let (channel, events) = recording_channel();
+            let error = rt
+                .block_on(ai_http_stream(
+                    target.into(),
+                    method.into(),
+                    None,
+                    None,
+                    Some(true),
+                    channel,
+                ))
+                .unwrap_err();
+            assert_eq!(
+                *events.lock().unwrap(),
+                vec![json!({ "kind": "error", "message": error })],
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn redirects_stay_on_the_pinned_host_unless_private_access_was_granted() {
+        let from = url("https://api.example.com/v1");
+        let same = url("https://api.example.com/v2");
+        let other = url("https://evil.example.net/");
+        assert_eq!(
+            redirect_decision(&same, Some(&from), 1, false),
+            RedirectDecision::Follow
+        );
+        assert_eq!(
+            redirect_decision(&other, Some(&from), 1, false),
+            RedirectDecision::Stop
+        );
+        assert_eq!(
+            redirect_decision(&other, Some(&from), 1, true),
+            RedirectDecision::Follow
+        );
+    }
+
+    #[test]
+    fn redirects_never_reach_metadata_or_unsafe_schemes_or_userinfo() {
+        let from = url("http://localhost:11434/");
+        for target in [
+            "http://169.254.169.254/latest",
+            "http://[fe80::1]/",
+            "http://metadata.google.internal/",
+            "ftp://example.com/",
+            "https://user:pw@example.com/",
+        ] {
+            assert_eq!(
+                redirect_decision(&url(target), Some(&from), 1, true),
+                RedirectDecision::Stop,
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn ipv6_literal_redirects_are_classified_not_mistaken_for_hostnames() {
+        let from = url("https://api.example.com/");
+        assert_eq!(
+            redirect_decision(&url("http://[::1]:8080/"), Some(&from), 1, false),
+            RedirectDecision::Stop
+        );
+        assert_eq!(
+            redirect_decision(&url("http://[::1]:8080/"), Some(&from), 1, true),
+            RedirectDecision::Follow
+        );
+        assert_eq!(
+            redirect_decision(&url("https://[2606:4700::1111]/"), Some(&from), 1, false),
+            RedirectDecision::Follow,
+            "public IP literals are allowed; only the address class matters"
+        );
+    }
+
+    #[test]
+    fn bracketed_metadata_and_loopback_literals_follow_the_address_rule() {
+        let from = url("http://localhost:11434/");
+        for (target, allow_private, expected) in [
+            (
+                "http://[::ffff:169.254.169.254]/",
+                true,
+                RedirectDecision::Stop,
+            ),
+            ("http://[fd00:ec2::254]/", true, RedirectDecision::Stop),
+            ("http://[::1]/", false, RedirectDecision::Stop),
+            ("http://[::1]/", true, RedirectDecision::Follow),
+        ] {
+            assert_eq!(
+                redirect_decision(&url(target), Some(&from), 1, allow_private),
+                expected,
+                "{target} with allow_private = {allow_private}"
+            );
+        }
+    }
+
+    #[test]
+    fn redirects_to_internal_addresses_hidden_in_ipv6_are_stopped() {
+        let from = url("https://api.example.com/");
+        for target in [
+            "http://[::ffff:127.0.0.1]/",
+            "http://[::ffff:10.0.0.1]/",
+            "http://[::ffff:192.168.0.1]/",
+            "http://[::ffff:169.254.169.254]/latest/meta-data",
+            "http://[::127.0.0.1]/",
+            "http://[64:ff9b::7f00:1]/",
+            "http://[2002:7f00:1::]/",
+            "http://[fe80::1]/",
+            "http://[fc00::1]/",
+            "http://[fd12:3456::1]/",
+            "http://[fec0::1]/",
+            "http://[ff02::1]/",
+            "http://[::]/",
+        ] {
+            assert_eq!(
+                redirect_decision(&url(target), Some(&from), 1, false),
+                RedirectDecision::Stop,
+                "{target}"
+            );
+        }
+        for target in [
+            "http://[::ffff:169.254.169.254]/",
+            "http://[64:ff9b::a9fe:a9fe]/",
+            "http://[2002:a9fe:a9fe::]/",
+            "http://[fe80::1]/",
+        ] {
+            assert_eq!(
+                redirect_decision(&url(target), Some(&from), 1, true),
+                RedirectDecision::Stop,
+                "{target} is metadata even with private access"
+            );
+        }
+        for target in [
+            "http://[::ffff:127.0.0.1]:11434/",
+            "http://[::ffff:10.0.0.1]/",
+        ] {
+            assert_eq!(
+                redirect_decision(&url(target), Some(&from), 1, true),
+                RedirectDecision::Follow,
+                "{target}"
+            );
+        }
+        assert_eq!(
+            redirect_decision(&url("https://[::ffff:8.8.8.8]/"), Some(&from), 1, false),
+            RedirectDecision::Follow
+        );
+    }
+
+    #[test]
+    fn redirect_chains_are_bounded() {
+        let u = url("https://api.example.com/");
+        assert_eq!(
+            redirect_decision(&u, Some(&u), 10, false),
+            RedirectDecision::Follow
+        );
+        assert_eq!(
+            redirect_decision(&u, Some(&u), 11, false),
+            RedirectDecision::TooMany
+        );
+    }
+
+    #[test]
+    fn safe_clients_build_with_pinned_resolution() {
+        let ips: Vec<IpAddr> = ["93.184.216.34", "2606:2800:220:1::1"]
+            .iter()
+            .map(|s| s.parse().unwrap())
+            .collect();
+        build_safe_client(false, &[("api.example.com".into(), ips)]).expect("public client");
+        let loopback = vec![IpAddr::from(Ipv4Addr::LOCALHOST)];
+        build_safe_client(true, &[("localhost".into(), loopback)]).expect("private client");
     }
 }

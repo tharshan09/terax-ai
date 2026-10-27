@@ -978,10 +978,7 @@ export default function App() {
       "editor.undo": () => editorRefs.current.get(activeId)?.undo(),
       "editor.redo": () => editorRefs.current.get(activeId)?.redo(),
       "editor.save": () => {
-        void editorRefs.current
-          .get(activeId)
-          ?.save()
-          .catch(() => {});
+        void editorRefs.current.get(activeId)?.save();
       },
     }),
     [
