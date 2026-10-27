@@ -9,7 +9,7 @@
 
 ## Problem & Solution
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 **Problem:**
 - Upstream v0.9.0 bringt 122 neue Commits; Kern ist der Austausch von xterm.js durch ein Ghostty-Terminal (WASM + WebGPU) mit neuem PTY-Transport.
@@ -31,7 +31,7 @@
 
 ## Scope & Boundaries
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 | In Scope |
 |----------|
@@ -68,7 +68,7 @@
 
 ### Overview
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 | Aspect | Specification |
 |--------|---------------|
@@ -87,7 +87,7 @@
 
 ### Data Transfer Objects (DTOs)
 
-> No requirement IDs — covered via API-n
+> No requirement IDs - covered via API-n
 
 | DTO | Fields | Validation | Notes |
 |-----|--------|------------|-------|
@@ -101,7 +101,7 @@
 
 ## Database Schema
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 ### Entities
 
@@ -152,7 +152,7 @@
 
 ### Business Logic Flow
 
-> No requirement IDs — covered via SVC-n
+> No requirement IDs - covered via SVC-n
 
 ```
 ⌘V / Paste (UI-1, UI-2) → VAL-7 + Busy-Sperre → SVC-5 pasteTargetDir (BR-5)
@@ -224,7 +224,7 @@ Sidebar zu/auf, Ansicht, Tab, Zen, Layout → SVC-10 arm/disarm (+ Neu-Einlesen)
 
 ## Architecture Layers
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 ### Layer Responsibilities
 
@@ -402,9 +402,9 @@ StatusBar-Layout, Zen, aktiver Tab ┴→ statusConsumers → useSourceControl l
 
 ## Register
 
-> No requirement IDs — context
+> No requirement IDs - context
 
-N/A — kein neuer Fachbereich
+N/A - kein neuer Fachbereich
 
 - Begründung: Das Projekt hat kein Garantie-Register (`zip.config.json` fehlt, damit keine `area_roots`); das einzige neue Verzeichnis `src-tauri/src/modules/net/` ist Untermodul des bestehenden `net`-Moduls.
 
@@ -412,7 +412,7 @@ N/A — kein neuer Fachbereich
 
 ## Test Strategy & Mocking
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 | System Boundary | Mocking Decision | Reason |
 |-----------------|------------------|--------|
@@ -430,7 +430,7 @@ N/A — kein neuer Fachbereich
 
 ## Constraints & Integrations
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 ### Constraints
 
@@ -488,7 +488,7 @@ N/A — kein neuer Fachbereich
 
 ### Monitoring & Observability
 
-> No requirement IDs — covered via NFR-n
+> No requirement IDs - covered via NFR-n
 
 | Metric | Type | Target | Alert |
 |--------|------|--------|-------|
@@ -503,7 +503,7 @@ N/A — kein neuer Fachbereich
 
 ## Risks & Assumptions
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 ### Assumptions
 
@@ -535,7 +535,7 @@ N/A — kein neuer Fachbereich
 
 ## Technology Decisions
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 ### Stack Choices
 
@@ -562,7 +562,7 @@ N/A — kein neuer Fachbereich
 
 ## Anti-Slop Dispositions
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 | # | class | subject | decision | Rationale | guard_obligation | Implementation |
 |---|-------|---------|----------|-----------|------------------|----------------|
@@ -578,7 +578,7 @@ N/A — kein neuer Fachbereich
 
 ## Open Questions
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 | # | Question | Options | Recommended | Decision |
 |---|----------|---------|-------------|----------|
@@ -589,7 +589,7 @@ N/A — kein neuer Fachbereich
 
 ## Context & Research
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 ### Discovery-Abdeckung (Feature Mapping)
 
@@ -652,7 +652,7 @@ N/A — kein neuer Fachbereich
 
 ## Research Log
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 | Date | Area | Finding |
 |------|------|---------|
@@ -684,7 +684,7 @@ N/A — kein neuer Fachbereich
 
 ## Q&A Log
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 | # | Question | Recommendation | Answer | Alternative & consequence | Mode | Wirkung |
 |---|----------|----------------|--------|---------------------------|------|---------|

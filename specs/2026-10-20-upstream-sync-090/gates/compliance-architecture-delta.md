@@ -36,13 +36,13 @@
 | X3 Entities | Database Schema | `useSidebarPanel.ts:16,54-56,94` (`terax.sidebar.collapsed`, `"1"`/`"0"`); `spaces/lib/store.ts:1,28` `LazyStore`; `settings/store.ts:164,165,203`; `App.tsx:902` `zenMode` | eingearbeitet |
 | X4 SSRF-Sweep | Sweep | `grep -rn` → `net.rs:33`, `:78`; `parse::<IpAddr>` nur `:90`, `:281` | eingearbeitet |
 | X5 Zähler | NFR-1, Monitoring | `git/operations.rs:88` `panel_snapshot` → `:114` `status_inner`; `native.ts:315,320` | eingearbeitet |
-| X6 Q&A #24 | Q&A #24 | `motion` nicht in `package.json` (0 Treffer) — korrekt; neue Begründung zu rAF falsch → X-C | neu fehlerhaft |
+| X6 Q&A #24 | Q&A #24 | `motion` nicht in `package.json` (0 Treffer) - korrekt; neue Begründung zu rAF falsch → X-C | neu fehlerhaft |
 | X7 `terax-icon-in` | MIG-40 | `globals.css:327` `--dur-fast: 160ms`, `:443-445` Reduced-Motion setzt `--dur-fast: 0.01ms` | eingearbeitet |
 | X8 Watch-Stellen | MIG-45 | `useFileTree.ts:117-126`, `:157` (`...watchedRef.current`), `:179-180`, `:216-223` | eingearbeitet (Zeilenangabe `:163` statt `:157`, N-5) |
 | X9 discovery:145 | discovery.md | Diff Z.145 „erstes neues Element ausgewählt“; kein „alle neu“ mehr | eingearbeitet |
 | X10 MIG-41 | MIG-41 | `node_modules/tailwindcss/theme.css:438,440` `--animate-spin`/`--animate-pulse` linear/cubic infinite | eingearbeitet |
 
-## Check A — Feature Mapping (Delta)
+## Check A - Feature Mapping (Delta)
 
 | Item | Evidenz | Status |
 |---|---|---|
@@ -53,11 +53,11 @@
 | BR-16 (`64:ff9b:1::/48`) | SVC-13, VAL-8 | PASS mit X-A |
 | BR-18 | MIG-62, SVC-15 | PASS (gemessen) |
 
-## Check B — Constraint Mapping
+## Check B - Constraint Mapping
 
 N/A im Delta: keine wireframes.md, Constraint-Tabelle unverändert.
 
-## Check C — Realistic Data
+## Check C - Realistic Data
 
 | Item | Evidenz | Status |
 |---|---|---|
@@ -65,29 +65,29 @@ N/A im Delta: keine wireframes.md, Constraint-Tabelle unverändert.
 | Klassen aus dem Kandidaten-Verfahren für reale Adressen | Simulation nach SVC-13 (Upstream-`ipv4_kind`): `64:ff9b:1::808:808` → Kandidaten /48 `0.0.0.0`, /56 `0.0.0.0`, /64 `0.0.0.8`, /96 `8.8.8.8` → **Loopback**; `64:ff9b:1::a9fe:a9fe` → BlockedMetadata; `64:ff9b:1::7f00:1` → Loopback; `64:ff9b:1::a00:1` → Loopback (nicht Private); `64:ff9b:1:a9fe:a9:fe00::` (/48-Form) → BlockedMetadata | X-A, O-1, N-6 |
 | Policy Loopback vs. Private | `net.rs:150-155` und `:158-163`, Redirect `:286-288`: beide Klassen identisch behandelt | Klassenverschiebung Private→Loopback ohne Verhaltenswirkung |
 
-## Check D — Completeness + Dependencies
+## Check D - Completeness + Dependencies
 
 | Item | Evidenz | Status |
 |---|---|---|
 | rolldown 1.2.6 `codeSplitting.groups` | Typen + Laufzeit (s. B4) und Build-Versuch: Fork-Stand (vite 8.2.2), `vite.config.ts` nur im Output-Block durch die Upstream-Gruppen (eager Prio 100, lazy Prio 0, `packageOf`) ersetzt, Build in das Scratchpad: `index.html` und `settings.html` laden kein `ai-anthropic`/`ai-cerebras`/`ai-sdk-shared` mehr; Sourcemap-Scan aller Start-Chunks: kein `@ai-sdk/*`, `ai`, `zod`, `streamdown`, `katex`, `@codemirror/*`, `@uiw/*`; einziger Rest im Hauptfenster `iconResolver-*.js` mit `@iconify-json/catppuccin`, `fileIcons.ts`, `folderIcons.ts` (MIG-52 zuständig); Settings-Fenster frei | PASS |
 | Upstream-Gruppen in MIG-62 | `f6f0004:vite.config.ts:18-41` (`packageOf`, `EAGER_REACT_PACKAGES`), `:47-63` (Preload-Helper, Radix), `:65-109` (Provider, `ai-sdk-shared`, `cm-lang-*`, `cm-legacy-*`, `codemirror`, `streamdown`), `:176-181` Prioritäten 100/0 | PASS; Fork-Gruppe `xterm` nicht genannt → N-2 |
 
-## Check E — Pattern Consistency (Gate 1b)
+## Check E - Pattern Consistency (Gate 1b)
 
 Delta ohne Änderung an Anti-Slop-Dispositionen und Scanner-Zuordnung; Skript AR-7 übernommen. PASS (unverändert).
 
-## Check E2 — Bindings Coverage
+## Check E2 - Bindings Coverage
 
-N/A — kein `bindings_path`/`reconcile_path`.
+N/A - kein `bindings_path`/`reconcile_path`.
 
-## Check E3 — Existing-Behavior Invariants (Delta)
+## Check E3 - Existing-Behavior Invariants (Delta)
 
 | Item | Evidenz | Status |
 |---|---|---|
 | INV-6 Teilaussagen | Upstream `ip.rs` Tests (s. X2); Fork-Tests `net.rs:442-505`; Konsumenten `net.rs:91,107,160,282` vorhanden | PASS (Coverage `uncovered` laut Skript-Korrektur) |
 | INV-19 | `eager-budget.test.ts:10,17-23` | PASS |
 
-## Check F — Migration Completeness (Delta)
+## Check F - Migration Completeness (Delta)
 
 | Item | Evidenz | Status |
 |---|---|---|

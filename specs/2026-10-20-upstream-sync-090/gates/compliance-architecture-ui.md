@@ -69,7 +69,7 @@ Prüfmenge: 54 UI-Bestands-Behauptungen erhoben, 54 gemessen, 0 nicht gemessen (
 | Item | Evidenz | Status |
 |------|---------|--------|
 | Datenbank/Migrationen | Terax ohne DB (architecture.md:109); UI-seitiger persistenter Zustand nur `localStorage` „Sidebar eingeklappt" (`useSidebarPanel.ts:54-60,88-99`, Werte `"1"`/`"0"`) | PASS |
-| Externe APIs | keine im UI-Anteil | N/A — keine externe API in der UI-Perspektive |
+| Externe APIs | keine im UI-Anteil | N/A - keine externe API in der UI-Perspektive |
 | UI-sichtbare Datenformen | siehe Data Type Verdicts | PASS |
 
 ## D) Completeness + Dependencies (UI-Anteil)
@@ -80,7 +80,7 @@ Prüfmenge: 54 UI-Bestands-Behauptungen erhoben, 54 gemessen, 0 nicht gemessen (
 | `sonner`-API für UI-3/UI-4 | 2.0.8, `toast.message(message, data?)` | PASS |
 | `useSyncExternalStore` / Ref-Cleanup für MediaPreview | React 19.2.8 installiert (`node_modules/react/package.json:7`) | PASS |
 | JS-Animationsbibliothek `motion` (Q&A #24) | keine Abhängigkeit: `package.json` und `pnpm-lock.yaml` ohne `motion`; `usePresence.ts:8` „Replaces motion's AnimatePresence" | FIX F-1 |
-| Versions-Abgleich Integrations-Tabelle | Perspektive `runtime` | N/A — andere Perspektive |
+| Versions-Abgleich Integrations-Tabelle | Perspektive `runtime` | N/A - andere Perspektive |
 
 ## F) Migration Completeness (UI-Anteil)
 
@@ -110,12 +110,12 @@ Prüfmenge: 54 UI-Bestands-Behauptungen erhoben, 54 gemessen, 0 nicht gemessen (
 | AVOID Upstream-Umbau von `useExplorerFileDrop`/`useFileTree` | Constraints-Zeile „Fork-Fassungen als Basis" | PASS |
 | Neue Abstraktionen mit Scanner-Referenz | `MediaPreview.tsx`/`mediaPlayback.ts` (Scan Zeile `binaryPreviewMode`), `FileIcon`/`iconEngine` (Scan Zeile `iconResolver`), `watchRegistry`/`statusConsumers` (Scan EXTEND) | PASS |
 | Anti-Slop #1 k2 „Fenster sichtbar" → consolidate | Option im Katalog zulässig (K1–K4), kein Guard-Pflichtfeld; eingelöst über MIG-25..28, MIG-35..39, MIG-10; fokusgekoppelte Stellen haben andere Semantik (`rendererPool.ts:103,110` Fokus UND Sichtbarkeit) | PASS |
-| Anti-Slop #2, #3 | Belegdomäne `code` | N/A — andere Perspektive |
+| Anti-Slop #2, #3 | Belegdomäne `code` | N/A - andere Perspektive |
 | Linsen-Ausfall | keiner (architecture.md:558) | PASS |
 
 ## E2) Bindings Coverage, Gate 1c
 
-N/A — kein `bindings_path`/`reconcile_path` übergeben.
+N/A - kein `bindings_path`/`reconcile_path` übergeben.
 
 ## E3) Existing-Behavior Invariants, Gate 1d (UI-Anteil)
 
@@ -137,7 +137,7 @@ N/A — kein `bindings_path`/`reconcile_path` übergeben.
 | INV-22 | `AboutSection.tsx:4,30` | PASS |
 | INV-23 | `App.tsx:477`, `useClaudeStatus.ts:55`, `SshAgentActivityPoller.tsx:141`, `useSpacePersistence.ts:86-100`, `useTerminalSession.ts:574-578` | PASS (Auflage O-2) |
 | Scan-Invarianten übernommen | Scan Nr. 1–22 → INV-1..22, INV-23 zusätzlich; keine gestrichen | PASS |
-| INV-1..4, 6, 7, 13, 21 | Belegdomäne `code`/`data`/`runtime` | N/A — andere Perspektive |
+| INV-1..4, 6, 7, 13, 21 | Belegdomäne `code`/`data`/`runtime` | N/A - andere Perspektive |
 
 ---
 
