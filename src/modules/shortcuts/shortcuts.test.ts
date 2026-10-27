@@ -122,3 +122,21 @@ describe("editor.save dispatch", () => {
     expect(e.defaultPrevented).toBe(true);
   });
 });
+
+describe("editor shortcuts from a field", () => {
+  it("leaves Mod+Z in a field to the field's own history", () => {
+    const handlers = mount("editor", { "editor.undo": vi.fn() });
+    const input = document.createElement("input");
+    document.body.append(input);
+    const e = press({ ...MOD, key: "z" }, input);
+    expect(handlers["editor.undo"]).not.toHaveBeenCalled();
+    expect(e.defaultPrevented).toBe(false);
+  });
+
+  it("runs Mod+Z inside the editor", () => {
+    const handlers = mount("editor", { "editor.undo": vi.fn() });
+    const e = press({ ...MOD, key: "z" }, editorContent());
+    expect(handlers["editor.undo"]).toHaveBeenCalledTimes(1);
+    expect(e.defaultPrevented).toBe(true);
+  });
+});

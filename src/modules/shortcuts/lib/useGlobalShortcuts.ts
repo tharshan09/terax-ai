@@ -13,9 +13,10 @@ export type UseGlobalShortcutsOptions = {
   isDisabled?: (id: ShortcutId, e: KeyboardEvent) => boolean;
 };
 
-const NATIVE_HISTORY_SHORTCUTS: ReadonlySet<ShortcutId> = new Set([
+const EDITOR_FIELD_GUARDED: ReadonlySet<ShortcutId> = new Set([
   "editor.undo",
   "editor.redo",
+  "editor.save",
 ]);
 
 /** A focused input, textarea or contenteditable outside the CodeMirror
@@ -47,18 +48,13 @@ export function useGlobalShortcuts(
     const onKey = (e: KeyboardEvent) => {
       const { handlers, options } = latest.current;
       for (const s of SHORTCUTS) {
-        const blockedRepeat = e.repeat && !s.allowRepeat;
-        if (blockedRepeat && !s.claimDefault) continue;
         const bindings = userShortcuts[s.id] || s.defaultBindings;
         const isMatch = bindings.some((b) => matchBinding(e, b, s.id));
         if (!isMatch) continue;
-        if (s.claimDefault) {
-          e.preventDefault();
-          // A held key or a focused field must not run it on the editor behind.
-          if (blockedRepeat || editableOutsideEditor(e)) return;
-        }
+        if (s.claimDefault) e.preventDefault();
+        if (e.repeat && !s.allowRepeat) continue;
         if (options?.isDisabled?.(s.id, e)) return;
-        if (NATIVE_HISTORY_SHORTCUTS.has(s.id) && editableOutsideEditor(e)) return;
+        if (EDITOR_FIELD_GUARDED.has(s.id) && editableOutsideEditor(e)) return;
         const h = handlers[s.id];
         if (!h) return;
         e.preventDefault();

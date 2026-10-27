@@ -145,9 +145,8 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
     saveRef.current = save;
     const onSavedRef = useRef(onSaved);
     onSavedRef.current = onSaved;
-    // onSaved must only fire on a real write: saveRef rejects on failure
-    // (surfaced via a toast in useDocument) and resolves false when the write
-    // was withheld on a disk-conflict.
+    // onSaved only after a real write: saveRef rejects on failure (useDocument
+    // toasts it) and resolves false when a disk conflict withheld the write.
     const saveAndNotify = useCallback(async () => {
       if (await saveRef.current()) onSavedRef.current?.();
     }, []);
@@ -193,7 +192,6 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
         ),
         vimHandlersExtension(() => ({
           save: () => {
-            // Swallow the rejection here to avoid an unhandled promise.
             void saveAndNotify().catch(() => {});
           },
           close: () => onCloseRef.current?.(),
