@@ -80,6 +80,7 @@ function sameDirListing(a: DirEntry[], b: DirEntry[]): boolean {
 type Options = {
   onPathRenamed?: (from: string, to: string) => void;
   onPathDeleted?: (path: string) => void;
+  visible?: boolean;
 };
 
 export function useFileTree(rootPath: string | null, options?: Options) {

@@ -9,6 +9,9 @@ use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 
+mod ip;
+use ip::{ip_kind, IpKind};
+
 const HEADER_BLOCKLIST: &[&str] = &[
     "host",
     "content-length",
@@ -30,64 +33,12 @@ fn is_blocked_host_name(host: &str) -> bool {
     )
 }
 
-fn ip_kind(ip: IpAddr) -> IpKind {
-    match ip {
-        IpAddr::V4(v) => {
-            let o = v.octets();
-            // Cloud metadata IPv4: 169.254.169.254
-            if v.is_link_local() {
-                return IpKind::BlockedMetadata;
-            }
-            if v.is_loopback() || v.is_unspecified() || v.is_broadcast() || v.is_multicast() {
-                return IpKind::Loopback;
-            }
-            // RFC1918 + CGNAT + benchmarking + IETF
-            if o[0] == 10
-                || (o[0] == 172 && (16..=31).contains(&o[1]))
-                || (o[0] == 192 && o[1] == 168)
-                || (o[0] == 100 && (64..=127).contains(&o[1]))
-                || (o[0] == 198 && (o[1] == 18 || o[1] == 19))
-            {
-                return IpKind::Private;
-            }
-            IpKind::Public
-        }
-        IpAddr::V6(v) => {
-            if v.is_loopback() || v.is_unspecified() || v.is_multicast() {
-                return IpKind::Loopback;
-            }
-            // Cloud metadata IPv6 (AWS): fd00:ec2::254
-            let segs = v.segments();
-            if segs[0] == 0xfd00 && segs[1] == 0xec2 {
-                return IpKind::BlockedMetadata;
-            }
-            // fe80::/10 link-local
-            if segs[0] & 0xffc0 == 0xfe80 {
-                return IpKind::BlockedMetadata;
-            }
-            // fc00::/7 unique-local (private)
-            if segs[0] & 0xfe00 == 0xfc00 {
-                return IpKind::Private;
-            }
-            IpKind::Public
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-enum IpKind {
-    Public,
-    Private,
-    Loopback,
-    BlockedMetadata,
-}
-
 /// Resolve `host` once and return both its safety classification and the
 /// concrete IPs we resolved. Callers can pin reqwest to these IPs to defeat
 /// DNS rebinding (where a second lookup returns a different address).
 async fn resolve_and_classify(host: &str) -> Result<(IpKind, Vec<IpAddr>), String> {
-    // Direct literal? Skip DNS.
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    // Direct literal? Skip DNS. `Url::host_str` keeps the brackets of IPv6.
+    if let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>() {
         return Ok((ip_kind(ip), vec![ip]));
     }
     let host_owned = host.to_string();
@@ -260,43 +211,70 @@ fn build_safe_client(
         }
     }
     builder
-        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() > 10 {
-                return attempt.error("too many redirects");
-            }
-            let next = attempt.url();
-            match next.scheme() {
-                "http" | "https" => {}
-                _ => return attempt.stop(),
-            }
-            if next.username() != "" || next.password().is_some() {
-                return attempt.stop();
-            }
-            let Some(host) = next.host_str() else {
-                return attempt.stop();
-            };
-            if is_blocked_host_name(host) {
-                return attempt.stop();
-            }
-            if let Ok(ip) = host.parse::<IpAddr>() {
-                let k = ip_kind(ip);
-                if k == IpKind::BlockedMetadata {
-                    return attempt.stop();
-                }
-                if !allow_private && matches!(k, IpKind::Loopback | IpKind::Private) {
-                    return attempt.stop();
-                }
-            } else if !allow_private {
-                if let Some(prev) = attempt.previous().last() {
-                    if prev.host_str() != Some(host) {
-                        return attempt.stop();
-                    }
-                }
-            }
-            attempt.follow()
-        }))
+        .redirect(reqwest::redirect::Policy::custom(
+            move |attempt| match redirect_decision(
+                attempt.url(),
+                attempt.previous().last(),
+                attempt.previous().len(),
+                allow_private,
+            ) {
+                RedirectDecision::Follow => attempt.follow(),
+                RedirectDecision::Stop => attempt.stop(),
+                RedirectDecision::TooMany => attempt.error("too many redirects"),
+            },
+        ))
         .build()
         .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RedirectDecision {
+    Follow,
+    Stop,
+    TooMany,
+}
+
+/// Scheme, userinfo and host checks mirror the request validation. Without
+/// `allow_private` a redirect may not leave the host whose addresses were
+/// pinned, so a public API cannot bounce a request onto an internal address.
+fn redirect_decision(
+    next: &reqwest::Url,
+    last_previous: Option<&reqwest::Url>,
+    previous_len: usize,
+    allow_private: bool,
+) -> RedirectDecision {
+    if previous_len > 10 {
+        return RedirectDecision::TooMany;
+    }
+    match next.scheme() {
+        "http" | "https" => {}
+        _ => return RedirectDecision::Stop,
+    }
+    if next.username() != "" || next.password().is_some() {
+        return RedirectDecision::Stop;
+    }
+    let Some(host) = next.host_str() else {
+        return RedirectDecision::Stop;
+    };
+    if is_blocked_host_name(host) {
+        return RedirectDecision::Stop;
+    }
+    if let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>() {
+        let kind = ip_kind(ip);
+        if kind == IpKind::BlockedMetadata {
+            return RedirectDecision::Stop;
+        }
+        if !allow_private && matches!(kind, IpKind::Loopback | IpKind::Private) {
+            return RedirectDecision::Stop;
+        }
+    } else if !allow_private {
+        if let Some(prev) = last_previous {
+            if prev.host_str() != Some(host) {
+                return RedirectDecision::Stop;
+            }
+        }
+    }
+    RedirectDecision::Follow
 }
 
 fn header_map_to_strings(headers: &HeaderMap) -> HashMap<String, String> {
@@ -482,6 +460,7 @@ mod tests {
             ip_kind(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))),
             IpKind::Private
         );
+        assert_eq!(ip_kind("fc00::1".parse().unwrap()), IpKind::Private);
     }
 
     #[test]
@@ -491,6 +470,10 @@ mod tests {
             IpKind::Loopback
         );
         assert_eq!(ip_kind("::1".parse().unwrap()), IpKind::Loopback);
+        assert_eq!(
+            ip_kind(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))),
+            IpKind::Loopback
+        );
     }
 
     #[test]
@@ -502,6 +485,138 @@ mod tests {
         assert_eq!(
             ip_kind(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
             IpKind::Public
+        );
+    }
+
+    #[test]
+    fn embedded_ipv4_literals_cannot_smuggle_internal_hosts_past_the_guard() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        for (host, kind) in [
+            ("[::ffff:127.0.0.1]", IpKind::Loopback),
+            ("[::ffff:169.254.169.254]", IpKind::BlockedMetadata),
+            ("[::ffff:10.0.0.1]", IpKind::Private),
+            ("[64:ff9b::7f00:1]", IpKind::Loopback),
+            ("[2002:7f00:1::]", IpKind::Loopback),
+            ("[::127.0.0.1]", IpKind::Loopback),
+        ] {
+            let (found, _) = rt.block_on(resolve_and_classify(host)).unwrap();
+            assert_eq!(found, kind, "{host}");
+            let refused = rt.block_on(classify_and_collect_safe_ips(host, false));
+            assert!(refused.is_err(), "{host} must need explicit opt-in");
+            let opted_in = rt.block_on(classify_and_collect_safe_ips(host, true));
+            assert_eq!(
+                opted_in.is_err(),
+                kind == IpKind::BlockedMetadata,
+                "{host}: metadata stays blocked even with opt-in"
+            );
+        }
+        let (kind, _) = rt
+            .block_on(resolve_and_classify("[::ffff:8.8.8.8]"))
+            .unwrap();
+        assert_eq!(kind, IpKind::Public);
+    }
+
+    #[test]
+    fn ipv6_literal_urls_are_classified_instead_of_failing_dns() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let classify = |url: &str, allow_private: bool| {
+            let parsed = validate_url(url, allow_private).unwrap();
+            let host = parsed.host_str().unwrap().to_string();
+            rt.block_on(classify_and_collect_safe_ips(&host, allow_private))
+        };
+        let refused = classify("http://[::ffff:127.0.0.1]:11434/", false).unwrap_err();
+        assert!(refused.contains("requires explicit opt-in"), "{refused}");
+        assert_eq!(
+            classify("http://[::1]:11434/", true).unwrap(),
+            vec!["::1".parse::<IpAddr>().unwrap()]
+        );
+        let blocked = classify("http://[::ffff:169.254.169.254]/", true).unwrap_err();
+        assert!(blocked.starts_with("host not allowed: "), "{blocked}");
+    }
+
+    fn url(s: &str) -> reqwest::Url {
+        reqwest::Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn redirects_to_internal_addresses_hidden_in_ipv6_are_stopped() {
+        let from = url("https://api.example.com/");
+        for target in [
+            "http://[::ffff:127.0.0.1]/",
+            "http://[::ffff:10.0.0.1]/",
+            "http://[::ffff:192.168.0.1]/",
+            "http://[::ffff:169.254.169.254]/latest/meta-data",
+            "http://[::127.0.0.1]/",
+            "http://[64:ff9b::7f00:1]/",
+            "http://[2002:7f00:1::]/",
+            "http://[fe80::1]/",
+            "http://[fc00::1]/",
+            "http://[fd12:3456::1]/",
+            "http://[fec0::1]/",
+            "http://[ff02::1]/",
+            "http://[::]/",
+        ] {
+            assert_eq!(
+                redirect_decision(&url(target), Some(&from), 1, false),
+                RedirectDecision::Stop,
+                "{target}"
+            );
+        }
+        for target in [
+            "http://[::ffff:169.254.169.254]/",
+            "http://[64:ff9b::a9fe:a9fe]/",
+            "http://[2002:a9fe:a9fe::]/",
+            "http://[fe80::1]/",
+        ] {
+            assert_eq!(
+                redirect_decision(&url(target), Some(&from), 1, true),
+                RedirectDecision::Stop,
+                "{target} is metadata even with private access"
+            );
+        }
+        for target in [
+            "http://[::ffff:127.0.0.1]:11434/",
+            "http://[::ffff:10.0.0.1]/",
+        ] {
+            assert_eq!(
+                redirect_decision(&url(target), Some(&from), 1, true),
+                RedirectDecision::Follow,
+                "{target}"
+            );
+        }
+        assert_eq!(
+            redirect_decision(&url("https://[::ffff:8.8.8.8]/"), Some(&from), 1, false),
+            RedirectDecision::Follow
+        );
+    }
+
+    #[test]
+    fn redirect_decision_keeps_metadata_blocked_and_gates_loopback_on_opt_in() {
+        let from = url("https://api.example.com/");
+        assert_eq!(
+            redirect_decision(
+                &url("http://[::ffff:169.254.169.254]/"),
+                Some(&from),
+                1,
+                true
+            ),
+            RedirectDecision::Stop
+        );
+        assert_eq!(
+            redirect_decision(&url("http://[fd00:ec2::254]/"), Some(&from), 1, true),
+            RedirectDecision::Stop
+        );
+        assert_eq!(
+            redirect_decision(&url("http://[::1]/"), Some(&from), 1, false),
+            RedirectDecision::Stop
+        );
+        assert_eq!(
+            redirect_decision(&url("http://[::1]/"), Some(&from), 1, true),
+            RedirectDecision::Follow
         );
     }
 

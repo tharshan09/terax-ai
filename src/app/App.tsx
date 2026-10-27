@@ -11,6 +11,7 @@ import { usePresence } from "@/lib/usePresence";
 import { quoteShellArg } from "@/lib/shellQuote";
 import { useUiFonts } from "@/lib/useUiFonts";
 import { useZoom } from "@/lib/useZoom";
+import { isWindowHidden } from "@/lib/windowVisibility";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   AgentMissionControl,
@@ -53,6 +54,7 @@ import {
   type ShortcutHandlers,
   type ShortcutId,
 } from "@/modules/shortcuts";
+import { isEditorTabShortcut } from "@/modules/shortcuts/shortcuts";
 import {
   SidebarRail,
   SIDEBAR_MAX_WIDTH,
@@ -474,7 +476,7 @@ export default function App() {
     let cancelled = false;
     let inFlight = false;
     const tick = () => {
-      if (cancelled || inFlight || document.hidden) return;
+      if (cancelled || inFlight || isWindowHidden()) return;
       inFlight = true;
       tmuxPaneCwd(workspace, tmuxPollSession)
         .then((path) => {
@@ -975,6 +977,12 @@ export default function App() {
       "view.zenMode": () => setZenMode((v) => !v),
       "editor.undo": () => editorRefs.current.get(activeId)?.undo(),
       "editor.redo": () => editorRefs.current.get(activeId)?.redo(),
+      "editor.save": () => {
+        void editorRefs.current
+          .get(activeId)
+          ?.save()
+          .catch(() => {});
+      },
     }),
     [
       activeId,
@@ -1004,7 +1012,7 @@ export default function App() {
 
   const shortcutsDisabled = useCallback(
     (id: ShortcutId, e: KeyboardEvent) => {
-      if (id === "editor.undo" || id === "editor.redo") {
+      if (isEditorTabShortcut(id)) {
         return activeTab?.kind !== "editor";
       }
       if (id === "ai.askSelection") {

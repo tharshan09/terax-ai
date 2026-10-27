@@ -43,7 +43,8 @@ export type ShortcutId =
   | "settings.open"
   | "sidebar.toggle"
   | "editor.undo"
-  | "editor.redo";
+  | "editor.redo"
+  | "editor.save";
 
 export type ShortcutGroup =
   | "General"
@@ -335,7 +336,26 @@ export const SHORTCUTS: Shortcut[] = [
       { [MOD_PROP]: true, shift: true, key: "z" },
     ],
   },
+  // Mod+S at the app layer so WKWebView cannot steal "Save Page". CodeMirror
+  // also binds Mod-s; the global capture handler runs first and stops the event.
+  {
+    id: "editor.save",
+    label: "Save file",
+    group: "Editor",
+    defaultBindings: [{ [MOD_PROP]: true, key: "s" }],
+  },
 ];
+
+const EDITOR_TAB_SHORTCUTS: ReadonlySet<ShortcutId> = new Set([
+  "editor.undo",
+  "editor.redo",
+  "editor.save",
+]);
+
+/** Shortcuts that only apply while the active tab is an editor. */
+export function isEditorTabShortcut(id: ShortcutId): boolean {
+  return EDITOR_TAB_SHORTCUTS.has(id);
+}
 
 export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   "General",

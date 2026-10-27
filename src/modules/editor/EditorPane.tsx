@@ -60,6 +60,9 @@ export type EditorPaneHandle = {
   /** Apply CodeMirror's undo/redo commands. */
   undo: () => void;
   redo: () => void;
+  /** Same path as Mod-s in CodeMirror: `onSaved` runs unless the write was
+   *  withheld on a disk conflict. Rejects when the write fails. */
+  save: () => Promise<void>;
 };
 
 type Props = {
@@ -349,6 +352,9 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
         redo: () => {
           const view = cmRef.current?.view;
           if (view) redo(view);
+        },
+        save: async () => {
+          if (await saveRef.current()) onSavedRef.current?.();
         },
       }),
       [path, applyPendingGoto],

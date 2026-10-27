@@ -29,13 +29,13 @@ import { openWithDefaultApp } from "@/lib/openWith";
 import { basename, cn } from "@/lib/utils";
 import { ExplorerSearch, type ExplorerSearchHandle } from "./ExplorerSearch";
 import { EntryRow, PendingRow, StatusRow, type RowActions } from "./TreeRow";
+import { FileIcon, FolderIcon } from "./FileIcon";
 import { InlineInput } from "./InlineInput";
 import {
   copyToClipboard,
   relativePath,
   revealInFinder,
 } from "./lib/contextActions";
-import { fileIconUrl, folderIconUrl } from "./lib/iconResolver";
 import { COMPACT_CONTENT, COMPACT_ITEM } from "./lib/menuItemClass";
 import { useExplorerDnd } from "./lib/useExplorerDnd";
 import { useExplorerFileDrop } from "./lib/useExplorerFileDrop";
@@ -61,6 +61,7 @@ type Props = {
   onRevealInTerminal?: (path: string) => void;
   onAttachToAgent?: (path: string) => void;
   gitStatus?: GitStatusSnapshot | null;
+  visible?: boolean;
 };
 
 type Row =
@@ -188,10 +189,15 @@ export const FileExplorer = memo(
       onRevealInTerminal,
       onAttachToAgent,
       gitStatus,
+      visible = true,
     },
     ref,
   ) {
-    const tree = useFileTree(rootPath, { onPathRenamed, onPathDeleted });
+    const tree = useFileTree(rootPath, {
+      onPathRenamed,
+      onPathDeleted,
+      visible,
+    });
     const gitDecorations = usePreferencesStore((s) => s.explorerGitDecorations);
     const { lookup: lookupGitStatus } = useGitStatus(
       rootPath,
@@ -490,9 +496,8 @@ export const FileExplorer = memo(
             className="flex flex-1 items-center truncate text-xs font-medium text-foreground/80"
             title={rootPath}
           >
-            <img
-              src={folderIconUrl(basename(rootPath), false)}
-              alt=""
+            <FolderIcon
+              name={basename(rootPath)}
               height={15}
               width={15}
               className="mx-1.5"
@@ -591,15 +596,17 @@ export const FileExplorer = memo(
                     style={{ paddingLeft: 6 }}
                   >
                     <span className="size-3.5 shrink-0" />
-                    <img
-                      src={
-                        pendingAtRoot.kind === "dir"
-                          ? folderIconUrl("", false)
-                          : fileIconUrl("untitled")
-                      }
-                      alt=""
-                      className="size-4 shrink-0 opacity-70"
-                    />
+                    {pendingAtRoot.kind === "dir" ? (
+                      <FolderIcon
+                        name=""
+                        className="size-4 shrink-0 opacity-70"
+                      />
+                    ) : (
+                      <FileIcon
+                        name="untitled"
+                        className="size-4 shrink-0 opacity-70"
+                      />
+                    )}
                     <InlineInput
                       initial=""
                       placeholder={
