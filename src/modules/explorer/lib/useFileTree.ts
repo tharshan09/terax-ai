@@ -31,6 +31,8 @@ export function joinPath(parent: string, name: string): string {
   return `${parent}/${name}`;
 }
 
+// The explorer's one parent rule: tree keys join with `/`, so a backslash is
+// part of a name (legal on Unix), never a separator.
 export function dirname(path: string): string {
   const i = path.lastIndexOf("/");
   if (i <= 0) return "/";

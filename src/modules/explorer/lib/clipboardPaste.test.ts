@@ -2,9 +2,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   isPasteShortcut,
   pasteClipboardFiles,
+  pasteExclusively,
   pasteTargetDir,
   pendingPasteAction,
 } from "@/modules/explorer/lib/clipboardPaste";
+import { dirname } from "@/modules/explorer/lib/useFileTree";
 
 const { invoke, toast } = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -32,13 +34,55 @@ describe("pasteTargetDir", () => {
   });
 
   it.each([
-    ["C:/a.txt", "C:/"],
-    ["C:/repo/a.txt", "C:/repo"],
-    ["C:\\repo\\a.txt", "C:\\repo"],
     ["/a.txt", "/"],
-    ["//server/share/a.txt", "//server/share"],
-  ])("keeps absolute roots beside a selected file %s", (path, parent) => {
+    ["/ws/a\\b.txt", "/ws"],
+    ["C:/repo/a.txt", "C:/repo"],
+  ])("uses the tree parent rule beside a file %s", (path, parent) => {
     expect(pasteTargetDir(path, () => false, "/ws")).toBe(parent);
+  });
+});
+
+describe("dirname", () => {
+  it.each([
+    ["/ws/docs/a.txt", "/ws/docs"],
+    ["/ws/a.txt", "/ws"],
+    ["~/a.txt", "~"],
+    ["/a.txt", "/"],
+    ["/", "/"],
+    ["a.txt", "/"],
+    ["/ws/a\\b.txt", "/ws"],
+    ["C:/repo/a.txt", "C:/repo"],
+    ["C:/a.txt", "C:"],
+  ])("%s -> %s", (path, parent) => {
+    expect(dirname(path)).toBe(parent);
+  });
+});
+
+describe("pasteExclusively", () => {
+  it("says a paste is running instead of starting a second one", async () => {
+    const busy = { current: false };
+    const first = deferred<void>();
+    const paste = vi.fn(() => first.promise);
+    const running = pasteExclusively(busy, paste);
+    expect(busy.current).toBe(true);
+    await pasteExclusively(busy, paste);
+    expect(paste).toHaveBeenCalledTimes(1);
+    expect(toast.message).toHaveBeenCalledWith("A paste is already running");
+    first.resolve();
+    await running;
+    expect(busy.current).toBe(false);
+  });
+
+  it("frees the lock after a failed paste", async () => {
+    const busy = { current: false };
+    await expect(
+      pasteExclusively(busy, () => Promise.reject(new Error("boom"))),
+    ).rejects.toThrow("boom");
+    expect(busy.current).toBe(false);
+    const paste = vi.fn(async () => {});
+    await pasteExclusively(busy, paste);
+    expect(paste).toHaveBeenCalledTimes(1);
+    expect(toast.message).not.toHaveBeenCalled();
   });
 });
 

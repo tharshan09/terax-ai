@@ -112,34 +112,53 @@ fn copy_destination(dest: &Path, registry: &WorkspaceRegistry) -> Result<PathBuf
     std::fs::canonicalize(dest).map_err(|e| e.to_string())
 }
 
-/// The metadata is unfollowed, so each branch decides what a symlink source means.
+pub(crate) struct Source<'a> {
+    pub(crate) name: &'a OsStr,
+    pub(crate) is_dir: bool,
+    /// The walk below runs through a symlink, so its entries are judged too.
+    pub(crate) linked: bool,
+}
+
+/// The kind is unfollowed, so each branch decides what a symlink source means.
+/// A plain source is judged once here; its entries only when it is `linked`.
 pub(crate) fn check_source<'a>(
     src: &'a Path,
     registry: &WorkspaceRegistry,
-) -> io::Result<(&'a OsStr, std::fs::Metadata)> {
+) -> io::Result<Source<'a>> {
     if !src.is_absolute() {
         return Err(invalid("copy source must be absolute"));
     }
     let name = src
         .file_name()
         .ok_or_else(|| invalid("copy source has no filename"))?;
-    let metadata = std::fs::symlink_metadata(src)?;
-    let kind = metadata.file_type();
+    let kind = std::fs::symlink_metadata(src)?.file_type();
     if !(kind.is_file() || kind.is_dir() || kind.is_symlink()) {
         return Err(unsupported_kind());
     }
-    if !kind.is_symlink() {
-        guard_read(registry, src)?;
-    }
-    Ok((name, metadata))
+    let linked = kind.is_symlink() || to_canon(guard_read(registry, src)?) != to_canon(src);
+    Ok(Source {
+        name,
+        is_dir: kind.is_dir(),
+        linked,
+    })
 }
 
 // SECURITY: a paste is an explicit user action, so copies follow the editor's
 // trusted open/save policy: named paths pass, symlink detours to secrets do not.
-pub(crate) fn guard_read(registry: &WorkspaceRegistry, path: &Path) -> io::Result<()> {
-    guard::enforce_read(registry, path, &path.to_string_lossy(), true)
-        .map(drop)
-        .map_err(refused)
+pub(crate) fn guard_read(registry: &WorkspaceRegistry, path: &Path) -> io::Result<PathBuf> {
+    guard::enforce_read(registry, path, &path.to_string_lossy(), true).map_err(refused)
+}
+
+/// A symlink entry is judged where a walk reads through it, not here.
+pub(crate) fn guard_entry(
+    registry: &WorkspaceRegistry,
+    entry: &std::fs::DirEntry,
+    linked: bool,
+) -> io::Result<()> {
+    if linked && !entry.file_type()?.is_symlink() {
+        guard_read(registry, &entry.path())?;
+    }
+    Ok(())
 }
 
 fn guard_write(registry: &WorkspaceRegistry, path: &Path) -> io::Result<()> {
@@ -193,8 +212,8 @@ fn copy_item(
     registry: &WorkspaceRegistry,
     rename_on_conflict: bool,
 ) -> io::Result<OsString> {
-    let (name, metadata) = check_source(src, registry)?;
-    let is_dir = metadata.is_dir();
+    let source = check_source(src, registry)?;
+    let (name, is_dir) = (source.name, source.is_dir);
     guard_write(registry, &named_dest.join(name))?;
     let target = dest.join(name);
     if !rename_on_conflict && std::fs::symlink_metadata(&target).is_ok() {
@@ -209,7 +228,7 @@ fn copy_item(
         .prefix(STAGING_PREFIX)
         .tempdir_in(dest)?;
     let staged = staging.path().join(STAGED_ITEM);
-    let result = copy_recursive(src, &staged, 0, registry).and_then(|()| {
+    let result = copy_recursive(src, &staged, 0, source.linked, registry).and_then(|()| {
         publish(
             &staged,
             dest,
@@ -364,28 +383,67 @@ fn copy_recursive(
     src: &Path,
     dst: &Path,
     depth: usize,
+    linked: bool,
     registry: &WorkspaceRegistry,
 ) -> io::Result<()> {
     check_depth(depth)?;
-    let metadata = std::fs::symlink_metadata(src)?;
-    let kind = metadata.file_type();
+    let kind = std::fs::symlink_metadata(src)?.file_type();
     if kind.is_symlink() {
-        copy_symlink(src, dst)
-    } else if kind.is_dir() {
-        std::fs::create_dir(dst)?;
-        for entry in std::fs::read_dir(src)? {
-            let entry = entry?;
-            let path = entry.path();
-            // Links are copied as links, so nothing is read through them.
-            if !entry.file_type()?.is_symlink() {
-                guard_read(registry, &path)?;
+        match copy_symlink(src, dst) {
+            Err(error) if copies_link_content(&error, cfg!(windows)) => {
+                copy_link_content(src, dst, depth, registry)
             }
-            copy_recursive(&path, &dst.join(entry.file_name()), depth + 1, registry)?;
+            other => other,
         }
-        Ok(())
+    } else if kind.is_dir() {
+        copy_dir(src, dst, depth, linked, registry)
     } else if kind.is_file() {
         // `dst` sits in our fresh staging dir, so this cannot follow a planted
         // link; std::fs::copy clones on APFS instead of streaming bytes.
+        std::fs::copy(src, dst).map(|_| ())
+    } else {
+        Err(unsupported_kind())
+    }
+}
+
+fn copy_dir(
+    src: &Path,
+    dst: &Path,
+    depth: usize,
+    linked: bool,
+    registry: &WorkspaceRegistry,
+) -> io::Result<()> {
+    std::fs::create_dir(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        guard_entry(registry, &entry, linked)?;
+        let target = dst.join(entry.file_name());
+        copy_recursive(&entry.path(), &target, depth + 1, linked, registry)?;
+    }
+    Ok(())
+}
+
+// windows-sys ERROR_PRIVILEGE_NOT_HELD, spelled out so the decision is testable on any host.
+const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
+
+/// Windows without the symlink privilege (no Developer Mode) copies what a
+/// link points at instead, as copies did before links were kept.
+fn copies_link_content(error: &io::Error, windows: bool) -> bool {
+    windows && error.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD)
+}
+
+// The content is read through the link, so the link and all below it are judged.
+fn copy_link_content(
+    src: &Path,
+    dst: &Path,
+    depth: usize,
+    registry: &WorkspaceRegistry,
+) -> io::Result<()> {
+    guard_read(registry, src)?;
+    let target = std::fs::metadata(src)?;
+    if target.is_dir() {
+        copy_dir(src, dst, depth, true, registry)
+    } else if target.is_file() {
         std::fs::copy(src, dst).map(|_| ())
     } else {
         Err(unsupported_kind())
@@ -921,6 +979,72 @@ mod tests {
             result.failed
         );
         assert!(names(dest.path()).is_empty());
+    }
+
+    // The protected folder only shows up below the root, behind the linked parent.
+    #[cfg(unix)]
+    #[test]
+    fn entries_below_a_linked_parent_keep_the_policy_check() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let roaming = base.join("home/AppData/Roaming");
+        std::fs::create_dir_all(roaming.join("gcloud")).unwrap();
+        std::fs::write(roaming.join("gcloud/access.db"), b"token").unwrap();
+        std::fs::write(roaming.join("notes.txt"), b"n").unwrap();
+        std::os::unix::fs::symlink(base.join("home/AppData"), base.join("ad")).unwrap();
+        let dest = base.join("dest");
+        std::fs::create_dir(&dest).unwrap();
+
+        let result = copy(&[base.join("ad/Roaming")], &dest, true);
+        assert!(result.created.is_empty());
+        assert_eq!(
+            result.failed[0].message,
+            "refused: path is inside a protected directory (appdata/roaming/gcloud)"
+        );
+        assert!(names(&dest).is_empty());
+    }
+
+    #[test]
+    fn link_content_fallback_is_only_for_the_missing_windows_privilege() {
+        let denied = io::Error::from_raw_os_error(ERROR_PRIVILEGE_NOT_HELD);
+        assert!(copies_link_content(&denied, true));
+        assert!(!copies_link_content(&denied, false));
+        assert!(!copies_link_content(&io::Error::from_raw_os_error(5), true));
+        assert!(!copies_link_content(
+            &io::ErrorKind::AlreadyExists.into(),
+            true
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_link_content_fallback_copies_the_target_and_judges_the_link() {
+        use std::os::unix::fs::symlink;
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let reg = reg_for(dest.path());
+        std::fs::create_dir_all(src.path().join("lib/sub")).unwrap();
+        std::fs::write(src.path().join("lib/sub/a.txt"), b"a").unwrap();
+        std::fs::create_dir(src.path().join("keys")).unwrap();
+        std::fs::write(src.path().join("keys/id_ed25519"), b"PRIVATE").unwrap();
+        symlink("lib", src.path().join("lib-link")).unwrap();
+        symlink("keys/id_ed25519", src.path().join("notes.txt")).unwrap();
+
+        let copied = dest.path().join("lib-link");
+        copy_link_content(&src.path().join("lib-link"), &copied, 0, &reg).unwrap();
+        assert!(!std::fs::symlink_metadata(&copied)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(copied.join("sub/a.txt")).unwrap(), b"a");
+
+        let notes = dest.path().join("notes.txt");
+        let err = copy_link_content(&src.path().join("notes.txt"), &notes, 0, &reg).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "refused: \"id_ed25519\" matches a sensitive-file pattern"
+        );
+        assert!(std::fs::symlink_metadata(&notes).is_err());
     }
 
     #[test]

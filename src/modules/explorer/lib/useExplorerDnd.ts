@@ -1,6 +1,6 @@
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { parentDir } from "@/lib/utils";
+import { dirname } from "./useFileTree";
 
 type Options = {
   rootPath: string;
@@ -63,9 +63,9 @@ export function useExplorerDnd({ rootPath, isDir, onMove }: Options) {
         .elementFromPoint(ev.clientX, ev.clientY)
         ?.closest<HTMLElement>("[data-fs-path]");
       const p = hit?.getAttribute("data-fs-path");
-      const t = p ? (isDir(p) ? p : parentDir(p)) : rootPath;
+      const t = p ? (isDir(p) ? p : dirname(p)) : rootPath;
       const valid =
-        t !== source && !t.startsWith(`${source}/`) && parentDir(source) !== t
+        t !== source && !t.startsWith(`${source}/`) && dirname(source) !== t
           ? t
           : null;
       if (dropTargetRef.current !== valid) {

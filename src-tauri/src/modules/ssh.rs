@@ -409,7 +409,7 @@ def create_dir(req):
     if os.path.exists(path):
         raise FileExistsError("already exists: " + path)
     # Parents are created as needed (mirrors local create_dir_all + exists check).
-    # Staging passes parents=False so a vanished destination is never recreated.
+    # Copy uploads pass parents=False so a vanished destination is never recreated.
     if req.get("parents", True):
         os.makedirs(path, exist_ok=False)
     else:
@@ -1262,17 +1262,17 @@ enum Upload {
 }
 
 /// Walks the local source once before any remote call, so an item that cannot
-/// be uploaded fails without touching the host.
+/// be uploaded fails without touching the host. `check_source` judged the root.
 fn plan_upload(
     src: &std::path::Path,
     rel: String,
     depth: usize,
+    linked: bool,
     plan: &mut Vec<Upload>,
     registry: &crate::modules::workspace::WorkspaceRegistry,
 ) -> std::io::Result<()> {
     use crate::modules::fs::copy;
     copy::check_depth(depth)?;
-    copy::guard_read(registry, src)?;
     let meta = std::fs::symlink_metadata(src)?;
     if meta.is_dir() {
         plan.push(Upload::Dir(rel.clone()));
@@ -1285,13 +1285,16 @@ fn plan_upload(
                     format!("non-UTF-8 filename under {}", src.display()),
                 )
             })?;
+            copy::guard_entry(registry, &entry, linked)?;
             let rel = format!("{rel}/{name}");
-            plan_upload(&entry.path(), rel, depth + 1, plan, registry)?;
+            plan_upload(&entry.path(), rel, depth + 1, linked, plan, registry)?;
         }
         return Ok(());
     }
-    // The helper writes plain files only: a symlink uploads its target's bytes.
+    // The helper writes plain files only: a symlink uploads its target's bytes,
+    // so every link is judged here, where the upload reads through it.
     let target = if meta.file_type().is_symlink() {
+        copy::guard_read(registry, src)?;
         std::fs::metadata(src)?
     } else {
         meta
@@ -1316,9 +1319,9 @@ fn plan_upload(
 fn upload(run: &mut RemoteRun, plan: &[Upload], item: &str) -> Result<(), RemoteError> {
     for step in plan {
         let request = match step {
-            Upload::Dir(rel) => {
-                serde_json::json!({ "op": "create_dir", "path": format!("{item}{rel}") })
-            }
+            Upload::Dir(rel) => serde_json::json!({
+                "op": "create_dir", "path": format!("{item}{rel}"), "parents": false,
+            }),
             Upload::File { src, rel, mode } => {
                 let bytes = std::fs::read(src).map_err(|e| RemoteError::Failed(e.to_string()))?;
                 serde_json::json!({
@@ -1476,17 +1479,20 @@ fn copy_one(
 ) -> Result<String, ItemError> {
     use crate::modules::fs::copy;
     let failed = |error: std::io::Error| RemoteError::Failed(error.to_string());
-    let (name, metadata) = copy::check_source(src, registry).map_err(failed)?;
-    let name = name
+    let source = copy::check_source(src, registry).map_err(failed)?;
+    let name = source
+        .name
         .to_str()
         .ok_or_else(|| RemoteError::Failed(format!("non-UTF-8 filename: {}", src.display())))?;
     if !rename_on_conflict && taken.contains(name) {
         return Err(failed(copy::already_exists(format!("{dest}/{name}"))).into());
     }
     let mut plan = Vec::new();
-    plan_upload(src, String::new(), 0, &mut plan, registry).map_err(failed)?;
+    plan_upload(src, String::new(), 0, source.linked, &mut plan, registry).map_err(failed)?;
 
     let staging = format!("{dest}/{}{}", copy::STAGING_PREFIX, staging_suffix());
+    // A refused or lost create_dir leaves a name this run does not own, so it
+    // returns here, before the cleanup below could delete someone else's dir.
     run(
         &serde_json::json!({ "op": "create_dir", "path": staging, "parents": false }),
         None,
@@ -1497,7 +1503,7 @@ fn copy_one(
             &staging,
             dest,
             name,
-            metadata.is_dir(),
+            source.is_dir,
             rename_on_conflict,
             taken,
         ),
@@ -2103,6 +2109,15 @@ Host !secret prod
         (result, requests)
     }
 
+    fn creates_staging(request: &serde_json::Value) -> bool {
+        request["op"] == "create_dir"
+            && request["path"].as_str().is_some_and(|path| {
+                path.rsplit('/')
+                    .next()
+                    .is_some_and(crate::modules::fs::copy::is_staging_name)
+            })
+    }
+
     fn healthy(request: &serde_json::Value) -> RemoteReply {
         Ok(if request["op"] == "read_dir" {
             serde_json::json!([])
@@ -2136,7 +2151,7 @@ Host !secret prod
         fn drop_on_staging(nth: usize) -> impl FnMut(&serde_json::Value) -> RemoteReply {
             let mut stagings = 0;
             move |request| {
-                if request["op"] == "create_dir" && request["parents"] == false {
+                if creates_staging(request) {
                     stagings += 1;
                     if stagings == nth {
                         return Err(RemoteError::Transport(LOST.into()));
@@ -2289,7 +2304,7 @@ Host !secret prod
         assert_eq!(result.unwrap().failed[0].message, "Permission denied");
         let staging = requests
             .iter()
-            .find(|r| r["op"] == "create_dir" && r["parents"] == false)
+            .find(|r| creates_staging(r))
             .map(|r| r["path"].clone())
             .unwrap();
         let deletes: Vec<&serde_json::Value> = requests
@@ -2298,6 +2313,60 @@ Host !secret prod
             .map(|r| &r["path"])
             .collect();
         assert_eq!(deletes, [&staging]);
+    }
+
+    #[test]
+    fn a_staging_dir_this_run_did_not_create_is_never_deleted() {
+        let src = tempfile::tempdir().unwrap();
+        let sources = local_sources(src.path(), &["a.txt"]);
+        let (result, requests) = stub_copy(&sources, |request| {
+            if creates_staging(request) {
+                let path = request["path"].as_str().unwrap();
+                return Err(RemoteError::Failed(format!("already exists: {path}")));
+            }
+            healthy(request)
+        });
+        let result = result.unwrap();
+        assert!(result.created.is_empty());
+        assert!(
+            result.failed[0]
+                .message
+                .starts_with("already exists: /remote/.terax-copy-"),
+            "{:?}",
+            result.failed
+        );
+        assert!(!requests
+            .iter()
+            .any(|r| r["op"] == "delete" || r["op"] == "write_bytes" || r["op"] == "publish"));
+    }
+
+    #[test]
+    fn every_upload_folder_is_made_without_parents() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(src.path().join("pkg/a/b")).unwrap();
+        std::fs::write(src.path().join("pkg/a/b/x.txt"), b"x").unwrap();
+        let pkg = src.path().join("pkg").to_string_lossy().into_owned();
+        let (result, requests) = stub_copy(&[pkg], healthy);
+        assert_eq!(result.unwrap().created, ["/remote/pkg"]);
+        let dirs: Vec<&serde_json::Value> = requests
+            .iter()
+            .filter(|r| r["op"] == "create_dir")
+            .collect();
+        let staging = dirs[0]["path"].as_str().unwrap();
+        let paths: Vec<String> = dirs
+            .iter()
+            .map(|r| r["path"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                staging.to_string(),
+                format!("{staging}/item"),
+                format!("{staging}/item/a"),
+                format!("{staging}/item/a/b"),
+            ]
+        );
+        assert!(dirs.iter().all(|r| r["parents"] == false), "{dirs:?}");
     }
 
     #[test]
@@ -2430,18 +2499,39 @@ Host !secret prod
                 "refused: \"id_ed25519\" matches a sensitive-file pattern".to_string()
             )]
         );
-        let stagings = requests
-            .iter()
-            .filter(|r| r["op"] == "create_dir" && r["parents"] == false)
-            .count();
+        let stagings = requests.iter().filter(|r| creates_staging(r)).count();
         assert_eq!(stagings, 1, "only ok.txt may reach the host");
+    }
+
+    // The protected folder only shows up below the root, behind the linked parent.
+    #[cfg(unix)]
+    #[test]
+    fn entries_below_a_linked_parent_keep_the_policy_check_over_ssh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let roaming = base.join("home/AppData/Roaming");
+        std::fs::create_dir_all(roaming.join("gcloud")).unwrap();
+        std::fs::write(roaming.join("gcloud/access.db"), b"token").unwrap();
+        std::os::unix::fs::symlink(base.join("home/AppData"), base.join("ad")).unwrap();
+        let source = base.join("ad/Roaming").to_string_lossy().into_owned();
+
+        let (result, requests) = stub_copy(std::slice::from_ref(&source), healthy);
+        assert_eq!(
+            failures(&result.unwrap()),
+            [(
+                source,
+                "refused: path is inside a protected directory (appdata/roaming/gcloud)"
+                    .to_string()
+            )]
+        );
+        assert!(!requests.iter().any(creates_staging));
     }
 
     #[test]
     fn upload_plan_checks_depth_and_kinds_before_any_remote_call() {
         let reg = crate::modules::workspace::WorkspaceRegistry::default();
         let plan_upload = |src: &std::path::Path, plan: &mut Vec<Upload>| {
-            plan_upload(src, String::new(), 0, plan, &reg)
+            plan_upload(src, String::new(), 0, false, plan, &reg)
         };
         let src = tempfile::tempdir().unwrap();
         let nested = |name: &str, levels: usize| {

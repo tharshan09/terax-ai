@@ -29,7 +29,7 @@ import {
 } from "react";
 import { openWithDefaultApp } from "@/lib/openWith";
 import { IS_MAC } from "@/lib/platform";
-import { basename, cn, parentDir } from "@/lib/utils";
+import { basename, cn } from "@/lib/utils";
 import { ExplorerSearch, type ExplorerSearchHandle } from "./ExplorerSearch";
 import { EntryRow, PendingRow, StatusRow, type RowActions } from "./TreeRow";
 import { InlineInput } from "./InlineInput";
@@ -41,6 +41,7 @@ import {
 import {
   isPasteShortcut,
   pasteClipboardFiles,
+  pasteExclusively,
   pasteTargetDir,
   pendingPasteAction,
 } from "@/modules/explorer/lib/clipboardPaste";
@@ -48,7 +49,7 @@ import { fileIconUrl, folderIconUrl } from "./lib/iconResolver";
 import { COMPACT_CONTENT, COMPACT_ITEM } from "./lib/menuItemClass";
 import { useExplorerDnd } from "./lib/useExplorerDnd";
 import { useExplorerFileDrop } from "./lib/useExplorerFileDrop";
-import { useFileTree } from "./lib/useFileTree";
+import { dirname, useFileTree } from "./lib/useFileTree";
 import { useGitStatus } from "./lib/useGitStatus";
 import type { GitStatusCode } from "./lib/gitStatusUtils";
 import { useGlobalShortcuts } from "@/modules/shortcuts";
@@ -362,11 +363,10 @@ export const FileExplorer = memo(
 
     const pasteInto = useCallback(
       async (destDir: string) => {
-        if (!rootPath || pasteBusyRef.current) return;
-        pasteBusyRef.current = true;
-        const scope = pasteScopeRef.current;
-        const isCurrent = () => pasteScopeRef.current === scope;
-        try {
+        if (!rootPath) return;
+        await pasteExclusively(pasteBusyRef, async () => {
+          const scope = pasteScopeRef.current;
+          const isCurrent = () => pasteScopeRef.current === scope;
           const created = await pasteClipboardFiles(destDir, {
             workspace,
             rootPath,
@@ -384,9 +384,7 @@ export const FileExplorer = memo(
             dir: destDir,
             folderAtPaste: nodesRef.current[destDir],
           });
-        } finally {
-          pasteBusyRef.current = false;
-        }
+        });
       },
       [rootPath, workspace, selectedPath, tree.refresh, tree.expand],
     );
@@ -797,7 +795,7 @@ export const FileExplorer = memo(
                       tree.beginCreate(
                         menuTarget.isDir
                           ? menuTarget.path
-                          : parentDir(menuTarget.path),
+                          : dirname(menuTarget.path),
                         "file",
                       )
                     }
@@ -810,7 +808,7 @@ export const FileExplorer = memo(
                       tree.beginCreate(
                         menuTarget.isDir
                           ? menuTarget.path
-                          : parentDir(menuTarget.path),
+                          : dirname(menuTarget.path),
                         "dir",
                       )
                     }

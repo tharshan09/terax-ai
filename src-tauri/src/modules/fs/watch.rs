@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tauri::{AppHandle, Emitter, State};
 
+use crate::modules::fs::copy::is_staging_name;
 use crate::modules::fs::to_canon;
 use crate::modules::workspace::{resolve_path, WorkspaceEnv, WorkspaceRegistry};
 
@@ -87,6 +88,12 @@ fn is_skipped(path: &Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|n| SKIP_DIRS.contains(&n))
+}
+
+// A copy in progress is invisible; only its publish under the real name is news.
+fn in_staging(path: &Path) -> bool {
+    path.components()
+        .any(|c| c.as_os_str().to_str().is_some_and(is_staging_name))
 }
 
 #[derive(Default)]
@@ -174,8 +181,8 @@ fn collect(set: &mut HashSet<String>, ev: notify::Result<Event>) {
     if matches!(ev.kind, EventKind::Access(_)) {
         return;
     }
-    for p in ev.paths {
-        set.insert(to_canon(&p));
+    for p in ev.paths.iter().filter(|p| !in_staging(p)) {
+        set.insert(to_canon(p));
     }
 }
 
@@ -315,5 +322,44 @@ mod tests {
         collect(&mut set, modify());
         collect(&mut set, modify());
         assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn staging_comings_and_goings_raise_no_change_but_the_publish_does() {
+        use notify::event::{CreateKind, ModifyKind, RemoveKind, RenameMode};
+        let event = |kind: EventKind, paths: &[&str]| -> notify::Result<Event> {
+            Ok(Event {
+                kind,
+                paths: paths.iter().map(PathBuf::from).collect(),
+                attrs: Default::default(),
+            })
+        };
+        let mut set = HashSet::new();
+        let staging = "/ws/.terax-copy-ab12";
+        collect(
+            &mut set,
+            event(EventKind::Create(CreateKind::Folder), &[staging]),
+        );
+        collect(
+            &mut set,
+            event(
+                EventKind::Create(CreateKind::File),
+                &["/ws/.terax-copy-ab12/item"],
+            ),
+        );
+        collect(
+            &mut set,
+            event(EventKind::Remove(RemoveKind::Folder), &[staging]),
+        );
+        assert!(set.is_empty());
+
+        collect(
+            &mut set,
+            event(
+                EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+                &["/ws/.terax-copy-ab12/item", "/ws/a copy.txt"],
+            ),
+        );
+        assert_eq!(set, HashSet::from([to_canon("/ws/a copy.txt")]));
     }
 }

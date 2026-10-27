@@ -2,12 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { parentDir } from "@/lib/utils";
 import {
   type CopyResult,
   reportCopyFailures,
 } from "@/modules/explorer/lib/clipboardPaste";
 import { currentWorkspaceEnv } from "@/modules/workspace";
+import { dirname } from "./useFileTree";
 
 type Options = {
   rootPath: string | null;
@@ -35,7 +35,7 @@ function dirAt(
   const row = el.closest<HTMLElement>("[data-fs-path]");
   if (row) {
     const p = row.getAttribute("data-fs-path") as string;
-    return isDir(p) ? p : parentDir(p);
+    return isDir(p) ? p : dirname(p);
   }
   if (el.closest("[data-explorer-drop]")) return rootPath;
   return null;

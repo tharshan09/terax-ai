@@ -1,11 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import { basename, parentDir } from "@/lib/utils";
+import { basename } from "@/lib/utils";
 import {
   isTerminalPasteChord,
   type TerminalKeyEvent,
 } from "@/modules/terminal/lib/keymap";
 import type { WorkspaceEnv } from "@/modules/workspace";
+import { dirname } from "./useFileTree";
 
 export function pasteTargetDir(
   selected: string | null,
@@ -13,7 +14,24 @@ export function pasteTargetDir(
   rootPath: string,
 ): string {
   if (!selected) return rootPath;
-  return isDir(selected) ? selected : parentDir(selected);
+  return isDir(selected) ? selected : dirname(selected);
+}
+
+// One paste at a time; a second request says so instead of silently doing nothing.
+export async function pasteExclusively(
+  busy: { current: boolean },
+  paste: () => Promise<void>,
+): Promise<void> {
+  if (busy.current) {
+    toast.message("A paste is already running");
+    return;
+  }
+  busy.current = true;
+  try {
+    await paste();
+  } finally {
+    busy.current = false;
+  }
 }
 
 // Files come from the macOS pasteboard only, so other platforms get no shortcut.
