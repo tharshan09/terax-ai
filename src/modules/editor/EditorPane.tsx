@@ -60,7 +60,7 @@ export type EditorPaneHandle = {
   /** Apply CodeMirror's undo/redo commands. */
   undo: () => void;
   redo: () => void;
-  /** Write the buffer; never rejects, useDocument already toasts a failed write. */
+  /** Write the buffer, then onSaved on a real write; never rejects, useDocument toasts failures. */
   save: () => Promise<void>;
 };
 
@@ -354,7 +354,9 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
         },
         save: () =>
           saveRef.current().then(
-            () => {},
+            (ok) => {
+              if (ok) onSavedRef.current?.();
+            },
             () => {},
           ),
       }),
