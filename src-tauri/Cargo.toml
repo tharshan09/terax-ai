@@ -34,7 +34,6 @@ ignore = "0.4"
 regex = "1"
 grep-regex = "0.1"
 grep-searcher = "0.1"
-grep-matcher = "0.1"
 globset = "0.4"
 nucleo-matcher = "0.3"
 shared_child = "1"
@@ -46,7 +45,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 	"rustls-tls",
 	"stream",
 ] }
-bytes = "1"
+url = "2"
 futures-util = "0.3"
 tokio = { version = "1", default-features = false, features = ["rt"] }
 tempfile = "3"

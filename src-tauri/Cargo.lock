@@ -5010,11 +5010,9 @@ name = "terax"
 version = "0.8.6"
 dependencies = [
  "block2",
- "bytes",
  "dirs 6.0.0",
  "futures-util",
  "globset",
- "grep-matcher",
  "grep-regex",
  "grep-searcher",
  "ignore",
@@ -5044,6 +5042,7 @@ dependencies = [
  "tauri-plugin-window-state",
  "tempfile",
  "tokio",
+ "url",
  "windows-sys 0.61.2",
 ]
 

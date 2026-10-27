@@ -1,4 +1,5 @@
 import { IS_MAC, MOD_PROP } from "@/lib/platform";
+import type { Tab } from "@/modules/tabs";
 
 /**
  * Single source of truth for keyboard shortcuts.
@@ -43,7 +44,8 @@ export type ShortcutId =
   | "settings.open"
   | "sidebar.toggle"
   | "editor.undo"
-  | "editor.redo";
+  | "editor.redo"
+  | "editor.save";
 
 export type ShortcutGroup =
   | "General"
@@ -335,7 +337,28 @@ export const SHORTCUTS: Shortcut[] = [
       { [MOD_PROP]: true, shift: true, key: "z" },
     ],
   },
+  // Claimed in the capture phase so WKWebView cannot Save Page; CM's Mod-s
+  // only fires if editor.save is rebound.
+  {
+    id: "editor.save",
+    label: "Save file",
+    group: "Editor",
+    defaultBindings: [{ [MOD_PROP]: true, key: "s" }],
+  },
 ];
+
+const EDITOR_SHORTCUTS: ReadonlySet<ShortcutId> = new Set<ShortcutId>([
+  "editor.undo",
+  "editor.redo",
+  "editor.save",
+]);
+
+export function isEditorShortcutDisabled(
+  id: ShortcutId,
+  activeTabKind: Tab["kind"] | undefined,
+): boolean {
+  return EDITOR_SHORTCUTS.has(id) && activeTabKind !== "editor";
+}
 
 export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   "General",

@@ -46,7 +46,9 @@ export function useGlobalShortcuts(
     const onKey = (e: KeyboardEvent) => {
       const { handlers, options } = latest.current;
       for (const s of SHORTCUTS) {
-        if (e.repeat && !s.allowRepeat) continue;
+        // Claim a held Mod+S too, so neither WKWebView nor CM's Mod-s gets it.
+        const heldSave = e.repeat && s.id === "editor.save";
+        if (e.repeat && !s.allowRepeat && !heldSave) continue;
         const bindings = userShortcuts[s.id] || s.defaultBindings;
         const isMatch = bindings.some((b) => matchBinding(e, b, s.id));
         if (!isMatch) continue;
@@ -56,7 +58,7 @@ export function useGlobalShortcuts(
         if (!h) return;
         e.preventDefault();
         e.stopImmediatePropagation();
-        h(e);
+        if (!heldSave) h(e);
         return;
       }
     };

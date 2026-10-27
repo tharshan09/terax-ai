@@ -60,6 +60,8 @@ export type EditorPaneHandle = {
   /** Apply CodeMirror's undo/redo commands. */
   undo: () => void;
   redo: () => void;
+  /** Never rejects; onSaved fires only after a real write. */
+  save: () => Promise<void>;
 };
 
 type Props = {
@@ -146,6 +148,14 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
     const onCloseRef = useRef(onClose);
     onCloseRef.current = onClose;
 
+    // useDocument toasts failures; false means a disk conflict withheld the write.
+    const performSave = useCallback(async () => {
+      const saved = await saveRef.current().catch(() => false);
+      if (saved) onSavedRef.current?.();
+    }, []);
+    const performSaveRef = useRef(performSave);
+    performSaveRef.current = performSave;
+
     const pathRef = useRef(path);
     pathRef.current = path;
 
@@ -185,13 +195,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
         ),
         vimHandlersExtension(() => ({
           save: () => {
-            // onSaved must only fire on a real write: saveRef rejects on
-            // failure (surfaced via a toast in useDocument) and resolves false
-            // when the write was withheld on a disk-conflict. Swallow the
-            // rejection here to avoid an unhandled promise.
-            void (async () => {
-              if (await saveRef.current()) onSavedRef.current?.();
-            })().catch(() => {});
+            void performSaveRef.current();
           },
           close: () => onCloseRef.current?.(),
         })),
@@ -241,9 +245,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
             key: "Mod-s",
             preventDefault: true,
             run: () => {
-              void (async () => {
-                if (await saveRef.current()) onSavedRef.current?.();
-              })().catch(() => {});
+              void performSaveRef.current();
               return true;
             },
           },
@@ -350,6 +352,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
           const view = cmRef.current?.view;
           if (view) redo(view);
         },
+        save: () => performSaveRef.current(),
       }),
       [path, applyPendingGoto],
     );
