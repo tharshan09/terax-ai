@@ -1,0 +1,20 @@
+{
+  "spec_path": "specs/2026-10-20-upstream-sync-090",
+  "feature_name": "upstream-sync-090",
+  "status": "in_progress",
+  "current_state": "foundation",
+  "started_at": "2026-10-27T13:56:15Z",
+  "branch": "upstream-sync-090",
+  "worktree_path": "/Users/zipmend/Documents/private/projects/terax-ai/.claude/worktrees/upstream-sync-090",
+  "default_branch": "main",
+  "github_available": true,
+  "repo": "tharshan09/terax-ai",
+  "pr_number": null,
+  "issue_number": null,
+  "starter": "tharshan@balasingham.de",
+  "start_commit": "68d45d0252cd21e234c7c6c4b5484306ec2070fb",
+  "order": [],
+  "slices": [],
+  "security_scan": null,
+  "last_updated": "2026-10-27T13:56:15Z"
+}

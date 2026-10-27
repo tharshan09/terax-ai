@@ -93,7 +93,7 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 |--------------|-----------|----------------------|
 | Context-Menü mit Shortcut-Hinweis | `ContextMenuShortcut` in `FileExplorer.tsx` | neuer Eintrag `Paste` mit `⌘V` |
 | Toast | `sonner` (`toast.message`, `toast.error`) | Leere Zwischenablage, Teilfehler, Totalfehler |
-| Explorer-Auswahl + Aufklappen | `FileExplorer.tsx` Selection-State | neu eingefügte Elemente markieren |
+| Explorer-Auswahl + Aufklappen | `FileExplorer.tsx` Selection-State | erstes neu eingefügtes Element auswählen, Zielordner aufklappen (Einzelauswahl; architecture.md Q&A #4) |
 
 ### New Patterns
 
@@ -109,7 +109,7 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 1. FL-1: User kopiert im Finder eine oder mehrere Dateien/Ordner (⌘C).
 2. FL-2: User fokussiert den Explorer und drückt ⌘V ODER wählt `Paste` im Kontextmenü einer Zeile bzw. der freien Fläche → System bestimmt den Zielordner nach BR-5.
 3. FL-3: System liest die Dateipfade aus der Zwischenablage → kopiert jedes Element nach BR-1..BR-4 (lokal) bzw. lädt hoch (SSH).
-4. FL-4: System liest den Zielordner neu ein, klappt ihn auf und markiert alle neu angelegten Elemente.
+4. FL-4: System liest den Zielordner neu ein, klappt ihn auf und wählt das erste neu angelegte Element aus; die übrigen sind im aufgeklappten Ordner sichtbar (Einzelauswahl, geändert durch architecture.md Q&A #4).
 
 ### Finder-Drop (geändertes Verhalten)
 5. FL-5: User zieht Dateien aus dem Finder auf den Explorer → bei Namensgleichheit entsteht eine Kopie nach BR-1 statt eines Abbruchs; Teilfehler nach BR-4.
@@ -142,7 +142,7 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 **Layout:**
 - Kontextmenü einer Zeile (Datei/Ordner): bestehende Einträge + neuer Eintrag `Paste` mit Hinweis `⌘V`
 - Kontextmenü der freien Fläche (Wurzel): bestehende Einträge + `Paste` mit Hinweis `⌘V`
-- Baum: nach dem Einfügen Zielordner aufgeklappt, neue Elemente markiert
+- Baum: nach dem Einfügen Zielordner aufgeklappt, erstes neues Element ausgewählt (architecture.md Q&A #4)
 
 ### Screen: Einstellungen → About
 **Position:** Einstellungsfenster, Bereich About
@@ -160,7 +160,7 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 | UI-3 | `toast_empty_clipboard` | Toast (Info) | global | `shown` | Text `No files on the clipboard` |
 | UI-4 | `toast_partial_failure` | Toast (Fehler) | global | `shown` | Titel `Could not copy {N} item` / `items`, Beschreibung `{source}: {message}` des ersten Fehlers |
 | UI-5 | `toast_paste_failed` | Toast (Fehler) | global | `shown` | Text `Paste failed: {error}` |
-| UI-6 | `pasted_selection` | Baum-Auswahl | Explorer | `selected` | alle neu angelegten Elemente markiert, Zielordner aufgeklappt |
+| UI-6 | `pasted_selection` | Baum-Auswahl | Explorer | `selected` | erstes neu angelegtes Element ausgewählt und in Sicht, Zielordner aufgeklappt (Einzelauswahl; architecture.md Q&A #4) |
 | UI-7 | `drop_copy` | Finder-Drop | Explorer | bestehend; geändert nur Ergebnis | Namensgleichheit → Kopie nach BR-1; Teilfehler → UI-4 statt `Copy failed` |
 | UI-8 | `animations` | CSS-Animationen (Tab-Spinner, Mission-Control-Spinner, Shimmer, Puls) | global | `running`, `paused` | `paused` nur bei unsichtbarem Fenster (BR-9); Endlos-Animationen in Stufen (BR-10) |
 | UI-9 | `media_preview` | Video/Audio-Vorschau | Editor-Tab | `playing`, `paused`, `hidden` | Tab im Hintergrund → pausiert + ausgeblendet; Fenster unsichtbar → pausiert; kein Auto-Resume (BR-12) |
@@ -176,7 +176,7 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 |----|-------|----|--------------------|
 | ST-1 | `paste_idle` | Explorer normal | ⌘V, `Paste`, Drop |
 | ST-2 | `paste_busy` | Explorer normal, weitere ⌘V werden ignoriert | -- |
-| ST-3 | `paste_done` | Zielordner aufgeklappt, neue Elemente markiert | ⌘V, `Paste`, Drop |
+| ST-3 | `paste_done` | Zielordner aufgeklappt, erstes neues Element ausgewählt (architecture.md Q&A #4) | ⌘V, `Paste`, Drop |
 | ST-4 | `paste_partial` | wie ST-3 für erfolgreiche Elemente + UI-4 | ⌘V, `Paste`, Drop |
 | ST-5 | `paste_failed` | UI-5, Baum ggf. neu eingelesen | ⌘V, `Paste`, Drop |
 | ST-6 | `window_visible` | Animationen laufen | -- |
@@ -215,7 +215,7 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 - BR-10: Endlos-Animationen (Spinner, Shimmer, Blinken) laufen in Stufen statt flüssig; `prefers-reduced-motion` schaltet sie wie bisher ab.
 - BR-11: Explorer hält Ordner-Watcher nur, solange er sichtbar ist (Sidebar offen, Ansicht Explorer). Beim Wieder-Sichtbarwerden werden alle offenen Ordner neu eingelesen; Änderungen in der Zwischenzeit sind danach sichtbar.
 - BR-12: Media-Preview pausiert und wird ausgeblendet, wenn ihr Tab nicht aktiv ist; sie pausiert, wenn das Fenster unsichtbar ist (BR-9-Regel). Sie startet nie von selbst wieder.
-- BR-13: `git status` läuft nur, solange mindestens ein Konsument sichtbar ist: Source-Control-Panel, aktiver Git-Tab, Explorer mit Git-Farben, oder ein aktiviertes Git-Widget der Statusleiste (`git-branch`, `git-sync`, `git-changes`, `git-staged`). Wird ein Konsument sichtbar, wird einmal aufgefrischt.
+- BR-13: `git status` läuft nur, solange mindestens ein Konsument sichtbar ist: Source-Control-Panel, aktiver Git-Tab, Explorer mit Git-Farben, die Änderungszahl an der Sidebar-Leiste (sichtbar, solange die Sidebar offen ist), oder ein aktiviertes Git-Widget der eingeblendeten Statusleiste (`git-branch`, `git-sync`, `git-changes`, `git-staged`, `line-changes`; im Zen-Modus ist die Statusleiste ausgeblendet). Wird ein Konsument sichtbar, wird einmal aufgefrischt. (Sidebar-Leiste und `line-changes` ergänzt durch architecture.md Q&A #5.)
 - BR-14: Ghostty-Wiedervorlage beim nächsten Sync nur, wenn (a) ein 0.9.x-Release die macOS-Issues #1372, #1365, #1364, #1362 geschlossen hat UND (b) die Grenze von 8 schnellen WASM-Instanzen entschärft oder bei 20 Tabs als unkritisch belegt ist. Dann zuerst Probefahrt als getrennte Labor-App (eigener Name, eigene tmux-Sessions über `MANAGED_PREFIX`, laufende App unberührt), danach Entscheidung A (Umstieg) / C (nur PTY-Transport) / weiter parken.
 - BR-15: Perf-Stücke werden vorher/nachher gemessen (Leerlauf-CPU mit 10 Tabs davon ≥3 mit laufendem Agent, Startzeit bis erstes Terminal); Zahlen stehen im PR. Ein Stück ohne messbaren Effekt bleibt, wird aber als solches benannt.
 - BR-16: SSRF-Prüfung des AI-HTTP-Proxys behandelt IPv6-Adressen mit eingebetteter IPv4 (`::ffff:a.b.c.d`, `::a.b.c.d`, `::ffff:0:a.b.c.d`, NAT64 `64:ff9b::/96` und lokal `64:ff9b:1::/48`, 6to4 `2002::/16`, Teredo `2001::/32`) nach der eingebetteten IPv4; die gefährlichste Klasse gewinnt.
@@ -223,6 +223,7 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 - BR-18: Lazy-Start: AI-SDK, Editor und Icon-Set sind nicht Teil des Startpakets; ein Build-Test schlägt fehl, wenn sie wieder hineinrutschen. Erstes Öffnen eines Editors darf kurz nachladen.
 - BR-19: Fork-Version nach dem Sync `0.8.7` (alle Versionsquellen synchron); 0.9.x bleibt für den Ghostty-Umstieg reserviert.
 - BR-20: Nach dem Deps-Update färbt der Editor JavaScript und TypeScript in jedem Editor-Theme ein, ebenso Code-Blöcke im Chat. Ein Build-Test schlägt fehl, wenn die Hervorhebungs-Bibliothek mehr als einmal im Build landet (doppelte Kopien lassen die Färbung still verschwinden).
+- BR-21: Symlinks unter den kopierten Elementen: lokal werden sie als Symlinks kopiert und nie verfolgt (wie der Finder); im SSH-Workspace wird bei Datei-Symlinks wie bisher der Inhalt hochgeladen, Ordner-Symlinks scheitern einzeln (UI-4). (Ergänzt durch architecture.md Q&A #10.)
 
 ---
 
@@ -285,7 +286,7 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 |---|------|-------|-------------|--------------|
 | 1 | Kern-Picks | `f885631`, `d3c8fd7`, `e8f9fcd`, SSRF `net/ip.rs` (BR-16), ⌘S (BR-17), 3 Test-Commits | `cargo test` (ip-Tests aus Upstream), vitest, e2e ⌘S über Test-Bridge | -- |
 | 2 | Media-Pause | BR-12, Fenster-Sichtbarkeits-Zustand | vitest; e2e: Video starten, Tab wechseln, Fenster minimieren | 1 |
-| 3 | Einfügen + Finder-Benennung | FL-1..FL-5, BR-1..BR-8, EP-1..EP-5, lokal + SSH | Rust-Tests Benennung/Konflikt/Selbstkopie/Teilfehler; vitest Ziel-Auflösung; e2e lokal + SSH `litha-claude` | 1 |
+| 3 | Einfügen + Finder-Benennung | FL-1..FL-5, BR-1..BR-8, BR-21, EP-1..EP-5, lokal + SSH | Rust-Tests Benennung/Konflikt/Selbstkopie/Teilfehler; vitest Ziel-Auflösung; e2e lokal + SSH `litha-claude` | 1 |
 | 4 | Sichtbare Konsumenten | BR-11, BR-13 | vitest Konsumenten-Logik; Messung BR-15; e2e Sidebar zu → Datei ändern → auf | 1 |
 | 5 | Animationen | BR-9, BR-10 | CSS-Budget-Test (Endlos nur mit Stufen); e2e Fenster minimieren; Messung BR-15 | 2 |
 | 6 | Lazy-Start | BR-18 | Build-Budget-Test; Startzeit-Messung BR-15 | 1 |
