@@ -51,7 +51,6 @@ import { isHtmlPath, isMarkdownPath } from "@/lib/utils";
 import {
   isEditorShortcutDisabled,
   useGlobalShortcuts,
-  usePageSaveGuard,
   type ShortcutHandlers,
   type ShortcutId,
 } from "@/modules/shortcuts";
@@ -1053,7 +1052,6 @@ export default function App() {
   );
 
   useGlobalShortcuts(shortcutHandlers, { isDisabled: shortcutsDisabled });
-  usePageSaveGuard();
 
   // macOS trackpad: a two-finger horizontal swipe switches tabs in the active
   // space's strip order, clamped at the edges (it does not wrap). The gesture is

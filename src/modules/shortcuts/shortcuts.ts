@@ -73,9 +73,6 @@ export type Shortcut = {
   allowRepeat?: boolean;
 };
 
-/** The platform Mod+S: editor.save's default and the WebView's "Save Page" key. */
-export const MOD_S: KeyBinding = { [MOD_PROP]: true, key: "s" };
-
 export const SHORTCUTS: Shortcut[] = [
   {
     id: "commandPalette.open",
@@ -339,16 +336,17 @@ export const SHORTCUTS: Shortcut[] = [
       { [MOD_PROP]: true, shift: true, key: "z" },
     ],
   },
+  // Mod+S at the app layer so WKWebView cannot steal "Save Page".
+  // CodeMirror also binds Mod-s; the global handler preventDefaults first.
   {
     id: "editor.save",
     label: "Save file",
     group: "Editor",
-    defaultBindings: [MOD_S],
+    defaultBindings: [{ [MOD_PROP]: true, key: "s" }],
   },
 ];
 
-/** Shortcuts that act on the document of the active editor tab. */
-export const EDITOR_SHORTCUTS: ReadonlySet<ShortcutId> = new Set<ShortcutId>([
+const EDITOR_SHORTCUTS: ReadonlySet<ShortcutId> = new Set<ShortcutId>([
   "editor.undo",
   "editor.redo",
   "editor.save",

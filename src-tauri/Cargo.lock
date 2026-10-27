@@ -5010,7 +5010,6 @@ name = "terax"
 version = "0.8.6"
 dependencies = [
  "block2",
- "bytes",
  "dirs 6.0.0",
  "futures-util",
  "globset",

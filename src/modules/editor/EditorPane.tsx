@@ -12,7 +12,7 @@ import {
   setSearchQuery,
 } from "@codemirror/search";
 import { Prec } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
+import { EditorView, keymap } from "@codemirror/view";
 import { vim } from "@replit/codemirror-vim";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import {
@@ -60,7 +60,7 @@ export type EditorPaneHandle = {
   /** Apply CodeMirror's undo/redo commands. */
   undo: () => void;
   redo: () => void;
-  /** The save behind Mod+S and :w; never rejects, useDocument toasts a failed write. */
+  /** Write the buffer; never rejects, useDocument already toasts a failed write. */
   save: () => Promise<void>;
 };
 
@@ -145,12 +145,6 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
     saveRef.current = save;
     const onSavedRef = useRef(onSaved);
     onSavedRef.current = onSaved;
-    // onSaved only after a real write: a failure is already toasted by
-    // useDocument, a disk conflict resolves false.
-    const saveAndNotify = useCallback(async () => {
-      const written = await saveRef.current().catch(() => false);
-      if (written) onSavedRef.current?.();
-    }, []);
     const onCloseRef = useRef(onClose);
     onCloseRef.current = onClose;
 
@@ -193,7 +187,13 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
         ),
         vimHandlersExtension(() => ({
           save: () => {
-            void saveAndNotify();
+            // onSaved must only fire on a real write: saveRef rejects on
+            // failure (surfaced via a toast in useDocument) and resolves false
+            // when the write was withheld on a disk-conflict. Swallow the
+            // rejection here to avoid an unhandled promise.
+            void (async () => {
+              if (await saveRef.current()) onSavedRef.current?.();
+            })().catch(() => {});
           },
           close: () => onCloseRef.current?.(),
         })),
@@ -238,8 +238,20 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
           getPath: () => pathRef.current,
           getLanguage: () => languageRef.current,
         }),
+        keymap.of([
+          {
+            key: "Mod-s",
+            preventDefault: true,
+            run: () => {
+              void (async () => {
+                if (await saveRef.current()) onSavedRef.current?.();
+              })().catch(() => {});
+              return true;
+            },
+          },
+        ]),
       ],
-      [saveAndNotify],
+      [],
     );
 
     useEffect(() => {
@@ -340,9 +352,13 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
           const view = cmRef.current?.view;
           if (view) redo(view);
         },
-        save: saveAndNotify,
+        save: () =>
+          saveRef.current().then(
+            () => {},
+            () => {},
+          ),
       }),
-      [path, applyPendingGoto, saveAndNotify],
+      [path, applyPendingGoto],
     );
 
     // Media (image/video/audio/pdf) renders through the asset protocol, whose

@@ -2,14 +2,11 @@
 import { cleanup, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MOD_PROP } from "@/lib/platform";
-import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
   type ShortcutHandlers,
   useGlobalShortcuts,
 } from "./lib/useGlobalShortcuts";
-import { usePageSaveGuard } from "./lib/usePageSaveGuard";
 import {
-  type KeyBinding,
   SHORTCUTS,
   type ShortcutId,
   isEditorShortcutDisabled,
@@ -17,10 +14,6 @@ import {
 
 const MOD: KeyboardEventInit =
   MOD_PROP === "meta" ? { metaKey: true } : { ctrlKey: true };
-const OTHER_MOD: KeyboardEventInit =
-  MOD_PROP === "meta" ? { ctrlKey: true } : { metaKey: true };
-
-const initialShortcuts = usePreferencesStore.getState().shortcuts;
 
 function keydown(init: KeyboardEventInit): KeyboardEvent {
   return new KeyboardEvent("keydown", {
@@ -61,22 +54,13 @@ function mount(
     "editor.save": vi.fn(),
     "space.overview": vi.fn(),
   },
-  { guard }: { guard?: "before" | "after" } = {},
 ) {
-  if (guard === "before") renderHook(() => usePageSaveGuard());
   renderHook(() =>
     useGlobalShortcuts(handlers, {
       isDisabled: (id) => isEditorShortcutDisabled(id, activeTabKind),
     }),
   );
-  if (guard === "after") renderHook(() => usePageSaveGuard());
   return handlers;
-}
-
-function rebindSave(binding: KeyBinding) {
-  usePreferencesStore.setState({
-    shortcuts: { ...initialShortcuts, "editor.save": [binding] },
-  });
 }
 
 const laterListener = vi.fn();
@@ -85,7 +69,6 @@ afterEach(() => {
   cleanup();
   window.removeEventListener("keydown", laterListener);
   laterListener.mockReset();
-  usePreferencesStore.setState({ shortcuts: initialShortcuts });
   document.body.replaceChildren();
 });
 
@@ -136,11 +119,11 @@ describe("editor.save in the capture phase", () => {
     expect(e.defaultPrevented).toBe(false);
   });
 
-  it("skips Mod+S from a field without preventing its default", () => {
+  it("[AC-6] saves on Mod+S with the focus in a field outside the editor", () => {
     const handlers = mount("editor");
     const e = press({ ...MOD, key: "s" }, field());
-    expect(handlers["editor.save"]).not.toHaveBeenCalled();
-    expect(e.defaultPrevented).toBe(false);
+    expect(handlers["editor.save"]).toHaveBeenCalledTimes(1);
+    expect(e.defaultPrevented).toBe(true);
   });
 
   it("[AC-7] lets Mod+S in a terminal tab fall through unclaimed", () => {
@@ -156,82 +139,6 @@ describe("editor.save in the capture phase", () => {
     mount("editor", {});
     const e = press({ ...MOD, key: "s" });
     expect(e.defaultPrevented).toBe(false);
-  });
-});
-
-describe("page save guard in the capture phase", () => {
-  it("blocks the WebView default of an unclaimed Mod+S", () => {
-    renderHook(() => usePageSaveGuard());
-    expect(press({ ...MOD, key: "s" }).defaultPrevented).toBe(true);
-  });
-
-  it("blocks Mod+S from a field that stops its propagation", () => {
-    const handlers = mount("editor", undefined, { guard: "after" });
-    const input = field();
-    const onField = vi.fn((e: Event) => e.stopPropagation());
-    input.addEventListener("keydown", onField);
-    const e = press({ ...MOD, key: "s" }, input);
-    expect(e.defaultPrevented).toBe(true);
-    expect(onField).toHaveBeenCalledTimes(1);
-    expect(handlers["editor.save"]).not.toHaveBeenCalled();
-  });
-
-  it.each(["before", "after"] as const)(
-    "[AC-6] saves Mod+S in the editor exactly once with the guard registered %s",
-    (guard) => {
-      const handlers = mount("editor", undefined, { guard });
-      const e = press({ ...MOD, key: "s" }, editorContent());
-      expect(handlers["editor.save"]).toHaveBeenCalledTimes(1);
-      expect(e.defaultPrevented).toBe(true);
-    },
-  );
-
-  it("ignores S with other modifiers", () => {
-    renderHook(() => usePageSaveGuard());
-    for (const init of [
-      { ...MOD, shiftKey: true, key: "S" },
-      { ...MOD, altKey: true, key: "s" },
-      { ...OTHER_MOD, key: "s" },
-      { key: "s" },
-    ]) {
-      expect(press(init).defaultPrevented).toBe(false);
-    }
-  });
-
-  it("[AC-7] blocks the default of Mod+S that a terminal tab let through", () => {
-    const handlers = mount("terminal", undefined, { guard: "after" });
-    window.addEventListener("keydown", laterListener);
-    const e = press({ ...MOD, key: "s" });
-    expect(handlers["editor.save"]).not.toHaveBeenCalled();
-    expect(laterListener).toHaveBeenCalledTimes(1);
-    expect(e.defaultPrevented).toBe(true);
-  });
-
-  it("[AC-6] blocks the default of Mod+S in a field without saving", () => {
-    const handlers = mount("editor", undefined, { guard: "after" });
-    const e = press({ ...MOD, key: "s" }, field());
-    expect(handlers["editor.save"]).not.toHaveBeenCalled();
-    expect(e.defaultPrevented).toBe(true);
-  });
-
-  it("[AC-6] saves a held Mod+S in the editor once", () => {
-    const handlers = mount("editor", undefined, { guard: "after" });
-    const content = editorContent();
-    press({ ...MOD, key: "s" }, content);
-    const held = press({ ...MOD, key: "s", repeat: true }, content);
-    expect(handlers["editor.save"]).toHaveBeenCalledTimes(1);
-    expect(held.defaultPrevented).toBe(true);
-  });
-
-  it("still blocks Mod+S when editor.save is bound elsewhere", () => {
-    rebindSave({ [MOD_PROP]: true, key: "l" });
-    const handlers = mount("editor", undefined, { guard: "after" });
-    const content = editorContent();
-    const e = press({ ...MOD, key: "s" }, content);
-    expect(handlers["editor.save"]).not.toHaveBeenCalled();
-    expect(e.defaultPrevented).toBe(true);
-    press({ ...MOD, key: "l" }, content);
-    expect(handlers["editor.save"]).toHaveBeenCalledTimes(1);
   });
 });
 

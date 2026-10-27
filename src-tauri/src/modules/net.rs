@@ -1,6 +1,5 @@
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use std::time::Duration;
+use std::net::{IpAddr, ToSocketAddrs};
 
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -9,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use url::{Host, Url};
 
+mod clients;
 mod ip;
+use clients::{client_for, Profile};
 use ip::{ip_kind, IpKind};
 
 const HEADER_BLOCKLIST: &[&str] = &[
@@ -36,7 +37,7 @@ fn is_blocked_host_name(host: &str) -> bool {
 /// Resolve `host` once and return both its safety classification and the
 /// concrete IPs we resolved. Callers can pin reqwest to these IPs to defeat
 /// DNS rebinding (where a second lookup returns a different address).
-async fn resolve_and_classify(host: &Host<&str>) -> Result<(IpKind, Vec<IpAddr>), String> {
+async fn resolve_and_classify(host: &Host) -> Result<(IpKind, Vec<IpAddr>), String> {
     let ips = match literal_ip(host) {
         Some(ip) => vec![ip],
         None => {
@@ -60,10 +61,10 @@ async fn resolve_and_classify(host: &Host<&str>) -> Result<(IpKind, Vec<IpAddr>)
     Ok((worst, ips))
 }
 
-fn literal_ip(host: &Host<&str>) -> Option<IpAddr> {
-    match *host {
-        Host::Ipv4(ip) => Some(IpAddr::V4(ip)),
-        Host::Ipv6(ip) => Some(IpAddr::V6(ip)),
+fn literal_ip<S>(host: &Host<S>) -> Option<IpAddr> {
+    match host {
+        Host::Ipv4(ip) => Some(IpAddr::V4(*ip)),
+        Host::Ipv6(ip) => Some(IpAddr::V6(*ip)),
         Host::Domain(_) => None,
     }
 }
@@ -84,19 +85,17 @@ fn check_url_shape(url: &Url) -> Result<Host<&str>, String> {
     Ok(host)
 }
 
-fn validate_url(url: &str, allow_private: bool) -> Result<Url, String> {
+fn validate_url(url: &str) -> Result<(Url, Host), String> {
     let parsed = Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
-    check_url_shape(&parsed)?;
-    // The actual IP classification has to be async — caller does it.
-    let _ = allow_private;
-    Ok(parsed)
+    let host = check_url_shape(&parsed)?.to_owned();
+    Ok((parsed, host))
 }
 
 /// Classify the host AND return safe IPs to pin reqwest's resolver to.
 /// Defeats DNS rebinding (second-lookup-returns-different-IP) by reusing
 /// exactly the addresses that passed `ip_kind`.
 async fn classify_and_collect_safe_ips(
-    host: &Host<&str>,
+    host: &Host,
     allow_private: bool,
 ) -> Result<Vec<IpAddr>, String> {
     let (worst, ips) = resolve_and_classify(host).await?;
@@ -148,20 +147,9 @@ pub async fn lm_ping(base_url: String) -> Result<u16, String> {
     if trimmed.is_empty() {
         return Err("empty base url".into());
     }
-    let probe = format!("{trimmed}/models");
-    let parsed = validate_url(&probe, true)?;
-    let host = parsed.host().ok_or_else(|| "missing host".to_string())?;
-    let safe_ips = classify_and_collect_safe_ips(&host, true).await?;
-    let host = host.to_string();
-
-    let mut builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none());
-    let addrs: Vec<SocketAddr> = safe_ips.iter().map(|ip| SocketAddr::new(*ip, 0)).collect();
-    builder = builder.resolve_to_addrs(&host, &addrs);
-    let client = builder.build().map_err(|e| e.to_string())?;
+    let (url, client) = guarded_client(&format!("{trimmed}/models"), Profile::Ping, true).await?;
     client
-        .get(parsed)
+        .get(url)
         .send()
         .await
         .map(|r| r.status().as_u16())
@@ -250,25 +238,28 @@ fn redirect_policy(allow_private: bool) -> reqwest::redirect::Policy {
     })
 }
 
-fn build_safe_client(
+async fn guarded_client(
+    url: &str,
+    profile: Profile,
     allow_private: bool,
-    pinned: &[(String, Vec<IpAddr>)],
-) -> Result<reqwest::Client, String> {
-    let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(10));
-    // Pin reqwest's resolver to the IPs we just classified. Without this,
-    // reqwest's own DNS lookup could return a different (private/metadata) IP
-    // for the same hostname between classify and connect — classic DNS
-    // rebinding attack. We pin port 0 because reqwest fills in the actual
-    // port from the URL when wiring up the override map.
-    for (host, ips) in pinned {
-        let addrs: Vec<SocketAddr> = ips.iter().map(|ip| SocketAddr::new(*ip, 0)).collect();
-        if !addrs.is_empty() {
-            builder = builder.resolve_to_addrs(host, &addrs);
-        }
-    }
-    builder
-        .redirect(redirect_policy(allow_private))
-        .build()
+) -> Result<(Url, reqwest::Client), String> {
+    let (url, host) = validate_url(url)?;
+    let safe_ips = classify_and_collect_safe_ips(&host, allow_private).await?;
+    let client = client_for(profile, &host.to_string(), &safe_ips, allow_private)?;
+    Ok((url, client))
+}
+
+async fn send_guarded(
+    url: &str,
+    method: &str,
+    headers: Option<HashMap<String, String>>,
+    body: Option<Vec<u8>>,
+    allow_private: bool,
+) -> Result<reqwest::Response, String> {
+    let (url, client) = guarded_client(url, Profile::Stream, allow_private).await?;
+    build_request(&client, method, url, headers, body)?
+        .send()
+        .await
         .map_err(|e| e.to_string())
 }
 
@@ -291,14 +282,7 @@ pub async fn ai_http_request(
     allow_private_network: Option<bool>,
 ) -> Result<HttpResponse, String> {
     let allow_private = allow_private_network.unwrap_or(false);
-    let parsed = validate_url(&url, allow_private)?;
-    let host = parsed.host().ok_or_else(|| "missing host".to_string())?;
-    let safe_ips = classify_and_collect_safe_ips(&host, allow_private).await?;
-
-    let client = build_safe_client(allow_private, &[(host.to_string(), safe_ips)])?;
-
-    let req = build_request(&client, &method, parsed, headers, body)?;
-    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let resp = send_guarded(&url, &method, headers, body, allow_private).await?;
 
     let status = resp.status().as_u16();
     let headers = header_map_to_strings(resp.headers());
@@ -353,14 +337,7 @@ async fn stream_events(
     body: Option<Vec<u8>>,
     allow_private: bool,
 ) -> Result<(), String> {
-    let parsed = validate_url(url, allow_private)?;
-    let host = parsed.host().ok_or_else(|| "missing host".to_string())?;
-    let safe_ips = classify_and_collect_safe_ips(&host, allow_private).await?;
-
-    let client = build_safe_client(allow_private, &[(host.to_string(), safe_ips)])?;
-
-    let req = build_request(&client, method, parsed, headers, body)?;
-    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let resp = send_guarded(url, method, headers, body, allow_private).await?;
 
     let status = resp.status().as_u16();
     let headers = header_map_to_strings(resp.headers());
@@ -397,8 +374,8 @@ mod tests {
         Url::parse(s).unwrap()
     }
 
-    fn literal_url(host: &str) -> Url {
-        url(&format!("http://{host}/"))
+    fn literal_host(host: &str) -> Host {
+        Host::parse(host).unwrap()
     }
 
     fn recording_channel() -> (Channel<AiStreamEvent>, Arc<Mutex<Vec<serde_json::Value>>>) {
@@ -486,11 +463,11 @@ mod tests {
     #[test]
     fn validate_url_blocks_userinfo_and_metadata_hostnames() {
         // URLs with userinfo can confuse browsers / leak creds in redirects.
-        assert!(validate_url("http://user:pass@example.com/", true).is_err());
+        assert!(validate_url("http://user:pass@example.com/").is_err());
         // Cloud metadata-by-name.
-        assert!(validate_url("http://metadata.google.internal/", true).is_err());
-        assert!(validate_url("http://metadata/", true).is_err());
-        assert!(validate_url("http://metadata.azure.com/", true).is_err());
+        assert!(validate_url("http://metadata.google.internal/").is_err());
+        assert!(validate_url("http://metadata/").is_err());
+        assert!(validate_url("http://metadata.azure.com/").is_err());
     }
 
     #[test]
@@ -501,7 +478,7 @@ mod tests {
             "http://metadata./",
             "http://metadata.azure.com../",
         ] {
-            let refused = validate_url(target, true).unwrap_err();
+            let refused = validate_url(target).unwrap_err();
             assert!(
                 refused.starts_with("host not allowed: "),
                 "{target}: {refused}"
@@ -516,9 +493,9 @@ mod tests {
 
     #[test]
     fn validate_url_rejects_non_http_schemes() {
-        assert!(validate_url("ftp://example.com/", true).is_err());
-        assert!(validate_url("file:///etc/passwd", true).is_err());
-        assert!(validate_url("javascript:alert(1)", true).is_err());
+        assert!(validate_url("ftp://example.com/").is_err());
+        assert!(validate_url("file:///etc/passwd").is_err());
+        assert!(validate_url("javascript:alert(1)").is_err());
     }
 
     #[test]
@@ -606,21 +583,19 @@ mod tests {
     #[test]
     fn validate_url_requires_a_host() {
         // A URL that parses but carries no host must not slip through.
-        assert!(validate_url("http://", true).is_err());
+        assert!(validate_url("http://").is_err());
     }
 
     #[test]
     fn ipv6_literal_hosts_resolve_without_dns() {
         let rt = runtime();
-        let loopback = literal_url("[::1]");
         let (kind, ips) = rt
-            .block_on(resolve_and_classify(&loopback.host().unwrap()))
+            .block_on(resolve_and_classify(&literal_host("[::1]")))
             .unwrap();
         assert_eq!(kind, IpKind::Loopback);
         assert_eq!(ips, vec![IpAddr::from(Ipv6Addr::LOCALHOST)]);
-        let public = literal_url("[2606:4700::1111]");
         let (kind, _) = rt
-            .block_on(resolve_and_classify(&public.host().unwrap()))
+            .block_on(resolve_and_classify(&literal_host("[2606:4700::1111]")))
             .unwrap();
         assert_eq!(kind, IpKind::Public);
     }
@@ -636,8 +611,7 @@ mod tests {
             ("[2002:7f00:1::]", IpKind::Loopback),
             ("[::127.0.0.1]", IpKind::Loopback),
         ] {
-            let target = literal_url(host);
-            let parsed = target.host().unwrap();
+            let parsed = literal_host(host);
             let (found, _) = rt.block_on(resolve_and_classify(&parsed)).unwrap();
             assert_eq!(found, kind, "{host}");
             let refused = rt.block_on(classify_and_collect_safe_ips(&parsed, false));
@@ -649,9 +623,8 @@ mod tests {
                 "{host}: metadata stays blocked even with opt-in"
             );
         }
-        let mapped = literal_url("[::ffff:8.8.8.8]");
         let (kind, _) = rt
-            .block_on(resolve_and_classify(&mapped.host().unwrap()))
+            .block_on(resolve_and_classify(&literal_host("[::ffff:8.8.8.8]")))
             .unwrap();
         assert_eq!(kind, IpKind::Public);
     }
@@ -673,9 +646,9 @@ mod tests {
         assert!(refused.contains("requires explicit opt-in"), "{refused}");
         let blocked = request("http://[::ffff:169.254.169.254]/", true);
         assert!(blocked.starts_with("host not allowed: "), "{blocked}");
-        let parsed = validate_url("http://[::1]:11434/", true).unwrap();
+        let (_, host) = validate_url("http://[::1]:11434/").unwrap();
         assert_eq!(
-            rt.block_on(classify_and_collect_safe_ips(&parsed.host().unwrap(), true)),
+            rt.block_on(classify_and_collect_safe_ips(&host, true)),
             Ok(vec![IpAddr::from(Ipv6Addr::LOCALHOST)])
         );
     }
@@ -845,16 +818,5 @@ mod tests {
             redirect_decision(&u, Some(&u), 11, false),
             RedirectDecision::TooMany
         );
-    }
-
-    #[test]
-    fn safe_clients_build_with_pinned_resolution() {
-        let ips: Vec<IpAddr> = ["93.184.216.34", "2606:2800:220:1::1"]
-            .iter()
-            .map(|s| s.parse().unwrap())
-            .collect();
-        build_safe_client(false, &[("api.example.com".into(), ips)]).expect("public client");
-        let loopback = vec![IpAddr::from(Ipv4Addr::LOCALHOST)];
-        build_safe_client(true, &[("localhost".into(), loopback)]).expect("private client");
     }
 }

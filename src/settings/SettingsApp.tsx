@@ -4,7 +4,6 @@ import { IS_MAC, USE_CUSTOM_WINDOW_CONTROLS } from "@/lib/platform";
 import { useUiFonts } from "@/lib/useUiFonts";
 import type { SettingsTab } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import { usePageSaveGuard } from "@/modules/shortcuts";
 import {
   AiScanIcon,
   InformationCircleIcon,
@@ -57,7 +56,6 @@ export function SettingsApp() {
   const init = usePreferencesStore((s) => s.init);
   const ActiveSection = TABS.find(t => t.id === active)?.component;
   useUiFonts();
-  usePageSaveGuard();
 
   useEffect(() => {
     void init();
