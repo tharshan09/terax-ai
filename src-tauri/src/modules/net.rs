@@ -69,7 +69,6 @@ fn literal_ip<S>(host: &Host<S>) -> Option<IpAddr> {
     }
 }
 
-/// The checks a request URL and every redirect target share before any lookup.
 fn check_url_shape(url: &Url) -> Result<Host<&str>, String> {
     match url.scheme() {
         "http" | "https" => {}
@@ -221,8 +220,8 @@ fn redirect_decision(
     RedirectDecision::Follow
 }
 
-// Same rule as upstream 11343a1: with private access a redirect to another host
-// name is followed without DNS classification, and reqwest resolves it unpinned.
+// Matches upstream: with private access a redirect to another host name is
+// followed without DNS classification, and reqwest resolves it unpinned.
 fn redirect_policy(allow_private: bool) -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(move |attempt| {
         match redirect_decision(
@@ -463,7 +462,6 @@ mod tests {
 
     #[test]
     fn validate_url_requires_a_host() {
-        // A URL that parses but carries no host must not slip through.
         assert!(validate_url("http://").is_err());
     }
 

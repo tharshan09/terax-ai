@@ -337,8 +337,8 @@ export const SHORTCUTS: Shortcut[] = [
       { [MOD_PROP]: true, shift: true, key: "z" },
     ],
   },
-  // Claimed in the capture phase (preventDefault + stopImmediatePropagation) so
-  // WKWebView cannot Save Page; CM's Mod-s only fires if editor.save is rebound.
+  // Claimed in the capture phase so WKWebView cannot Save Page; CM's Mod-s
+  // only fires if editor.save is rebound.
   {
     id: "editor.save",
     label: "Save file",

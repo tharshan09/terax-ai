@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 
 use super::redirect_policy;
 
-/// Idle clients are dropped after this long without use.
 pub const IDLE_TTL: Duration = Duration::from_secs(90);
 /// Distinct hosts kept warm; a handful of providers plus local servers.
 pub const MAX_CLIENTS: usize = 8;

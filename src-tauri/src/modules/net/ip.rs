@@ -106,7 +106,6 @@ fn prefix_kind(v: Ipv6Addr, s: &[u16; 8]) -> IpKind {
     IpKind::Public
 }
 
-// IANA special-purpose blocks inside 2000::/3 that are not globally reachable.
 fn is_special_purpose_non_global(s: &[u16; 8]) -> bool {
     match *s {
         [0x2001, 0x0db8, ..] => true,
@@ -126,7 +125,6 @@ fn v4(hi: u16, lo: u16) -> Ipv4Addr {
     Ipv4Addr::new(a, b, c, d)
 }
 
-// The IPv4 destinations a translation prefix carries; all None for any other address.
 fn embedded_ipv4(s: &[u16; 8]) -> [Option<Ipv4Addr>; 2] {
     match *s {
         [0, 0, 0, 0, 0, 0xffff, hi, lo]

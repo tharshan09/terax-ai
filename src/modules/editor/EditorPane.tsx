@@ -60,7 +60,7 @@ export type EditorPaneHandle = {
   /** Apply CodeMirror's undo/redo commands. */
   undo: () => void;
   redo: () => void;
-  /** Write the buffer, then onSaved on a real write; never rejects, useDocument toasts failures. */
+  /** Never rejects; onSaved fires only after a real write. */
   save: () => Promise<void>;
 };
 
