@@ -27,6 +27,8 @@ type Options = {
   onDirtyChange?: (dirty: boolean) => void;
 };
 
+type DocTarget = { path: string; workspace?: WorkspaceEnv };
+
 export function useDocument({ path, workspace, onDirtyChange }: Options) {
   const [doc, setDoc] = useState<DocumentState>({ status: "loading" });
   const [dirty, setDirty] = useState(false);
@@ -43,6 +45,12 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
   // Disk mtime at the last read/write — the save-conflict baseline. null until
   // the first successful read.
   const diskMtimeRef = useRef<number | null>(null);
+  // The file the refs above describe; replaced on load so a save that started
+  // for the previous file never writes into or updates the next one.
+  const targetRef = useRef<DocTarget>({ path, workspace });
+  // One save at a time: a later one waits, so its conflict check compares
+  // against the mtime of our own write instead of reporting it as a conflict.
+  const saveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
   const dirtyRef = useRef(false);
   useEffect(() => {
     dirtyRef.current = dirty;
@@ -60,58 +68,81 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
     }
   }, []);
 
-  // Persist the buffer (restoring the file's original EOL) and adopt the
-  // returned disk mtime as the new conflict baseline — no follow-up stat.
-  const writeToDisk = useCallback(async () => {
-    const content = bufferRef.current;
-    let mtime: number;
-    try {
-      mtime = await invoke<number>("fs_write_file", {
-        path,
-        content: restoreEol(content, eolRef.current),
-        workspace: workspace ?? currentWorkspaceEnv(),
-        source: "editor",
-        // Explicit user save: allow the editor to persist a file the user
-        // opened by name, even a secret like `.env`.
-        trusted: true,
-      });
-    } catch (e) {
-      // Surface the failure and keep the buffer dirty — savedRef/setDirty below
-      // are skipped, so the unsaved edits are preserved. Remote saves in
-      // particular can fail (permission denied, dropped connection) and must
-      // never be swallowed. Re-throw so callers don't signal a successful save.
-      const name = path.split(/[\\/]/).pop() || path;
-      toast.error(`Couldn’t save ${name}: ${String(e)}`);
-      throw e;
-    }
-    diskMtimeRef.current = mtime;
-    savedRef.current = content;
-    // Edits typed while the write was in flight must stay dirty.
-    setDirty(bufferRef.current !== content);
-  }, [path, workspace]);
+  const enqueueSave = useCallback(
+    (task: () => Promise<SaveOutcome>): Promise<SaveOutcome> => {
+      const run = saveQueueRef.current.then(task);
+      saveQueueRef.current = run.catch(() => {});
+      return run;
+    },
+    [],
+  );
 
-  // Resolves "conflict" when the write was withheld because the file changed on
-  // disk since load; overwriting is then an explicit user action from the toast.
-  const saveNow = useCallback(async (): Promise<"written" | "conflict"> => {
+  // Persist the buffer (restoring the file's original EOL) and adopt the
+  // returned disk mtime as the new conflict baseline, with no follow-up stat.
+  const writeToDisk = useCallback(
+    async (target: DocTarget): Promise<SaveOutcome> => {
+      if (targetRef.current !== target) return "unchanged";
+      const content = bufferRef.current;
+      let mtime: number;
+      try {
+        mtime = await invoke<number>("fs_write_file", {
+          path: target.path,
+          content: restoreEol(content, eolRef.current),
+          workspace: target.workspace ?? currentWorkspaceEnv(),
+          source: "editor",
+          // Explicit user save: allow the editor to persist a file the user
+          // opened by name, even a secret like `.env`.
+          trusted: true,
+        });
+      } catch (e) {
+        // Surface the failure and keep the buffer dirty: savedRef/setDirty below
+        // are skipped, so the unsaved edits are preserved. Remote saves in
+        // particular can fail (permission denied, dropped connection) and must
+        // never be swallowed. Re-throw so callers don't signal a successful save.
+        const name = target.path.split(/[\\/]/).pop() || target.path;
+        toast.error(`Couldn’t save ${name}: ${String(e)}`);
+        throw e;
+      }
+      if (targetRef.current !== target) return "written";
+      diskMtimeRef.current = mtime;
+      savedRef.current = content;
+      // Edits typed while the write was in flight must stay dirty.
+      setDirty(bufferRef.current !== content);
+      return "written";
+    },
+    [],
+  );
+
+  // A clean buffer, also the untouched one of a loading or binary doc, has
+  // nothing to write. Resolves "conflict" when the write was withheld because
+  // the file changed on disk since load; overwriting is then an explicit user
+  // action from the toast.
+  const saveIfChanged = useCallback(async (): Promise<SaveOutcome> => {
+    const target = targetRef.current;
+    if (bufferRef.current === savedRef.current) return "unchanged";
     const known = diskMtimeRef.current;
     if (known !== null) {
       const stat = await invoke<FileStat>("fs_stat", {
-        path,
-        workspace: workspace ?? currentWorkspaceEnv(),
+        path: target.path,
+        workspace: target.workspace ?? currentWorkspaceEnv(),
       }).catch(() => null);
+      if (targetRef.current !== target) return "unchanged";
       if (stat && stat.mtime !== known) {
-        const name = path.split(/[\\/]/).pop() ?? path;
+        const name = target.path.split(/[\\/]/).pop() ?? target.path;
         toast.warning("File changed on disk", {
-          id: `save-conflict:${path}`,
+          id: `save-conflict:${target.path}`,
           description: `${name} was modified by another program while you had unsaved changes. Overwrite to keep your version.`,
-          action: { label: "Overwrite", onClick: () => void writeToDisk() },
+          action: {
+            label: "Overwrite",
+            onClick: () =>
+              void enqueueSave(() => writeToDisk(target)).catch(() => {}),
+          },
         });
         return "conflict";
       }
     }
-    await writeToDisk();
-    return "written";
-  }, [path, workspace, writeToDisk]);
+    return writeToDisk(target);
+  }, [enqueueSave, writeToDisk]);
 
   // Notify parent of dirty transitions.
   const onDirtyChangeRef = useRef(onDirtyChange);
@@ -157,6 +188,11 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
   // Load on path change (or workspace change → new readFromDisk identity).
   useEffect(() => {
     let cancelled = false;
+    targetRef.current = { path, workspace };
+    savedRef.current = "";
+    bufferRef.current = "";
+    eolRef.current = "\n";
+    diskMtimeRef.current = null;
     setDoc({ status: "loading" });
     setDirty(false);
 
@@ -171,7 +207,7 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
     return () => {
       cancelled = true;
     };
-  }, [readFromDisk, adoptRead]);
+  }, [path, workspace, readFromDisk, adoptRead]);
 
   // Skipped while dirty: never clobber unsaved edits. Re-checked when the read
   // resolves, since typing can start while the read is in flight.
@@ -187,13 +223,10 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
     return true;
   }, [readFromDisk, adoptRead, path]);
 
-  // A clean buffer, also the untouched one of a loading or binary doc, has
-  // nothing to write.
-  const save = useCallback(async (): Promise<SaveOutcome> => {
+  const save = useCallback((): Promise<SaveOutcome> => {
     clearAutoSaveTimer();
-    if (bufferRef.current === savedRef.current) return "unchanged";
-    return saveNow();
-  }, [clearAutoSaveTimer, saveNow]);
+    return enqueueSave(saveIfChanged);
+  }, [clearAutoSaveTimer, enqueueSave, saveIfChanged]);
 
   const onChange = useCallback(
     (next: string) => {
@@ -206,11 +239,13 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
       const { autoSave: active, autoSaveDelay: delay } = autoSaveRef.current;
       if (active && isDirty) {
         timeoutRef.current = setTimeout(() => {
-          saveNow().catch((e) => console.error("[autosave]", e));
+          enqueueSave(saveIfChanged).catch((e) =>
+            console.error("[autosave]", e),
+          );
         }, delay);
       }
     },
-    [clearAutoSaveTimer, saveNow],
+    [clearAutoSaveTimer, enqueueSave, saveIfChanged],
   );
 
   useEffect(() => clearAutoSaveTimer, [path, clearAutoSaveTimer]);

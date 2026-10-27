@@ -2,7 +2,6 @@ export {
   SHORTCUTS,
   SHORTCUT_GROUPS,
   getBindingTokens,
-  isEditorTabShortcut,
   type Shortcut,
   type ShortcutGroup,
   type ShortcutId,

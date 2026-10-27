@@ -71,6 +71,16 @@ export type Shortcut = {
   group: ShortcutGroup;
   defaultBindings: KeyBinding[];
   allowRepeat?: boolean;
+  /** Applies only while the active tab is an editor; read by the app's isDisabled. */
+  scope?: "editorTab";
+  /** "swallow" claims a held key without running again instead of skipping it. */
+  onRepeat?: "swallow";
+  /** Focus in a field outside CodeMirror: "native" leaves the key to the field,
+   *  "swallow" claims it without running. */
+  inField?: "swallow" | "native";
+  /** "preventDefault": while disabled the key still reaches other listeners but
+   *  never the WebView's default action. */
+  whenDisabled?: "preventDefault";
 };
 
 export const SHORTCUTS: Shortcut[] = [
@@ -326,6 +336,8 @@ export const SHORTCUTS: Shortcut[] = [
     label: "Undo",
     group: "Editor",
     defaultBindings: [{ [MOD_PROP]: true, key: "z" }],
+    scope: "editorTab",
+    inField: "native",
   },
   {
     id: "editor.redo",
@@ -335,26 +347,22 @@ export const SHORTCUTS: Shortcut[] = [
       { [MOD_PROP]: true, key: "y" },
       { [MOD_PROP]: true, shift: true, key: "z" },
     ],
+    scope: "editorTab",
+    inField: "native",
   },
-  // Claimed at the app layer so Mod+S never reaches the WebView's Save Page.
+  // Its binding never reaches the WebView's Save Page, in any tab or field;
+  // it saves only in an editor tab with focus outside other fields.
   {
     id: "editor.save",
     label: "Save file",
     group: "Editor",
     defaultBindings: [{ [MOD_PROP]: true, key: "s" }],
+    scope: "editorTab",
+    onRepeat: "swallow",
+    inField: "swallow",
+    whenDisabled: "preventDefault",
   },
 ];
-
-const EDITOR_TAB_SHORTCUTS: ReadonlySet<ShortcutId> = new Set([
-  "editor.undo",
-  "editor.redo",
-  "editor.save",
-]);
-
-/** Shortcuts that only apply while the active tab is an editor. */
-export function isEditorTabShortcut(id: ShortcutId): boolean {
-  return EDITOR_TAB_SHORTCUTS.has(id);
-}
 
 export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   "General",

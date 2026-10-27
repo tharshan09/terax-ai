@@ -3,7 +3,7 @@ import { cleanup, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MOD_PROP } from "@/lib/platform";
 import { shortcutVerdict, useGlobalShortcuts } from "./lib/useGlobalShortcuts";
-import { isEditorTabShortcut, SHORTCUTS } from "./shortcuts";
+import { SHORTCUTS, type Shortcut, type ShortcutId } from "./shortcuts";
 
 const MOD: KeyboardEventInit =
   MOD_PROP === "meta" ? { metaKey: true } : { ctrlKey: true };
@@ -34,30 +34,48 @@ function editorContent(): Element {
   return content;
 }
 
+function registered(id: ShortcutId): Shortcut {
+  const shortcut = SHORTCUTS.find((s) => s.id === id);
+  if (!shortcut) throw new Error(`${id} is not registered`);
+  return shortcut;
+}
+
 function mountShortcuts(activeTabKind: "editor" | "terminal") {
   const handlers = { "editor.save": vi.fn(), "space.overview": vi.fn() };
   renderHook(() =>
     useGlobalShortcuts(handlers, {
-      isDisabled: (id) => isEditorTabShortcut(id) && activeTabKind !== "editor",
+      isDisabled: (s) => s.scope === "editorTab" && activeTabKind !== "editor",
     }),
   );
   return handlers;
 }
 
+const laterListener = vi.fn();
+
 afterEach(() => {
   cleanup();
+  window.removeEventListener("keydown", laterListener);
+  laterListener.mockReset();
   document.body.replaceChildren();
 });
 
 describe("SHORTCUTS registry", () => {
   it("[AC-7] registers Mod+S as Save file in the Editor group", () => {
-    const save = SHORTCUTS.find((s) => s.id === "editor.save");
-    expect(save).toMatchObject({
+    expect(registered("editor.save")).toMatchObject({
       label: "Save file",
       group: "Editor",
       defaultBindings: [{ [MOD_PROP]: true, key: "s" }],
+      scope: "editorTab",
+      onRepeat: "swallow",
+      inField: "swallow",
+      whenDisabled: "preventDefault",
     });
-    expect(isEditorTabShortcut("editor.save")).toBe(true);
+    for (const id of ["editor.undo", "editor.redo"] as const) {
+      expect(registered(id)).toMatchObject({
+        scope: "editorTab",
+        inField: "native",
+      });
+    }
   });
 
   it("[AC-7] resolves Mod+S to editor.save in an editor tab", () => {
@@ -75,11 +93,15 @@ describe("SHORTCUTS registry", () => {
     expect(handlers["editor.save"]).not.toHaveBeenCalled();
   });
 
-  it("[AC-7] lets Mod+S fall through in a terminal tab", () => {
+  it("[AC-7] lets Mod+S fall through in a terminal tab without the WebView default", () => {
     const handlers = mountShortcuts("terminal");
-    const e = press({ ...MOD, key: "s" });
+    window.addEventListener("keydown", laterListener);
+    for (const repeat of [false, true]) {
+      const e = press({ ...MOD, key: "s", repeat });
+      expect(e.defaultPrevented).toBe(true);
+    }
     expect(handlers["editor.save"]).not.toHaveBeenCalled();
-    expect(e.defaultPrevented).toBe(false);
+    expect(laterListener).toHaveBeenCalledTimes(2);
   });
 
   it("[AC-6] swallows a held Mod+S without saving again", () => {
@@ -101,7 +123,9 @@ describe("SHORTCUTS registry", () => {
 });
 
 describe("shortcutVerdict", () => {
-  const save = { id: "editor.save" } as const;
+  const save = registered("editor.save");
+  const undo = registered("editor.undo");
+  const disabled = () => true;
 
   it("saves from the editor content and from a non-editable target", () => {
     expect(
@@ -130,28 +154,60 @@ describe("shortcutVerdict", () => {
     }
   });
 
+  it("only prevents the default of a disabled Mod+S, held or not", () => {
+    for (const repeat of [false, true]) {
+      expect(
+        shortcutVerdict(save, { repeat, target: document.body }, disabled),
+      ).toBe("block");
+    }
+    expect(
+      shortcutVerdict(undo, { repeat: false, target: document.body }, disabled),
+    ).toBe("native");
+  });
+
   it("leaves undo to a focused field and skips non-repeating shortcuts on repeat", () => {
     const field = attach(document.createElement("input"));
+    expect(shortcutVerdict(undo, { repeat: false, target: field })).toBe(
+      "native",
+    );
     expect(
-      shortcutVerdict({ id: "editor.undo" }, { repeat: false, target: field }),
+      shortcutVerdict(undo, { repeat: false, target: editorContent() }),
+    ).toBe("run");
+    expect(
+      shortcutVerdict(registered("tab.new"), {
+        repeat: true,
+        target: document.body,
+      }),
+    ).toBe("skip");
+    expect(
+      shortcutVerdict(registered("tab.next"), {
+        repeat: true,
+        target: document.body,
+      }),
+    ).toBe("run");
+  });
+
+  it("reads the behaviour from the entry's fields alone", () => {
+    const field = attach(document.createElement("input"));
+    expect(shortcutVerdict({}, { repeat: false, target: field })).toBe("run");
+    expect(
+      shortcutVerdict({ inField: "native" }, { repeat: false, target: field }),
     ).toBe("native");
     expect(
       shortcutVerdict(
-        { id: "editor.undo" },
-        { repeat: false, target: editorContent() },
+        { onRepeat: "swallow" },
+        {
+          repeat: true,
+          target: document.body,
+        },
       ),
-    ).toBe("run");
+    ).toBe("swallow");
     expect(
       shortcutVerdict(
-        { id: "tab.new" },
-        { repeat: true, target: document.body },
+        { whenDisabled: "preventDefault" },
+        { repeat: false, target: document.body },
+        disabled,
       ),
-    ).toBe("skip");
-    expect(
-      shortcutVerdict(
-        { id: "tab.next", allowRepeat: true },
-        { repeat: true, target: document.body },
-      ),
-    ).toBe("run");
+    ).toBe("block");
   });
 });

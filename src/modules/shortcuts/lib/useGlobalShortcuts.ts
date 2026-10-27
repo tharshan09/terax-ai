@@ -11,17 +11,14 @@ export type ShortcutHandler = (e: KeyboardEvent) => void;
 export type ShortcutHandlers = Partial<Record<ShortcutId, ShortcutHandler>>;
 
 export type UseGlobalShortcutsOptions = {
-  isDisabled?: (id: ShortcutId, e: KeyboardEvent) => boolean;
+  isDisabled?: (shortcut: Shortcut, e: KeyboardEvent) => boolean;
 };
 
-export type ShortcutVerdict = "run" | "swallow" | "native" | "skip";
+/** run: claim and handle; swallow: claim only; block: prevent the default but
+ *  let other listeners see the key; native: leave it alone; skip: next shortcut. */
+export type ShortcutVerdict = "run" | "swallow" | "block" | "native" | "skip";
 
 type VerdictEvent = Pick<KeyboardEvent, "repeat" | "target">;
-
-const NATIVE_HISTORY_SHORTCUTS: ReadonlySet<ShortcutId> = new Set([
-  "editor.undo",
-  "editor.redo",
-]);
 
 /** A focused input, textarea or contenteditable outside the CodeMirror
  *  editor owns its own undo/redo history; Cmd+Z / Cmd+Shift+Z there must not
@@ -38,19 +35,20 @@ function editableOutsideEditor(e: VerdictEvent): boolean {
 }
 
 export function shortcutVerdict(
-  shortcut: Pick<Shortcut, "id" | "allowRepeat">,
+  shortcut: Pick<
+    Shortcut,
+    "allowRepeat" | "onRepeat" | "inField" | "whenDisabled"
+  >,
   e: VerdictEvent,
+  isDisabled: () => boolean = () => false,
 ): ShortcutVerdict {
   const held = e.repeat && !shortcut.allowRepeat;
-  // A held key would start overlapping writes that trip the disk-conflict
-  // check, and a field outside the editor is not what the user means to save.
-  if (shortcut.id === "editor.save") {
-    return held || editableOutsideEditor(e) ? "swallow" : "run";
+  if (held && shortcut.onRepeat !== "swallow") return "skip";
+  if (isDisabled()) {
+    return shortcut.whenDisabled === "preventDefault" ? "block" : "native";
   }
-  if (held) return "skip";
-  if (NATIVE_HISTORY_SHORTCUTS.has(shortcut.id) && editableOutsideEditor(e)) {
-    return "native";
-  }
+  if (held) return "swallow";
+  if (shortcut.inField && editableOutsideEditor(e)) return shortcut.inField;
   return "run";
 }
 
@@ -71,12 +69,16 @@ export function useGlobalShortcuts(
         const bindings = userShortcuts[s.id] || s.defaultBindings;
         const isMatch = bindings.some((b) => matchBinding(e, b, s.id));
         if (!isMatch) continue;
-        const verdict = shortcutVerdict(s, e);
+        const verdict = shortcutVerdict(
+          s,
+          e,
+          () => options?.isDisabled?.(s, e) ?? false,
+        );
         if (verdict === "skip") continue;
-        if (options?.isDisabled?.(s.id, e)) return;
         const h = handlers[s.id];
         if (verdict === "native" || !h) return;
         e.preventDefault();
+        if (verdict === "block") return;
         e.stopImmediatePropagation();
         if (verdict === "run") h(e);
         return;
