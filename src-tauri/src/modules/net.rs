@@ -199,6 +199,7 @@ fn build_safe_client(
     kind: IpKind,
     safe_ips: &[IpAddr],
 ) -> Result<reqwest::Client, String> {
+    let via_proxy = uses_env_proxy(kind);
     let mut builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::custom(
@@ -207,6 +208,7 @@ fn build_safe_client(
                 attempt.previous().last(),
                 attempt.previous().len(),
                 allow_private,
+                via_proxy,
             ) {
                 RedirectDecision::Follow => attempt.follow(),
                 RedirectDecision::Stop => {
@@ -216,7 +218,7 @@ fn build_safe_client(
                 RedirectDecision::TooMany => attempt.error("too many redirects"),
             },
         ));
-    if !uses_env_proxy(kind) {
+    if !via_proxy {
         builder = builder.no_proxy();
     }
     pin_to(builder, host, safe_ips)
@@ -260,6 +262,7 @@ fn redirect_decision(
     last_previous: Option<&Url>,
     previous_len: usize,
     allow_private: bool,
+    via_proxy: bool,
 ) -> RedirectDecision {
     if previous_len > 10 {
         return RedirectDecision::TooMany;
@@ -268,7 +271,11 @@ fn redirect_decision(
         return RedirectDecision::Stop;
     };
     let allowed = match host_ip(&host) {
-        Some(ip) => admit(&host, ip_kind(ip), allow_private).is_ok(),
+        // A proxied client would send a hop to a local address through the proxy.
+        Some(ip) => {
+            let kind = ip_kind(ip);
+            admit(&host, kind, allow_private).is_ok() && (!via_proxy || uses_env_proxy(kind))
+        }
         // Fork deviation: reqwest resolves a new name itself, unclassified and
         // unpinned, so a hop to another name is stopped even with private access.
         None => last_previous.is_some_and(|prev| prev.host() == Some(host)),
@@ -707,7 +714,7 @@ mod tests {
             "http://[::]/",
         ] {
             assert_eq!(
-                redirect_decision(&url(target), Some(&from), 1, false),
+                redirect_decision(&url(target), Some(&from), 1, false, false),
                 RedirectDecision::Stop,
                 "{target}"
             );
@@ -719,7 +726,7 @@ mod tests {
             "http://[fe80::1]/",
         ] {
             assert_eq!(
-                redirect_decision(&url(target), Some(&from), 1, true),
+                redirect_decision(&url(target), Some(&from), 1, true, false),
                 RedirectDecision::Stop,
                 "{target} is metadata even with private access"
             );
@@ -729,13 +736,19 @@ mod tests {
             "http://[::ffff:10.0.0.1]/",
         ] {
             assert_eq!(
-                redirect_decision(&url(target), Some(&from), 1, true),
+                redirect_decision(&url(target), Some(&from), 1, true, false),
                 RedirectDecision::Follow,
                 "{target}"
             );
         }
         assert_eq!(
-            redirect_decision(&url("https://[::ffff:8.8.8.8]/"), Some(&from), 1, false),
+            redirect_decision(
+                &url("https://[::ffff:8.8.8.8]/"),
+                Some(&from),
+                1,
+                false,
+                false
+            ),
             RedirectDecision::Follow
         );
     }
@@ -748,20 +761,21 @@ mod tests {
                 &url("http://[::ffff:169.254.169.254]/"),
                 Some(&from),
                 1,
-                true
+                true,
+                false
             ),
             RedirectDecision::Stop
         );
         assert_eq!(
-            redirect_decision(&url("http://[fd00:ec2::254]/"), Some(&from), 1, true),
+            redirect_decision(&url("http://[fd00:ec2::254]/"), Some(&from), 1, true, false),
             RedirectDecision::Stop
         );
         assert_eq!(
-            redirect_decision(&url("http://[::1]/"), Some(&from), 1, false),
+            redirect_decision(&url("http://[::1]/"), Some(&from), 1, false, false),
             RedirectDecision::Stop
         );
         assert_eq!(
-            redirect_decision(&url("http://[::1]/"), Some(&from), 1, true),
+            redirect_decision(&url("http://[::1]/"), Some(&from), 1, true, false),
             RedirectDecision::Follow
         );
     }
@@ -775,7 +789,8 @@ mod tests {
                     &url("https://api.example.com/v2"),
                     Some(&from),
                     1,
-                    allow_private
+                    allow_private,
+                    false
                 ),
                 RedirectDecision::Follow,
                 "allow_private={allow_private}"
@@ -785,16 +800,56 @@ mod tests {
                     &url("https://cdn.example.com/"),
                     Some(&from),
                     1,
-                    allow_private
+                    allow_private,
+                    false
                 ),
                 RedirectDecision::Stop,
                 "allow_private={allow_private}"
             );
         }
         assert_eq!(
-            redirect_decision(&url("https://cdn.example.com/"), Some(&from), 11, true),
+            redirect_decision(
+                &url("https://cdn.example.com/"),
+                Some(&from),
+                11,
+                true,
+                false
+            ),
             RedirectDecision::TooMany
         );
+    }
+
+    #[test]
+    fn a_proxied_client_stops_hops_to_non_public_literals_even_with_private_access() {
+        let from = url("https://api.example.com/");
+        for target in [
+            "http://127.0.0.1:11434/",
+            "http://10.0.0.1/",
+            "http://[::1]/",
+            "http://[::ffff:192.168.0.1]/",
+        ] {
+            assert_eq!(
+                redirect_decision(&url(target), Some(&from), 1, true, true),
+                RedirectDecision::Stop,
+                "{target} via proxy"
+            );
+            assert_eq!(
+                redirect_decision(&url(target), Some(&from), 1, true, false),
+                RedirectDecision::Follow,
+                "{target} without proxy"
+            );
+        }
+        for target in [
+            "https://8.8.8.8/",
+            "https://[::ffff:8.8.8.8]/",
+            "https://api.example.com/v2",
+        ] {
+            assert_eq!(
+                redirect_decision(&url(target), Some(&from), 1, true, true),
+                RedirectDecision::Follow,
+                "{target}"
+            );
+        }
     }
 
     #[test]
@@ -825,7 +880,8 @@ mod tests {
                     &url(target),
                     Some(&url("https://api.example.com/")),
                     1,
-                    true
+                    true,
+                    false
                 ),
                 RedirectDecision::Stop,
                 "{target}"
