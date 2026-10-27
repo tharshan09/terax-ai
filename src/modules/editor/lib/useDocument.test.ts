@@ -3,11 +3,15 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const invokeMock = vi.fn();
+const toastWarning = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
 }));
 vi.mock("sonner", () => ({
-  toast: { error: () => {}, warning: () => {} },
+  toast: {
+    error: () => {},
+    warning: (...args: unknown[]) => toastWarning(...args),
+  },
 }));
 vi.mock("@/modules/workspace", () => ({
   currentWorkspaceEnv: () => ({ kind: "local" }),
@@ -21,9 +25,10 @@ vi.mock("@/modules/settings/preferences", () => ({
   ) => selector({ editorAutoSave: false, editorAutoSaveDelay: 1000 }),
 }));
 
-import { type SaveOutcome, useDocument } from "./useDocument";
+import { useDocument } from "./useDocument";
 
 const PATH = "/work/notes.txt";
+const OTHER = "/work/other.txt";
 const TEXT = { kind: "text", content: "a", size: 1, mtime: 1 };
 
 function fakeDisk(read: unknown, statMtime = 1) {
@@ -43,6 +48,12 @@ function fakeDisk(read: unknown, statMtime = 1) {
 
 function calls(cmd: string) {
   return invokeMock.mock.calls.filter(([name]) => name === cmd);
+}
+
+function writtenContents() {
+  return calls("fs_write_file").map(
+    ([, args]) => (args as { content: string }).content,
+  );
 }
 
 // Each write bumps the disk mtime at once but resolves only on `land()`, like a
@@ -73,28 +84,28 @@ function mount() {
   return renderHook(() => useDocument({ path: PATH }));
 }
 
-async function save(
-  result: ReturnType<typeof mount>["result"],
-): Promise<SaveOutcome | undefined> {
-  let outcome: SaveOutcome | undefined;
+async function save(result: ReturnType<typeof mount>["result"]) {
   await act(async () => {
-    outcome = await result.current.save();
+    await result.current.save();
   });
-  return outcome;
 }
 
-describe("useDocument save outcome", () => {
+describe("useDocument save", () => {
   beforeEach(() => {
     invokeMock.mockReset();
+    toastWarning.mockReset();
   });
 
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+  });
 
   it("writes nothing while the file is still loading", async () => {
     fakeDisk(new Promise(() => {}));
     const { result } = mount();
     expect(result.current.doc.status).toBe("loading");
-    expect(await save(result)).toBe("unchanged");
+    await save(result);
     expect(calls("fs_write_file")).toHaveLength(0);
   });
 
@@ -102,7 +113,7 @@ describe("useDocument save outcome", () => {
     fakeDisk({ kind: "binary", size: 10 });
     const { result } = mount();
     await waitFor(() => expect(result.current.doc.status).toBe("binary"));
-    expect(await save(result)).toBe("unchanged");
+    await save(result);
     expect(calls("fs_write_file")).toHaveLength(0);
   });
 
@@ -110,20 +121,22 @@ describe("useDocument save outcome", () => {
     fakeDisk(TEXT);
     const { result } = mount();
     await waitFor(() => expect(result.current.doc.status).toBe("ready"));
-    expect(await save(result)).toBe("unchanged");
+    await save(result);
     expect(calls("fs_stat")).toHaveLength(0);
     expect(calls("fs_write_file")).toHaveLength(0);
   });
 
-  it("[AC-8] reports a real write of an edited buffer", async () => {
+  it("[AC-8] writes an edited buffer once", async () => {
     fakeDisk(TEXT);
     const { result } = mount();
     await waitFor(() => expect(result.current.doc.status).toBe("ready"));
     act(() => result.current.onChange("ab"));
-    expect(await save(result)).toBe("written");
+    await save(result);
+    expect(calls("fs_stat")).toHaveLength(1);
     expect(calls("fs_write_file")).toEqual([
       ["fs_write_file", expect.objectContaining({ path: PATH, content: "ab" })],
     ]);
+    expect(toastWarning).not.toHaveBeenCalled();
   });
 
   it("[AC-8] runs an overlapping save after the running write, without a conflict", async () => {
@@ -131,7 +144,6 @@ describe("useDocument save outcome", () => {
     const { result } = mount();
     await waitFor(() => expect(result.current.doc.status).toBe("ready"));
     act(() => result.current.onChange("ab"));
-    let outcomes: SaveOutcome[] = [];
     await act(async () => {
       const first = result.current.save();
       await vi.waitFor(() => expect(calls("fs_write_file")).toHaveLength(1));
@@ -142,14 +154,11 @@ describe("useDocument save outcome", () => {
       disk.land();
       await vi.waitFor(() => expect(calls("fs_write_file")).toHaveLength(2));
       disk.land();
-      outcomes = await Promise.all([first, second]);
+      await Promise.all([first, second]);
     });
-    expect(outcomes).toEqual(["written", "written"]);
-    expect(
-      calls("fs_write_file").map(
-        ([, args]) => (args as { content: string }).content,
-      ),
-    ).toEqual(["ab", "abc"]);
+    expect(writtenContents()).toEqual(["ab", "abc"]);
+    expect(calls("fs_stat")).toHaveLength(2);
+    expect(toastWarning).not.toHaveBeenCalled();
   });
 
   it("[AC-8] lets a repeated save find the buffer already written", async () => {
@@ -157,15 +166,53 @@ describe("useDocument save outcome", () => {
     const { result } = mount();
     await waitFor(() => expect(result.current.doc.status).toBe("ready"));
     act(() => result.current.onChange("ab"));
-    let outcomes: SaveOutcome[] = [];
     await act(async () => {
       const both = Promise.all([result.current.save(), result.current.save()]);
       await vi.waitFor(() => expect(calls("fs_write_file")).toHaveLength(1));
       disk.land();
-      outcomes = await both;
+      await both;
     });
-    expect(outcomes).toEqual(["written", "unchanged"]);
+    expect(calls("fs_stat")).toHaveLength(1);
     expect(calls("fs_write_file")).toHaveLength(1);
+    expect(toastWarning).not.toHaveBeenCalled();
+  });
+
+  it("runs the next save once a hung write has had 15 s", async () => {
+    let writes = 0;
+    invokeMock.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "fs_read_file":
+          return TEXT;
+        case "fs_stat":
+          return { size: 1, mtime: 1, kind: "file" };
+        case "fs_write_file":
+          writes += 1;
+          return writes === 1 ? new Promise(() => {}) : 2;
+        default:
+          throw new Error(`unexpected command ${cmd}`);
+      }
+    });
+    const { result } = mount();
+    await waitFor(() => expect(result.current.doc.status).toBe("ready"));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    act(() => result.current.onChange("ab"));
+    await act(async () => {
+      void result.current.save();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(calls("fs_write_file")).toHaveLength(1);
+    let next: Promise<unknown> = Promise.resolve();
+    await act(async () => {
+      next = result.current.save();
+      await vi.advanceTimersByTimeAsync(14_999);
+    });
+    expect(calls("fs_write_file")).toHaveLength(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+      await next;
+    });
+    expect(writtenContents()).toEqual(["ab", "ab"]);
+    expect(toastWarning).not.toHaveBeenCalled();
   });
 
   it("writes nothing while the next file loads after a path change", async () => {
@@ -189,9 +236,9 @@ describe("useDocument save outcome", () => {
     );
     await waitFor(() => expect(result.current.doc.status).toBe("ready"));
     act(() => result.current.onChange("ab"));
-    rerender({ path: "/work/other.txt" });
+    rerender({ path: OTHER });
     expect(result.current.doc.status).toBe("loading");
-    expect(await save(result)).toBe("unchanged");
+    await save(result);
     expect(calls("fs_stat")).toHaveLength(0);
     expect(calls("fs_write_file")).toHaveLength(0);
   });
@@ -201,7 +248,63 @@ describe("useDocument save outcome", () => {
     const { result } = mount();
     await waitFor(() => expect(result.current.doc.status).toBe("ready"));
     act(() => result.current.onChange("ab"));
-    expect(await save(result)).toBe("conflict");
+    await save(result);
     expect(calls("fs_write_file")).toHaveLength(0);
+    expect(toastWarning).toHaveBeenCalledTimes(1);
+    expect(toastWarning).toHaveBeenCalledWith(
+      "File changed on disk",
+      expect.anything(),
+    );
+  });
+});
+
+describe("useDocument reload", () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+  });
+
+  afterEach(cleanup);
+
+  it("drops a late reload read of a file the editor has since left", async () => {
+    let pathReads = 0;
+    let finishReload: (res: unknown) => void = () => {};
+    invokeMock.mockImplementation(
+      async (cmd: string, args: { path: string }) => {
+        if (cmd !== "fs_read_file")
+          throw new Error(`unexpected command ${cmd}`);
+        if (args.path === OTHER) {
+          return { kind: "text", content: "other", size: 5, mtime: 1 };
+        }
+        pathReads += 1;
+        if (pathReads === 1) return TEXT;
+        return new Promise((resolve) => {
+          finishReload = resolve;
+        });
+      },
+    );
+    const { result, rerender } = renderHook(
+      ({ path }) => useDocument({ path }),
+      { initialProps: { path: PATH } },
+    );
+    await waitFor(() => expect(result.current.doc.status).toBe("ready"));
+    let started = false;
+    act(() => {
+      started = result.current.reload();
+    });
+    expect(started).toBe(true);
+    await waitFor(() => expect(pathReads).toBe(2));
+    rerender({ path: OTHER });
+    await waitFor(() =>
+      expect(result.current.doc).toMatchObject({ content: "other" }),
+    );
+    await act(async () => {
+      finishReload({ kind: "text", content: "stale", size: 5, mtime: 2 });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(result.current.doc).toEqual({
+      status: "ready",
+      content: "other",
+      size: 5,
+    });
   });
 });

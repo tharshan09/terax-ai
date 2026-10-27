@@ -1,16 +1,12 @@
 use std::collections::HashMap;
-use std::io;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::StreamExt;
-use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{ClientBuilder, Method, Url};
 use serde::{Deserialize, Serialize};
-use tauri::http::Uri;
 use tauri::ipc::Channel;
 use url::Host;
 
@@ -30,12 +26,6 @@ const HEADER_BLOCKLIST: &[&str] = &[
     "expect",
 ];
 
-type Lookup = fn(&str) -> io::Result<Vec<IpAddr>>;
-
-fn system_lookup(host: &str) -> io::Result<Vec<IpAddr>> {
-    Ok((host, 0u16).to_socket_addrs()?.map(|a| a.ip()).collect())
-}
-
 fn is_blocked_host_name(host: &str) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     matches!(
@@ -44,31 +34,40 @@ fn is_blocked_host_name(host: &str) -> bool {
     )
 }
 
-async fn blocking_lookup(name: &str, lookup: Lookup) -> Result<Vec<IpAddr>, String> {
-    let name = name.to_owned();
-    tokio::task::spawn_blocking(move || lookup(&name))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| format!("dns: {e}"))
+fn host_ip<S>(host: &Host<S>) -> Option<IpAddr> {
+    match *host {
+        Host::Ipv4(ip) => Some(ip.into()),
+        Host::Ipv6(ip) => Some(ip.into()),
+        Host::Domain(_) => None,
+    }
+}
+
+fn worst_kind(ips: &[IpAddr]) -> Option<IpKind> {
+    ips.iter()
+        .map(|ip| ip_kind(*ip))
+        .max_by_key(|kind| kind.severity())
+}
+
+async fn lookup(name: String) -> Result<Vec<IpAddr>, String> {
+    tokio::task::spawn_blocking(move || {
+        (name.as_str(), 0u16)
+            .to_socket_addrs()
+            .map(|it| it.map(|a| a.ip()).collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("dns: {e}"))
 }
 
 /// Resolve `host` once and return both its safety classification and the
 /// concrete IPs we resolved. Callers can pin reqwest to these IPs to defeat
 /// DNS rebinding (where a second lookup returns a different address).
-async fn resolve_and_classify(
-    host: &Host<&str>,
-    lookup: Lookup,
-) -> Result<(IpKind, Vec<IpAddr>), String> {
-    let ips = match *host {
-        Host::Ipv4(ip) => vec![IpAddr::V4(ip)],
-        Host::Ipv6(ip) => vec![IpAddr::V6(ip)],
-        Host::Domain(name) => blocking_lookup(name, lookup).await?,
+async fn resolve_and_classify(host: &Host<String>) -> Result<(IpKind, Vec<IpAddr>), String> {
+    let ips = match host_ip(host) {
+        Some(ip) => vec![ip],
+        None => lookup(host.to_string()).await?,
     };
-    let worst = ips
-        .iter()
-        .map(|ip| ip_kind(*ip))
-        .max_by_key(|kind| kind.severity())
-        .ok_or("dns: no addresses")?;
+    let worst = worst_kind(&ips).ok_or("dns: no addresses")?;
     Ok((worst, ips))
 }
 
@@ -87,13 +86,13 @@ fn check_url_shape(url: &Url) -> Result<Host<&str>, String> {
     Ok(host)
 }
 
-fn validate_url(url: &str) -> Result<Url, String> {
+fn validate_url(url: &str) -> Result<(Url, Host<String>), String> {
     let parsed = Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
-    check_url_shape(&parsed)?;
-    Ok(parsed)
+    let host = check_url_shape(&parsed)?.to_owned();
+    Ok((parsed, host))
 }
 
-fn admit(host: &Host<&str>, kind: IpKind, allow_private: bool) -> Result<(), String> {
+fn admit(host: &Host<impl AsRef<str>>, kind: IpKind, allow_private: bool) -> Result<(), String> {
     match kind {
         IpKind::BlockedMetadata => Err(format!("host not allowed: {host}")),
         IpKind::Loopback | IpKind::Private if !allow_private => Err(format!(
@@ -107,233 +106,22 @@ fn admit(host: &Host<&str>, kind: IpKind, allow_private: bool) -> Result<(), Str
 /// Defeats DNS rebinding (second-lookup-returns-different-IP) by reusing
 /// exactly the addresses that passed `ip_kind`.
 async fn classify_and_collect_safe_ips(
-    host: &Host<&str>,
+    host: &Host<String>,
     allow_private: bool,
-    lookup: Lookup,
 ) -> Result<Vec<IpAddr>, String> {
-    let (worst, ips) = resolve_and_classify(host, lookup).await?;
+    let (worst, ips) = resolve_and_classify(host).await?;
     admit(host, worst, allow_private)?;
     Ok(ips)
 }
 
-// Redirect hops to another name get the target's classification.
-struct GuardedResolver {
-    allow_private: bool,
-    lookup: Lookup,
-}
-
-impl Resolve for GuardedResolver {
-    fn resolve(&self, name: Name) -> Resolving {
-        let (allow_private, lookup) = (self.allow_private, self.lookup);
-        Box::pin(async move {
-            let host = Host::Domain(name.as_str());
-            let ips = classify_and_collect_safe_ips(&host, allow_private, lookup).await?;
-            let addrs: Addrs = Box::new(ips.into_iter().map(|ip| SocketAddr::new(ip, 0)));
-            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(addrs)
-        })
-    }
-}
-
 // Reuse the classified addresses, not a second lookup; reqwest fills in port 0.
-fn pin_to(builder: ClientBuilder, host: &Host<&str>, ips: &[IpAddr]) -> ClientBuilder {
-    let Host::Domain(name) = *host else {
+// Residual risk, as upstream: behind an env proxy the proxy resolves the target.
+fn pin_to(builder: ClientBuilder, host: &Host<String>, ips: &[IpAddr]) -> ClientBuilder {
+    let Host::Domain(name) = host else {
         return builder;
     };
     let addrs: Vec<SocketAddr> = ips.iter().map(|ip| SocketAddr::new(*ip, 0)).collect();
     builder.resolve_to_addrs(name, &addrs)
-}
-
-fn process_env(name: &str) -> Option<String> {
-    std::env::var(name).ok()
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct ProxyUrl {
-    scheme: String,
-    userinfo: Option<String>,
-    host: String,
-    port: u16,
-}
-
-impl ProxyUrl {
-    fn at(&self, ip: IpAddr) -> String {
-        let userinfo = self
-            .userinfo
-            .as_deref()
-            .map(|u| format!("{u}@"))
-            .unwrap_or_default();
-        format!(
-            "{}://{userinfo}{}",
-            self.scheme,
-            SocketAddr::new(ip, self.port)
-        )
-    }
-}
-
-struct EnvProxy {
-    url: ProxyUrl,
-    no_proxy: String,
-}
-
-// Behind a proxy the proxy resolves a public target itself, so rebinding there is
-// not caught; loopback and private targets therefore never take the proxy.
-fn proxy_route(
-    target: &Url,
-    safe_ips: &[IpAddr],
-    var: impl Fn(&str) -> Option<String>,
-) -> Option<EnvProxy> {
-    if !safe_ips.iter().all(|ip| ip_kind(*ip) == IpKind::Public) {
-        return None;
-    }
-    env_proxy_for(target, var)
-}
-
-// reqwest 0.12 (hyper-util Matcher::from_env): the first set name of a pair wins
-// even when unusable, and only then does a scheme fall back to ALL_PROXY.
-fn env_proxy_for(target: &Url, var: impl Fn(&str) -> Option<String>) -> Option<EnvProxy> {
-    if var("REQUEST_METHOD").is_some() {
-        return None;
-    }
-    let first = |names: [&str; 2]| names.into_iter().find_map(&var).unwrap_or_default();
-    let no_proxy = first(["NO_PROXY", "no_proxy"]);
-    if no_proxy_matches(&no_proxy, target.host_str()?) {
-        return None;
-    }
-    let scheme_names = match target.scheme() {
-        "http" => ["HTTP_PROXY", "http_proxy"],
-        "https" => ["HTTPS_PROXY", "https_proxy"],
-        _ => return None,
-    };
-    let url = parse_proxy_value(&first(scheme_names))
-        .or_else(|| parse_proxy_value(&first(["ALL_PROXY", "all_proxy"])))?;
-    Some(EnvProxy { url, no_proxy })
-}
-
-fn parse_proxy_value(value: &str) -> Option<ProxyUrl> {
-    let uri: Uri = value.parse().ok()?;
-    let scheme = match uri.scheme_str() {
-        None => "http",
-        Some(s @ ("http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h")) => s,
-        Some(_) => return None,
-    };
-    let authority = uri.authority()?.as_str();
-    let (userinfo, host_port) = match authority.split_once('@') {
-        Some((userinfo, host_port)) => (Some(userinfo.to_owned()), host_port),
-        None => (None, authority),
-    };
-    let proxy = Uri::builder()
-        .scheme(scheme)
-        .authority(host_port)
-        .path_and_query("/")
-        .build()
-        .ok()?;
-    let host = proxy.host()?.trim_start_matches('[').trim_end_matches(']');
-    let port = proxy
-        .port_u16()
-        .unwrap_or(if scheme == "https" { 443 } else { 80 });
-    Some(ProxyUrl {
-        scheme: scheme.to_owned(),
-        userinfo,
-        host: host.to_owned(),
-        port,
-    })
-}
-
-fn no_proxy_matches(list: &str, host: &str) -> bool {
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    let entries = list.split(',').map(str::trim).filter(|e| !e.is_empty());
-    match host.parse::<IpAddr>() {
-        Ok(ip) => entries
-            .filter_map(no_proxy_net)
-            .any(|net| net_contains(net, ip)),
-        Err(_) => entries
-            .filter(|e| no_proxy_net(e).is_none())
-            .any(|e| no_proxy_domain_matches(e, host)),
-    }
-}
-
-fn no_proxy_net(entry: &str) -> Option<(IpAddr, u8)> {
-    let (addr, prefix) = match entry.split_once('/') {
-        Some((addr, prefix)) if prefix.bytes().all(|b| b.is_ascii_digit()) => {
-            (addr.parse::<IpAddr>().ok()?, Some(prefix.parse().ok()?))
-        }
-        Some(_) => return None,
-        None => (entry.parse::<IpAddr>().ok()?, None),
-    };
-    let max = if addr.is_ipv4() { 32 } else { 128 };
-    match prefix {
-        Some(prefix) if prefix > max => None,
-        prefix => Some((addr, prefix.unwrap_or(max))),
-    }
-}
-
-fn net_contains((net, prefix): (IpAddr, u8), ip: IpAddr) -> bool {
-    let (net, ip, bits) = match (net, ip) {
-        (IpAddr::V4(n), IpAddr::V4(i)) => (u32::from(n).into(), u32::from(i).into(), 32),
-        (IpAddr::V6(n), IpAddr::V6(i)) => (u128::from(n), u128::from(i), 128),
-        _ => return false,
-    };
-    let mask = u128::MAX.checked_shl(bits - u32::from(prefix)).unwrap_or(0);
-    net & mask == ip & mask
-}
-
-fn no_proxy_domain_matches(entry: &str, host: &str) -> bool {
-    if entry.eq_ignore_ascii_case(host)
-        || entry
-            .strip_prefix('.')
-            .is_some_and(|e| e.eq_ignore_ascii_case(host))
-    {
-        return true;
-    }
-    let split = host.len().saturating_sub(entry.len());
-    if host
-        .get(split..)
-        .is_some_and(|s| s.eq_ignore_ascii_case(entry))
-    {
-        return entry.starts_with('.') || host[..split].ends_with('.');
-    }
-    entry == "*"
-}
-
-async fn route(
-    builder: ClientBuilder,
-    target: &Url,
-    safe_ips: &[IpAddr],
-    lookup: Lookup,
-    var: impl Fn(&str) -> Option<String>,
-) -> Result<ClientBuilder, String> {
-    let builder = builder.no_proxy();
-    let Some(EnvProxy { url, no_proxy }) = proxy_route(target, safe_ips, var) else {
-        return Ok(builder);
-    };
-    let ip = match url.host.parse::<IpAddr>() {
-        Ok(ip) => ip,
-        Err(_) => *blocking_lookup(&url.host, lookup)
-            .await
-            .map_err(|e| format!("proxy {}: {e}", url.host))?
-            .first()
-            .ok_or_else(|| format!("proxy {}: no addresses", url.host))?,
-    };
-    let proxy = reqwest::Proxy::all(url.at(ip))
-        .map_err(|e| e.to_string())?
-        .no_proxy(reqwest::NoProxy::from_string(&no_proxy));
-    Ok(builder.proxy(proxy))
-}
-
-async fn probe_client(
-    target: &Url,
-    ips: &[IpAddr],
-    lookup: Lookup,
-    var: impl Fn(&str) -> Option<String>,
-) -> Result<reqwest::Client, String> {
-    let host = target.host().ok_or_else(|| "missing host".to_string())?;
-    let builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none());
-    route(pin_to(builder, &host, ips), target, ips, lookup, var)
-        .await?
-        .build()
-        .map_err(|e| e.to_string())
 }
 
 fn sanitize_headers(headers: Option<HashMap<String, String>>) -> Result<HeaderMap, String> {
@@ -362,12 +150,16 @@ pub async fn lm_ping(base_url: String) -> Result<u16, String> {
         return Err("empty base url".into());
     }
     let probe = format!("{trimmed}/models");
-    let parsed = validate_url(&probe)?;
-    let host = parsed.host().ok_or_else(|| "missing host".to_string())?;
-    let safe_ips = classify_and_collect_safe_ips(&host, true, system_lookup).await?;
+    let (parsed, host) = validate_url(&probe)?;
+    let safe_ips = classify_and_collect_safe_ips(&host, true).await?;
 
-    probe_client(&parsed, &safe_ips, system_lookup, process_env)
-        .await?
+    let builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none());
+    let client = pin_to(builder, &host, &safe_ips)
+        .build()
+        .map_err(|e| e.to_string())?;
+    client
         .get(parsed)
         .send()
         .await
@@ -401,20 +193,13 @@ fn build_request(
     Ok(req)
 }
 
-async fn safe_client(
+fn build_safe_client(
     allow_private: bool,
-    target: &Url,
+    host: &Host<String>,
     safe_ips: &[IpAddr],
-    lookup: Lookup,
-    var: impl Fn(&str) -> Option<String>,
 ) -> Result<reqwest::Client, String> {
-    let host = target.host().ok_or_else(|| "missing host".to_string())?;
     let builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
-        .dns_resolver(Arc::new(GuardedResolver {
-            allow_private,
-            lookup,
-        }))
         .redirect(reqwest::redirect::Policy::custom(
             move |attempt| match redirect_decision(
                 attempt.url(),
@@ -427,16 +212,9 @@ async fn safe_client(
                 RedirectDecision::TooMany => attempt.error("too many redirects"),
             },
         ));
-    route(
-        pin_to(builder, &host, safe_ips),
-        target,
-        safe_ips,
-        lookup,
-        var,
-    )
-    .await?
-    .build()
-    .map_err(|e| e.to_string())
+    pin_to(builder, host, safe_ips)
+        .build()
+        .map_err(|e| e.to_string())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -458,12 +236,11 @@ fn redirect_decision(
     let Ok(host) = check_url_shape(next) else {
         return RedirectDecision::Stop;
     };
-    let allowed = match host {
-        Host::Ipv4(ip) => admit(&host, ip_kind(ip.into()), allow_private).is_ok(),
-        Host::Ipv6(ip) => admit(&host, ip_kind(ip.into()), allow_private).is_ok(),
-        Host::Domain(_) => {
-            allow_private || last_previous.is_none_or(|prev| prev.host().is_some_and(|h| h == host))
-        }
+    let allowed = match host_ip(&host) {
+        Some(ip) => admit(&host, ip_kind(ip), allow_private).is_ok(),
+        // Fork deviation: reqwest resolves a new name itself, unclassified and
+        // unpinned, so a hop to another name is stopped even with private access.
+        None => last_previous.is_some_and(|prev| prev.host() == Some(host)),
     };
     if allowed {
         RedirectDecision::Follow
@@ -491,18 +268,10 @@ pub async fn ai_http_request(
     allow_private_network: Option<bool>,
 ) -> Result<HttpResponse, String> {
     let allow_private = allow_private_network.unwrap_or(false);
-    let parsed = validate_url(&url)?;
-    let host = parsed.host().ok_or_else(|| "missing host".to_string())?;
-    let safe_ips = classify_and_collect_safe_ips(&host, allow_private, system_lookup).await?;
+    let (parsed, host) = validate_url(&url)?;
+    let safe_ips = classify_and_collect_safe_ips(&host, allow_private).await?;
 
-    let client = safe_client(
-        allow_private,
-        &parsed,
-        &safe_ips,
-        system_lookup,
-        process_env,
-    )
-    .await?;
+    let client = build_safe_client(allow_private, &host, &safe_ips)?;
 
     let req = build_request(&client, &method, parsed, headers, body)?;
     let resp = req.send().await.map_err(|e| e.to_string())?;
@@ -543,22 +312,14 @@ pub async fn ai_http_stream(
     on_event: Channel<AiStreamEvent>,
 ) -> Result<(), String> {
     let allow_private = allow_private_network.unwrap_or(false);
-    let parsed = match validate_url(&url) {
-        Ok(p) => p,
+    let (parsed, host) = match validate_url(&url) {
+        Ok(v) => v,
         Err(e) => {
             let _ = on_event.send(AiStreamEvent::Error { message: e.clone() });
             return Err(e);
         }
     };
-    let host = match parsed.host() {
-        Some(h) => h,
-        None => {
-            let e = "missing host".to_string();
-            let _ = on_event.send(AiStreamEvent::Error { message: e.clone() });
-            return Err(e);
-        }
-    };
-    let safe_ips = match classify_and_collect_safe_ips(&host, allow_private, system_lookup).await {
+    let safe_ips = match classify_and_collect_safe_ips(&host, allow_private).await {
         Ok(v) => v,
         Err(e) => {
             let _ = on_event.send(AiStreamEvent::Error { message: e.clone() });
@@ -566,15 +327,7 @@ pub async fn ai_http_stream(
         }
     };
 
-    let client = match safe_client(
-        allow_private,
-        &parsed,
-        &safe_ips,
-        system_lookup,
-        process_env,
-    )
-    .await
-    {
+    let client = match build_safe_client(allow_private, &host, &safe_ips) {
         Ok(c) => c,
         Err(e) => {
             let _ = on_event.send(AiStreamEvent::Error { message: e.clone() });
@@ -638,23 +391,6 @@ mod tests {
     use std::net::{Ipv4Addr, TcpListener};
     use std::thread::JoinHandle;
 
-    fn no_dns(host: &str) -> io::Result<Vec<IpAddr>> {
-        Err(io::Error::other(format!("{host} must not reach DNS")))
-    }
-
-    fn fake_dns(host: &str) -> io::Result<Vec<IpAddr>> {
-        let records: &[&str] = match host {
-            "metadata-alias.test" => &["169.254.169.254"],
-            "loopback-alias.test" | "localhost" => &["127.0.0.1"],
-            "private-then-loopback.test" => &["10.0.0.1", "127.0.0.1"],
-            "loopback-then-private.test" => &["127.0.0.1", "10.0.0.1"],
-            "public-and-metadata.test" => &["8.8.8.8", "fd00:ec2::254"],
-            "public.test" => &["8.8.8.8"],
-            _ => return Err(io::ErrorKind::NotFound.into()),
-        };
-        Ok(records.iter().map(|r| r.parse().unwrap()).collect())
-    }
-
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -666,15 +402,8 @@ mod tests {
         Url::parse(s).unwrap()
     }
 
-    fn error_chain(err: &dyn std::error::Error) -> String {
-        let mut out = err.to_string();
-        let mut source = err.source();
-        while let Some(e) = source {
-            out.push_str(": ");
-            out.push_str(&e.to_string());
-            source = e.source();
-        }
-        out
+    fn host_of(s: &str) -> Host<String> {
+        validate_url(s).unwrap().1
     }
 
     fn serve(
@@ -711,47 +440,13 @@ mod tests {
 
     const LANDED: &str = "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nlanded";
 
-    fn no_env(_: &str) -> Option<String> {
-        None
-    }
-
-    fn env(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let vars: Vec<(String, String)> = vars
-            .iter()
-            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-            .collect();
-        move |name| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
-    }
-
-    fn client(
-        rt: &tokio::runtime::Runtime,
-        allow_private: bool,
-        target: &str,
-        ips: &[&str],
-        var: impl Fn(&str) -> Option<String>,
-    ) -> Result<reqwest::Client, String> {
-        let ips: Vec<IpAddr> = ips.iter().map(|ip| ip.parse().unwrap()).collect();
-        rt.block_on(safe_client(
-            allow_private,
-            &url(target),
-            &ips,
-            fake_dns,
-            var,
-        ))
-    }
-
-    fn loopback_client(rt: &tokio::runtime::Runtime) -> reqwest::Client {
-        client(rt, true, "http://127.0.0.1/", &["127.0.0.1"], no_env).unwrap()
-    }
-
-    fn proxy_of(target: &str, ips: &[&str], vars: &[(&str, &str)]) -> Option<String> {
-        let ips: Vec<IpAddr> = ips.iter().map(|ip| ip.parse().unwrap()).collect();
-        proxy_route(&url(target), &ips, env(vars)).map(|p| {
-            let ProxyUrl {
-                scheme, host, port, ..
-            } = p.url;
-            format!("{scheme}://{host}:{port}")
-        })
+    fn loopback_client() -> reqwest::Client {
+        build_safe_client(
+            true,
+            &host_of("http://127.0.0.1/"),
+            &[Ipv4Addr::LOCALHOST.into()],
+        )
+        .unwrap()
     }
 
     #[test]
@@ -836,329 +531,75 @@ mod tests {
             ("[2002:7f00:1::]", IpKind::Loopback),
             ("[::127.0.0.1]", IpKind::Loopback),
         ] {
-            let parsed = url(&format!("http://{literal}/"));
-            let host = parsed.host().unwrap();
-            let (found, _) = rt.block_on(resolve_and_classify(&host, no_dns)).unwrap();
+            let host = host_of(&format!("http://{literal}/"));
+            let (found, _) = rt.block_on(resolve_and_classify(&host)).unwrap();
             assert_eq!(found, kind, "{literal}");
-            let refused = rt.block_on(classify_and_collect_safe_ips(&host, false, no_dns));
+            let refused = rt.block_on(classify_and_collect_safe_ips(&host, false));
             assert!(refused.is_err(), "{literal} must need explicit opt-in");
-            let opted_in = rt.block_on(classify_and_collect_safe_ips(&host, true, no_dns));
+            let opted_in = rt.block_on(classify_and_collect_safe_ips(&host, true));
             assert_eq!(
                 opted_in.is_err(),
                 kind == IpKind::BlockedMetadata,
                 "{literal}: metadata stays blocked even with opt-in"
             );
         }
-        let parsed = url("http://[::ffff:8.8.8.8]/");
         let (kind, _) = rt
-            .block_on(resolve_and_classify(&parsed.host().unwrap(), no_dns))
+            .block_on(resolve_and_classify(&host_of("http://[::ffff:8.8.8.8]/")))
             .unwrap();
         assert_eq!(kind, IpKind::Public);
     }
 
     #[test]
     fn dns_records_take_the_most_dangerous_class_in_any_order() {
-        let rt = runtime();
-        for (name, kind) in [
-            ("private-then-loopback.test", IpKind::Loopback),
-            ("loopback-then-private.test", IpKind::Loopback),
-            ("public-and-metadata.test", IpKind::BlockedMetadata),
+        for (records, kind) in [
+            (&["10.0.0.1", "127.0.0.1"][..], IpKind::Loopback),
+            (&["127.0.0.1", "10.0.0.1"][..], IpKind::Loopback),
+            (&["8.8.8.8", "fd00:ec2::254"][..], IpKind::BlockedMetadata),
         ] {
-            let (found, ips) = rt
-                .block_on(resolve_and_classify(&Host::Domain(name), fake_dns))
-                .unwrap();
-            assert_eq!(found, kind, "{name}");
-            assert_eq!(ips.len(), 2, "{name}");
+            let ips: Vec<IpAddr> = records.iter().map(|r| r.parse().unwrap()).collect();
+            assert_eq!(worst_kind(&ips), Some(kind), "{records:?}");
         }
+        assert_eq!(worst_kind(&[]), None);
     }
 
     #[test]
-    fn guarded_resolver_classifies_every_name_it_resolves() {
-        let rt = runtime();
-        let resolve = |name: &str, allow_private: bool| {
-            let resolver = GuardedResolver {
-                allow_private,
-                lookup: fake_dns,
-            };
-            rt.block_on(resolver.resolve(name.parse().unwrap()))
-                .map(|addrs| addrs.collect::<Vec<_>>())
-                .map_err(|e| e.to_string())
-        };
-        let blocked = resolve("metadata-alias.test", true).unwrap_err();
-        assert_eq!(blocked, "host not allowed: metadata-alias.test");
-        let refused = resolve("loopback-alias.test", false).unwrap_err();
-        assert!(refused.contains("requires explicit opt-in"), "{refused}");
-        assert_eq!(
-            resolve("loopback-alias.test", true).unwrap(),
-            vec![SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)]
-        );
-    }
-
-    #[test]
-    fn redirect_to_a_name_with_a_metadata_record_is_refused_even_with_private_access() {
+    fn the_client_returns_a_redirect_to_another_name_instead_of_following_it() {
         let (port, server) = serve(|port| vec![redirect_to("metadata-alias.test", port)]);
         let rt = runtime();
-        let err = rt
+        let resp = rt
             .block_on(
-                loopback_client(&rt)
+                loopback_client()
                     .get(format!("http://127.0.0.1:{port}/"))
                     .send(),
             )
-            .unwrap_err();
-        let chain = error_chain(&err);
-        assert!(
-            chain.contains("host not allowed: metadata-alias.test"),
-            "{chain}"
-        );
+            .unwrap();
+        assert_eq!(resp.status(), 302);
+        assert_eq!(resp.url().host_str(), Some("127.0.0.1"));
         server.join().unwrap();
     }
 
     #[test]
-    fn redirect_hops_to_another_name_resolve_through_the_guard() {
-        let (port, server) =
-            serve(|port| vec![redirect_to("loopback-alias.test", port), LANDED.to_string()]);
+    fn the_client_follows_a_redirect_within_the_same_host() {
+        let (port, server) = serve(|port| vec![redirect_to("127.0.0.1", port), LANDED.to_string()]);
         let rt = runtime();
         let resp = rt
             .block_on(
-                loopback_client(&rt)
+                loopback_client()
                     .get(format!("http://127.0.0.1:{port}/"))
                     .send(),
             )
             .unwrap();
         assert_eq!(resp.status(), 200);
-        assert_eq!(resp.url().host_str(), Some("loopback-alias.test"));
-        server.join().unwrap();
-    }
-
-    #[test]
-    fn proxy_selection_follows_reqwest_precedence() {
-        let https = "https://public.test/";
-        let ips = &["8.8.8.8"];
-        assert_eq!(
-            proxy_of(
-                https,
-                ips,
-                &[
-                    ("HTTPS_PROXY", "http://upper.test:1"),
-                    ("https_proxy", "http://lower.test:2"),
-                    ("ALL_PROXY", "http://all.test:3"),
-                ]
-            ),
-            Some("http://upper.test:1".into())
-        );
-        assert_eq!(
-            proxy_of(https, ips, &[("https_proxy", "lower.test:2")]),
-            Some("http://lower.test:2".into())
-        );
-        for invalid in ["ftp://upper.test:1", "", "/no-authority"] {
-            assert_eq!(
-                proxy_of(
-                    https,
-                    ips,
-                    &[
-                        ("HTTPS_PROXY", invalid),
-                        ("https_proxy", "http://lower.test:2"),
-                        ("ALL_PROXY", "http://all.test:3"),
-                    ]
-                ),
-                Some("http://all.test:3".into()),
-                "{invalid:?}: a set but unusable name falls back to ALL_PROXY, never to its lowercase twin"
-            );
-            assert_eq!(
-                proxy_of(
-                    https,
-                    ips,
-                    &[
-                        ("HTTPS_PROXY", invalid),
-                        ("https_proxy", "http://lower.test:2")
-                    ]
-                ),
-                None,
-                "{invalid:?}"
-            );
-        }
-        assert_eq!(
-            proxy_of(
-                "http://public.test/",
-                ips,
-                &[
-                    ("HTTPS_PROXY", "http://tls.test:1"),
-                    ("all_proxy", "https://all.test")
-                ]
-            ),
-            Some("https://all.test:443".into())
-        );
-        assert_eq!(
-            proxy_of(
-                https,
-                ips,
-                &[
-                    ("HTTPS_PROXY", "http://upper.test:1"),
-                    ("REQUEST_METHOD", "GET")
-                ]
-            ),
-            None
-        );
-        assert_eq!(proxy_of(https, ips, &[]), None);
-    }
-
-    #[test]
-    fn proxy_urls_keep_credentials_and_get_the_resolved_address() {
-        let proxy = parse_proxy_value("http://us%40er:p%3Aw@Proxy.Test").unwrap();
-        assert_eq!(proxy.userinfo.as_deref(), Some("us%40er:p%3Aw"));
-        assert_eq!(proxy.port, 80);
-        assert_eq!(
-            proxy.at("10.0.0.1".parse().unwrap()),
-            "http://us%40er:p%3Aw@10.0.0.1:80"
-        );
-        assert_eq!(
-            parse_proxy_value("socks5h://[::1]:1080")
-                .unwrap()
-                .at("::1".parse().unwrap()),
-            "socks5h://[::1]:1080"
-        );
-        assert_eq!(parse_proxy_value("gopher://proxy.test:70"), None);
-    }
-
-    #[test]
-    fn no_proxy_exempts_targets_like_reqwest() {
-        let proxy = ("HTTPS_PROXY", "http://proxy.test:3128");
-        let via = Some("http://proxy.test:3128".to_string());
-        for (no_proxy, target, expected) in [
-            ("corp.test", "https://api.corp.test/", None),
-            ("corp.test", "https://corp.test/", None),
-            (".corp.test", "https://api.CORP.test/", None),
-            ("corp.test", "https://notcorp.test/", via.clone()),
-            (" a.test , corp.test ", "https://x.corp.test/", None),
-            ("8.8.0.0/16", "https://8.8.8.8/", None),
-            ("8.8.8.8", "https://8.8.8.8/", None),
-            ("8.8.4.0/24", "https://8.8.8.8/", via.clone()),
-            ("2001:db8::/32", "https://[2001:db8::1]/", None),
-            ("*", "https://public.test/", None),
-            ("*", "https://8.8.8.8/", via.clone()),
-            ("", "https://public.test/", via.clone()),
-        ] {
-            let ip = if target.contains("2001:db8") {
-                "2001:4860::1"
-            } else {
-                "8.8.8.8"
-            };
-            assert_eq!(
-                proxy_of(target, &[ip], &[proxy, ("NO_PROXY", no_proxy)]),
-                expected,
-                "NO_PROXY={no_proxy:?} {target}"
-            );
-        }
-        assert_eq!(
-            proxy_of(
-                "https://api.corp.test/",
-                &["8.8.8.8"],
-                &[proxy, ("no_proxy", "corp.test")]
-            ),
-            None
-        );
-        assert_eq!(
-            proxy_of(
-                "https://api.corp.test/",
-                &["8.8.8.8"],
-                &[proxy, ("NO_PROXY", ""), ("no_proxy", "corp.test")]
-            ),
-            via
-        );
-    }
-
-    #[test]
-    fn local_targets_go_direct_even_with_a_proxy_configured() {
-        let proxy = [
-            ("HTTP_PROXY", "http://unresolvable.test:3128"),
-            ("ALL_PROXY", "http://unresolvable.test:3128"),
-        ];
-        for (target, ips) in [
-            ("http://127.0.0.1/", &["127.0.0.1"][..]),
-            ("http://localhost/", &["127.0.0.1"][..]),
-            ("http://lan.test/", &["10.0.0.1"][..]),
-            ("http://mixed.test/", &["8.8.8.8", "192.168.1.1"][..]),
-        ] {
-            assert_eq!(proxy_of(target, ips, &proxy), None, "{target}");
-        }
-        let rt = runtime();
-        for name in ["127.0.0.1", "localhost"] {
-            let (port, server) = serve(|_| vec![LANDED.to_string()]);
-            let client = client(
-                &rt,
-                true,
-                &format!("http://{name}/"),
-                &["127.0.0.1"],
-                env(&proxy),
-            )
-            .unwrap();
-            let resp = rt
-                .block_on(client.get(format!("http://{name}:{port}/")).send())
-                .map_err(|e| error_chain(&e))
-                .unwrap();
-            assert_eq!(rt.block_on(resp.text()).unwrap(), "landed", "{name}");
-            let heads = server.join().unwrap();
-            assert!(heads[0].starts_with("GET / "), "{name}: {}", heads[0]);
-        }
-    }
-
-    #[test]
-    fn public_targets_reach_the_proxy_by_its_resolved_address() {
-        let (port, server) = serve(|_| vec![LANDED.to_string()]);
-        let rt = runtime();
-        let proxy = format!("http://loopback-alias.test:{port}");
-        let client = client(
-            &rt,
-            false,
-            "http://public.test/",
-            &["8.8.8.8"],
-            env(&[("HTTP_PROXY", &proxy)]),
-        )
-        .unwrap();
-        let resp = rt
-            .block_on(client.get("http://public.test/v1").send())
-            .map_err(|e| error_chain(&e))
-            .unwrap();
         assert_eq!(rt.block_on(resp.text()).unwrap(), "landed");
         let heads = server.join().unwrap();
-        assert!(
-            heads[0].starts_with("GET http://public.test/v1 "),
-            "{}",
-            heads[0]
-        );
-    }
-
-    #[test]
-    fn redirect_to_the_proxy_name_resolving_to_metadata_is_refused() {
-        let (port, server) = serve(|port| vec![redirect_to("metadata-alias.test", port)]);
-        let rt = runtime();
-        let proxy = format!("http://metadata-alias.test:{port}");
-        let client = client(
-            &rt,
-            true,
-            "http://127.0.0.1/",
-            &["127.0.0.1"],
-            env(&[("HTTP_PROXY", &proxy), ("ALL_PROXY", &proxy)]),
-        )
-        .unwrap();
-        let err = rt
-            .block_on(client.get(format!("http://127.0.0.1:{port}/")).send())
-            .unwrap_err();
-        let chain = error_chain(&err);
-        assert!(
-            chain.contains("host not allowed: metadata-alias.test"),
-            "{chain}"
-        );
-        server.join().unwrap();
+        assert!(heads[1].starts_with("GET /landed "), "{}", heads[1]);
     }
 
     #[test]
     fn ipv6_literal_urls_are_classified_instead_of_failing_dns() {
         let rt = runtime();
         let classify = |url: &str, allow_private: bool| {
-            let parsed = validate_url(url).unwrap();
-            let host = parsed.host().unwrap();
-            rt.block_on(classify_and_collect_safe_ips(&host, allow_private, no_dns))
+            rt.block_on(classify_and_collect_safe_ips(&host_of(url), allow_private))
         };
         let refused = classify("http://[::ffff:127.0.0.1]:11434/", false).unwrap_err();
         assert!(refused.contains("requires explicit opt-in"), "{refused}");
@@ -1249,20 +690,30 @@ mod tests {
     }
 
     #[test]
-    fn redirects_to_another_name_need_private_access() {
+    fn redirects_to_another_name_are_stopped_even_with_private_access() {
         let from = url("https://api.example.com/v1");
-        assert_eq!(
-            redirect_decision(&url("https://api.example.com/v2"), Some(&from), 1, false),
-            RedirectDecision::Follow
-        );
-        assert_eq!(
-            redirect_decision(&url("https://cdn.example.com/"), Some(&from), 1, false),
-            RedirectDecision::Stop
-        );
-        assert_eq!(
-            redirect_decision(&url("https://cdn.example.com/"), Some(&from), 1, true),
-            RedirectDecision::Follow
-        );
+        for allow_private in [false, true] {
+            assert_eq!(
+                redirect_decision(
+                    &url("https://api.example.com/v2"),
+                    Some(&from),
+                    1,
+                    allow_private
+                ),
+                RedirectDecision::Follow,
+                "allow_private={allow_private}"
+            );
+            assert_eq!(
+                redirect_decision(
+                    &url("https://cdn.example.com/"),
+                    Some(&from),
+                    1,
+                    allow_private
+                ),
+                RedirectDecision::Stop,
+                "allow_private={allow_private}"
+            );
+        }
         assert_eq!(
             redirect_decision(&url("https://cdn.example.com/"), Some(&from), 11, true),
             RedirectDecision::TooMany

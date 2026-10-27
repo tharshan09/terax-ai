@@ -15,9 +15,6 @@ export type DocumentState =
   | { status: "toolarge"; size: number; limit: number }
   | { status: "error"; message: string };
 
-/** Result of an explicit save; only `"written"` put the buffer on disk. */
-export type SaveOutcome = "written" | "unchanged" | "conflict";
-
 type Options = {
   path: string;
   /** Execution env the file lives in (e.g. an SSH host). Falls back to the
@@ -28,6 +25,30 @@ type Options = {
 };
 
 type DocTarget = { path: string; workspace?: WorkspaceEnv };
+
+// A write or stat that never settles must not hold every later save forever.
+const SAVE_WAIT_MS = 15_000;
+
+function settledOrTimedOut(previous: Promise<unknown>): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, SAVE_WAIT_MS);
+    const done = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    previous.then(done, done);
+  });
+}
+
+function readFromDisk({ path, workspace }: DocTarget) {
+  return invoke<ReadResult>("fs_read_file", {
+    path,
+    workspace: workspace ?? currentWorkspaceEnv(),
+    // Explicit user open in the editor: allow reading a file named by name,
+    // even a secret. The terminal Cmd+Click path stays untrusted.
+    trusted: true,
+  });
+}
 
 export function useDocument({ path, workspace, onDirtyChange }: Options) {
   const [doc, setDoc] = useState<DocumentState>({ status: "loading" });
@@ -68,65 +89,56 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
     }
   }, []);
 
-  const enqueueSave = useCallback(
-    (task: () => Promise<SaveOutcome>): Promise<SaveOutcome> => {
-      const run = saveQueueRef.current.then(task);
-      saveQueueRef.current = run.catch(() => {});
-      return run;
-    },
-    [],
-  );
+  const enqueueSave = useCallback(<T>(task: () => Promise<T>): Promise<T> => {
+    const run = settledOrTimedOut(saveQueueRef.current).then(task);
+    saveQueueRef.current = run.catch(() => {});
+    return run;
+  }, []);
 
   // Persist the buffer (restoring the file's original EOL) and adopt the
   // returned disk mtime as the new conflict baseline, with no follow-up stat.
-  const writeToDisk = useCallback(
-    async (target: DocTarget): Promise<SaveOutcome> => {
-      if (targetRef.current !== target) return "unchanged";
-      const content = bufferRef.current;
-      let mtime: number;
-      try {
-        mtime = await invoke<number>("fs_write_file", {
-          path: target.path,
-          content: restoreEol(content, eolRef.current),
-          workspace: target.workspace ?? currentWorkspaceEnv(),
-          source: "editor",
-          // Explicit user save: allow the editor to persist a file the user
-          // opened by name, even a secret like `.env`.
-          trusted: true,
-        });
-      } catch (e) {
-        // Surface the failure and keep the buffer dirty: savedRef/setDirty below
-        // are skipped, so the unsaved edits are preserved. Remote saves in
-        // particular can fail (permission denied, dropped connection) and must
-        // never be swallowed. Re-throw so callers don't signal a successful save.
-        const name = target.path.split(/[\\/]/).pop() || target.path;
-        toast.error(`Couldn’t save ${name}: ${String(e)}`);
-        throw e;
-      }
-      if (targetRef.current !== target) return "written";
-      diskMtimeRef.current = mtime;
-      savedRef.current = content;
-      // Edits typed while the write was in flight must stay dirty.
-      setDirty(bufferRef.current !== content);
-      return "written";
-    },
-    [],
-  );
+  const writeToDisk = useCallback(async (target: DocTarget) => {
+    if (targetRef.current !== target) return;
+    const content = bufferRef.current;
+    let mtime: number;
+    try {
+      mtime = await invoke<number>("fs_write_file", {
+        path: target.path,
+        content: restoreEol(content, eolRef.current),
+        workspace: target.workspace ?? currentWorkspaceEnv(),
+        source: "editor",
+        // Explicit user save: allow the editor to persist a file the user
+        // opened by name, even a secret like `.env`.
+        trusted: true,
+      });
+    } catch (e) {
+      // Surface the failure and keep the buffer dirty: savedRef/setDirty below
+      // are skipped, so the unsaved edits are preserved. Remote saves in
+      // particular can fail (permission denied, dropped connection) and must
+      // never be swallowed. Re-throw so callers don't signal a successful save.
+      const name = target.path.split(/[\\/]/).pop() || target.path;
+      toast.error(`Couldn’t save ${name}: ${String(e)}`);
+      throw e;
+    }
+    if (targetRef.current !== target) return;
+    diskMtimeRef.current = mtime;
+    savedRef.current = content;
+    // Edits typed while the write was in flight must stay dirty.
+    setDirty(bufferRef.current !== content);
+  }, []);
 
-  // A clean buffer, also the untouched one of a loading or binary doc, has
-  // nothing to write. Resolves "conflict" when the write was withheld because
-  // the file changed on disk since load; overwriting is then an explicit user
-  // action from the toast.
-  const saveIfChanged = useCallback(async (): Promise<SaveOutcome> => {
+  // Resolves false when the write was withheld because the file changed on disk
+  // since load; overwriting is then an explicit user action from the toast.
+  const saveIfChanged = useCallback(async (): Promise<boolean> => {
     const target = targetRef.current;
-    if (bufferRef.current === savedRef.current) return "unchanged";
+    if (bufferRef.current === savedRef.current) return true;
     const known = diskMtimeRef.current;
     if (known !== null) {
       const stat = await invoke<FileStat>("fs_stat", {
         path: target.path,
         workspace: target.workspace ?? currentWorkspaceEnv(),
       }).catch(() => null);
-      if (targetRef.current !== target) return "unchanged";
+      if (targetRef.current !== target) return true;
       if (stat && stat.mtime !== known) {
         const name = target.path.split(/[\\/]/).pop() ?? target.path;
         toast.warning("File changed on disk", {
@@ -138,10 +150,11 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
               void enqueueSave(() => writeToDisk(target)).catch(() => {}),
           },
         });
-        return "conflict";
+        return false;
       }
     }
-    return writeToDisk(target);
+    await writeToDisk(target);
+    return true;
   }, [enqueueSave, writeToDisk]);
 
   // Notify parent of dirty transitions.
@@ -173,22 +186,11 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
     }
   }, []);
 
-  const readFromDisk = useCallback(
-    () =>
-      invoke<ReadResult>("fs_read_file", {
-        path,
-        workspace: workspace ?? currentWorkspaceEnv(),
-        // Explicit user open in the editor: allow reading a file named by name,
-        // even a secret. The terminal Cmd+Click path stays untrusted.
-        trusted: true,
-      }),
-    [path, workspace],
-  );
-
-  // Load on path change (or workspace change → new readFromDisk identity).
+  // Load on path or workspace change.
   useEffect(() => {
     let cancelled = false;
-    targetRef.current = { path, workspace };
+    const target = { path, workspace };
+    targetRef.current = target;
     savedRef.current = "";
     bufferRef.current = "";
     eolRef.current = "\n";
@@ -196,7 +198,7 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
     setDoc({ status: "loading" });
     setDirty(false);
 
-    readFromDisk()
+    readFromDisk(target)
       .then((res) => {
         if (!cancelled) adoptRead(res);
       })
@@ -207,23 +209,26 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
     return () => {
       cancelled = true;
     };
-  }, [path, workspace, readFromDisk, adoptRead]);
+  }, [path, workspace, adoptRead]);
 
   // Skipped while dirty: never clobber unsaved edits. Re-checked when the read
-  // resolves, since typing can start while the read is in flight.
+  // resolves, since typing or a path change can happen while it is in flight.
   const reload = useCallback((): boolean => {
     if (dirtyRef.current) return false;
-    void readFromDisk()
+    const target = targetRef.current;
+    void readFromDisk(target)
       .then((res) => {
-        if (!dirtyRef.current) adoptRead(res, true);
+        if (targetRef.current === target && !dirtyRef.current) {
+          adoptRead(res, true);
+        }
       })
       // Transient failures (e.g. ENOENT mid atomic-rename) must not replace a
       // healthy buffer with an error screen.
-      .catch((e) => console.warn("[editor] reload failed", path, e));
+      .catch((e) => console.warn("[editor] reload failed", target.path, e));
     return true;
-  }, [readFromDisk, adoptRead, path]);
+  }, [adoptRead]);
 
-  const save = useCallback((): Promise<SaveOutcome> => {
+  const save = useCallback(async (): Promise<boolean> => {
     clearAutoSaveTimer();
     return enqueueSave(saveIfChanged);
   }, [clearAutoSaveTimer, enqueueSave, saveIfChanged]);

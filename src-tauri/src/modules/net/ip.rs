@@ -32,8 +32,9 @@ pub(super) fn ip_kind(ip: IpAddr) -> IpKind {
 
 fn ipv4_kind(v: Ipv4Addr) -> IpKind {
     let o = v.octets();
-    // Cloud metadata services live in link-local space (169.254.169.254).
-    if v.is_link_local() {
+    // Cloud metadata services: link-local 169.254.169.254, and Alibaba Cloud's
+    // 100.100.100.200 inside the otherwise private CGNAT range.
+    if v.is_link_local() || o == [100, 100, 100, 200] {
         return IpKind::BlockedMetadata;
     }
     // 0.0.0.0/8 is "this host" to most stacks.
@@ -175,6 +176,15 @@ mod tests {
         assert_eq!(kind("::ffff:0.0.0.0"), IpKind::Loopback);
         assert_eq!(kind("::ffff:8.8.8.8"), IpKind::Public);
         assert_eq!(kind("::ffff:1.1.1.1"), IpKind::Public);
+    }
+
+    #[test]
+    fn alibaba_cloud_metadata_is_blocked_inside_cgnat_space() {
+        assert_eq!(kind("100.100.100.200"), IpKind::BlockedMetadata);
+        assert_eq!(kind("::ffff:100.100.100.200"), IpKind::BlockedMetadata);
+        assert_eq!(kind("64:ff9b::6464:64c8"), IpKind::BlockedMetadata);
+        assert_eq!(kind("100.100.100.199"), IpKind::Private);
+        assert_eq!(kind("100.100.100.201"), IpKind::Private);
     }
 
     #[test]
