@@ -47,7 +47,7 @@ X-A bis X-D sind davon unabhängige, mechanische Korrekturen (Kohärenz MIG-6/Up
 **Das Staging-Präfix `.terax-copy-` gilt in jeder Aufzählung des Workspace-Inhalts durch die App als immer verborgen, unabhängig von `showHidden`, lokal und SSH: Explorer-Baum, Explorer-Suche, Unterordner-Menü der Statusleiste, Dateiliste. Inhalte unterhalb eines Staging-Ordners werden nie aufgezählt und nie durchsucht. Ein Prädikat in Rust (Quelle `copy.rs`), gespiegelt im Helper mit Pin-Test, wird an jeder Stelle verwendet, die `show_hidden` auswertet.**
 
 Herleitung (`derived`):
-- BR-3 (Discovery, PM): „keine halben Kopien sichtbar, auch nicht bei Abbruch" — ohne Einschränkung auf eine Oberfläche.
+- BR-3 (Discovery, PM): „keine halben Kopien sichtbar, auch nicht bei Abbruch" - ohne Einschränkung auf eine Oberfläche.
 - PM-Entscheid B3 (Gate-Log): Explorer blendet immer aus; die Alternative „Sichtbarkeit hinnehmen und BR-3 auf ‚nie unter dem Zielnamen' abschwächen" wurde ausdrücklich verworfen. Die Explorer-Suche ist Teil des Explorers; das Unterordner-Menü ist eine App-Aufzählung, in der nach SSH-Abbruch ein Rest dauerhaft sichtbar wäre, was BR-3 verletzt.
 - Q&A #28 trägt die Folge schon („ein echter Ordner des Users mit diesem Präfix erscheint ebenfalls nicht im Explorer"); sie weitet sich auf die Suche aus, ohne neue Abwägung.
 - Keine Alternative offen: die Dokumente determinieren die Auflösung. Kein PM-Review nötig.

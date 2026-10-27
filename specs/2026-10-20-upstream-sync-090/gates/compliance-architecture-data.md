@@ -119,7 +119,7 @@ Linsen-Ausfall: keiner (architecture.md Anti-Slop-Abschnitt; Scan „Linse volls
 
 ## Check E2: Bindings Coverage, Gate 1c
 
-N/A — keine `bindings.md`, kein `reconcile_path`.
+N/A - keine `bindings.md`, kein `reconcile_path`.
 
 ## Check E3: Existing-Behavior Invariants, Gate 1d (Daten-Anteile)
 
@@ -160,7 +160,7 @@ N/A — keine `bindings.md`, kein `reconcile_path`.
 | # | Behauptung (architecture.md) | Beleg | Verdikt |
 |---|------------------------------|-------|---------|
 | C-01 | API-1/VAL-6: Dateireferenz-URLs werden zu echten Pfaden aufgelöst, Einträge ohne Datei-URL ignoriert | Private-Pasteboard-Sonde (JXA): `file:///.file/id=…` → dekodierter Pfad; Upstream `2723dc6:clipboard.rs` `filePathURL()?.path()?` | bestätigt |
-| C-02 | Annahme: Finder legt kopierte Elemente als Datei-URLs je Pasteboard-Item ab | – | NICHT GEMESSEN — echtes Finder-⌘C würde die Zwischenablage des Users überschreiben; e2e ist in architecture.md geplant (DA-9) |
+| C-02 | Annahme: Finder legt kopierte Elemente als Datei-URLs je Pasteboard-Item ab | – | NICHT GEMESSEN - echtes Finder-⌘C würde die Zwischenablage des Users überschreiben; e2e ist in architecture.md geplant (DA-9) |
 | C-03 | `NSPasteboardTypeFileURL` in `objc2-app-kit` 0.3.2 (`generated/NSPasteboard.rs:91`) | Registry-Quelle `:91` | bestätigt |
 | C-04 | Features `NSPasteboardItem`, `NSArray`, `NSURL` in 0.3.2 definiert und zu ergänzen | `objc2-app-kit-0.3.2/Cargo.toml:1028`, `objc2-foundation-0.3.2/Cargo.toml:68,198`; Fork nutzt Default-Features (`Cargo.toml:67-68`), deren `default`-Liste alle Features enthält | bestätigt (Ergänzung redundant, DA-14) |
 | C-05 | Lesekern testbar mit privatem Pasteboard | `NSPasteboard pasteboardWithName` + `releaseGlobally` in der Sonde funktionsfähig | bestätigt |
@@ -179,7 +179,7 @@ N/A — keine `bindings.md`, kein `reconcile_path`.
 | C-18 | BR-21 lokal: Symlinks als Symlinks, nie verfolgt | Upstream `copy.rs:175-176,201-202` | bestätigt |
 | C-19 | API-3/Constraints: `publish` nur mit `os.mkdir/rename/link/unlink`; Rename auf leeren Ordner ersetzt, `os.link` scheitert bei Vorhandenem | python-Sonde macOS + `litha-claude`: ok / `ENOTEMPTY` / `EEXIST` / `EEXIST` | bestätigt |
 | C-20 | Host `litha-claude` Python 3.13.5 / Linux 6.12.113; lokal 3.9.6 | Sonden-Ausgabe | bestätigt |
-| C-21 | Risiko: Dateisystem ohne No-Replace-Rename (exFAT, SMB) → Rückfall exklusive Reservierung | Upstream `mutate.rs:138-170` hat keinen Rückfall (Fehler wird durchgereicht); `VOL_CAP_INT_RENAME_EXCL` existiert (`apple/mod.rs:4199`) | NICHT GEMESSEN — kein exFAT/SMB-Volume verfügbar; Nachweis als DA-12 |
+| C-21 | Risiko: Dateisystem ohne No-Replace-Rename (exFAT, SMB) → Rückfall exklusive Reservierung | Upstream `mutate.rs:138-170` hat keinen Rückfall (Fehler wird durchgereicht); `VOL_CAP_INT_RENAME_EXCL` existiert (`apple/mod.rs:4199`) | NICHT GEMESSEN - kein exFAT/SMB-Volume verfügbar; Nachweis als DA-12 |
 | C-22 | `renamex_np` + `RENAME_EXCL` in libc 0.2.189 (`apple/mod.rs:3325,4761`) | exakt diese Zeilen | bestätigt |
 | C-23 | Linux `renameat2` + `RENAME_NOREPLACE` | `linux/gnu/mod.rs:1114`, `linux/mod.rs:1216` | bestätigt |
 | C-24 | `net/ip.rs` 263 Zeilen, nur `std` | `wc -l` 263; einziger Import `use std::net::{IpAddr, Ipv4Addr, Ipv6Addr}` | bestätigt |
@@ -200,7 +200,7 @@ N/A — keine `bindings.md`, kein `reconcile_path`.
 | C-39 | `minimumReleaseAge` 4320 strikt; Zielstände ≥ 3 Tage alt | `pnpm-workspace.yaml:1-2`; Lezer 1.2.5 vom 28.09.; Simulation lief durch | bestätigt |
 | C-40 | Fork-`overrides:` mit `dompurify`, `react-grab`, `react-doctor` | `pnpm-workspace.yaml` | bestätigt |
 | C-41 | MIG-68/69: Catalog-Block + Lezer-Override im bestehenden Block → Lezer 1.2.5 genau einmal, Pins unverändert | `pnpm install --lockfile-only` (pnpm 11.9.0, exit 0): nur `@lezer/highlight@1.2.5`; Lock-`overrides:` enthält alle vier Schlüssel | bestätigt |
-| C-42 | Catalog „seit pnpm 9.5" | – | NICHT GEMESSEN — Hersteller-Doku (Perspektive `runtime`); für die Entscheidung irrelevant, da 11.9.0 gemessen funktioniert |
+| C-42 | Catalog „seit pnpm 9.5" | – | NICHT GEMESSEN - Hersteller-Doku (Perspektive `runtime`); für die Entscheidung irrelevant, da 11.9.0 gemessen funktioniert |
 | C-43 | INV-21/MIG-69: `@lezer/highlight` 1.2.3 einmal (`:904,6697`) | einzige Version im Lock | bestätigt |
 | C-44 | `bf7e03d`: `catalog:` 1.2.5 + Override; Build-Test zählt Lezer-Kopien über Sourcemaps | `bf7e03d` Diff `pnpm-workspace.yaml`; `dist-budget.test.ts:221-231` | bestätigt |
 | C-45 | `dirs` nur `home_dir`, 13 Stellen | `grep dirs::` 13 Treffer, alle `home_dir` | bestätigt |

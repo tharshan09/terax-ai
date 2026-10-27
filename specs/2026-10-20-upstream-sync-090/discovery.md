@@ -11,7 +11,7 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 
 ## Problem & Solution
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 **Problem:**
 - Upstream v0.9.0 bringt 122 neue Commits (576 Dateien, +98k/−11k Zeilen). Der Kern ist der Austausch von xterm.js durch ein Ghostty-Terminal (WASM + WebGPU) mit neuem PTY-Transport.
@@ -33,7 +33,7 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 
 ## Scope & Boundaries
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 | In Scope |
 |----------|
@@ -51,16 +51,16 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 
 | Out of Scope |
 |--------------|
-| Ghostty-Terminal, WebGPU/WebGL-Renderer, PTY-Transport v2 (`0a6e511`, `ddd42a9`, `d2b5f87`, `8463539`, PTY-Teil von `11343a1`) — geparkt, siehe BR-14 |
+| Ghostty-Terminal, WebGPU/WebGL-Renderer, PTY-Transport v2 (`0a6e511`, `ddd42a9`, `d2b5f87`, `8463539`, PTY-Teil von `11343a1`) - geparkt, siehe BR-14 |
 | Ghostty-Folgefixes: `86a230b`, `c8affd4`, `478ac27`, `5507dfb`, `a30b0fa`, `c69b07e`, `0d9937f` |
-| AI-Teile: `f99105d` (AI-Transport, Persistenz), `ai_sessions.rs`, AI-Teil von `f6f0004` (content-visibility im Chat) — AI-Features depriorisiert |
-| Settings-Webview schließen statt verstecken (`f6f0004`) — Risiko mit bekanntem Quit-Abbruch-Thema des Settings-Fensters |
-| Vibrancy-Default aus (`f6f0004`) — reine Optik, UI-Redesign nicht im Fork |
-| `fd21291` (Watcher-Listing-Filter) und `39fa919` (Suche nach Kopie invalidieren) — hängen am Watcher-/Index-Umbau aus `0a6e511` |
-| `ff20d93` (natives Text-Clipboard) — Fork hat eigenen NSPasteboard-Weg |
+| AI-Teile: `f99105d` (AI-Transport, Persistenz), `ai_sessions.rs`, AI-Teil von `f6f0004` (content-visibility im Chat) - AI-Features depriorisiert |
+| Settings-Webview schließen statt verstecken (`f6f0004`) - Risiko mit bekanntem Quit-Abbruch-Thema des Settings-Fensters |
+| Vibrancy-Default aus (`f6f0004`) - reine Optik, UI-Redesign nicht im Fork |
+| `fd21291` (Watcher-Listing-Filter) und `39fa919` (Suche nach Kopie invalidieren) - hängen am Watcher-/Index-Umbau aus `0a6e511` |
+| `ff20d93` (natives Text-Clipboard) - Fork hat eigenen NSPasteboard-Weg |
 | `e09c030` (Knip-Bereinigung), `a52d03a` (Page-Tile beim Fenster-Drag, gemessen nur mit WebGPU-Canvas) |
 | Windows/Linux-Fixes (`a9c8a92`, `8e013b0`, `c510c96`, `d0b569c`, `815a53b`) |
-| Offene Upstream-PRs #1368, #1369, #1370, #1367, #1371 — bewusst nicht in dieser Welle |
+| Offene Upstream-PRs #1368, #1369, #1370, #1367, #1371 - bewusst nicht in dieser Welle |
 | Explorer-Mehrfachauswahl, CLI Control Plane, Nested Git, UI-Redesign (seit Runde 3 geparkt, unverändert) |
 | Finder-Einfügen von Text/Bildern (nur Dateien und Ordner) |
 
@@ -68,11 +68,11 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 
 ## Current State Reference
 
-> No requirement IDs — context
+> No requirement IDs - context
 
-- Finder-Drop in den Explorer: `src/modules/explorer/lib/useExplorerFileDrop.ts` — Ziel = Ordner unter dem Zeiger, Datei → deren Ordner, freie Fläche → Wurzel; Zielmarkierung beim Ziehen; Fehler-Toast `Copy failed: {error}`.
-- Kopieren lokal: `fs_copy` in `src-tauri/src/modules/fs/mutate.rs` — Ziel auf freigegebene Workspace-Wurzeln begrenzt, Quellen beliebige lokale Pfade, verweigert existierende Ziele inkl. hängender Symlinks, bricht beim ersten Fehler ab.
-- Kopieren SSH: `ssh::copy` in `src-tauri/src/modules/ssh.rs` — lädt rekursiv hoch, verweigert existierende Ziele.
+- Finder-Drop in den Explorer: `src/modules/explorer/lib/useExplorerFileDrop.ts` - Ziel = Ordner unter dem Zeiger, Datei → deren Ordner, freie Fläche → Wurzel; Zielmarkierung beim Ziehen; Fehler-Toast `Copy failed: {error}`.
+- Kopieren lokal: `fs_copy` in `src-tauri/src/modules/fs/mutate.rs` - Ziel auf freigegebene Workspace-Wurzeln begrenzt, Quellen beliebige lokale Pfade, verweigert existierende Ziele inkl. hängender Symlinks, bricht beim ersten Fehler ab.
+- Kopieren SSH: `ssh::copy` in `src-tauri/src/modules/ssh.rs` - lädt rekursiv hoch, verweigert existierende Ziele.
 - Explorer-Watcher: `src/modules/explorer/lib/watch.ts` (`fs_watch_add`/`fs_watch_remove`, Event `fs:changed`).
 - Git-Status-Konsumenten: Source-Control-Panel, Git-Tabs (Diff/History/Commit-Datei), Explorer-Git-Farben (`useGitStatus.ts`), Statusleisten-Widgets `git-branch`, `git-sync`, `git-changes`, `git-staged` (`statusbar/widgets/GitWidgets.tsx`, über `ctx.sourceControl`).
 - Editor-Speichern: `Mod-s`-Keybinding im CodeMirror (`EditorPane.tsx:241`, `saveRef`).
@@ -85,7 +85,7 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 
 ## UI Patterns
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 ### Reused Patterns
 
@@ -133,7 +133,7 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 
 ## UI Layout & Context
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 ### Screen: Explorer (Sidebar)
 **Position:** linke Sidebar, Ansicht Explorer
@@ -239,7 +239,7 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 
 ## Compliance & Security Surface
 
-> No requirement IDs — covered via BR-6
+> No requirement IDs - covered via BR-6
 
 | Fläche | Berührt? | Notiz |
 |--------|----------|-------|
@@ -257,18 +257,18 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 
 | ID | Entry Point | Trigger | Signal today | Signal after | Notes |
 |----|-------------|---------|--------------|--------------|-------|
-| TG-1 | Explorer | ⌘V mit Explorer-Fokus | none | none — deliberate | Terax hat keine Telemetrie |
-| TG-2 | Explorer | Kontextmenü `Paste` | none | none — deliberate | -- |
-| TG-3 | Explorer | Finder-Drop | none | none — deliberate | geändertes Konfliktverhalten |
-| TG-4 | Fenster | Sichtbarkeit wechselt | none | none — deliberate | steuert Animationen + Media |
-| TG-5 | Sidebar | zu-/aufklappen, Ansicht wechseln | none | none — deliberate | steuert Watcher + git status |
-| TG-6 | Editor | ⌘S | none | none — deliberate | -- |
+| TG-1 | Explorer | ⌘V mit Explorer-Fokus | none | none - deliberate | Terax hat keine Telemetrie |
+| TG-2 | Explorer | Kontextmenü `Paste` | none | none - deliberate | -- |
+| TG-3 | Explorer | Finder-Drop | none | none - deliberate | geändertes Konfliktverhalten |
+| TG-4 | Fenster | Sichtbarkeit wechselt | none | none - deliberate | steuert Animationen + Media |
+| TG-5 | Sidebar | zu-/aufklappen, Ansicht wechseln | none | none - deliberate | steuert Watcher + git status |
+| TG-6 | Editor | ⌘S | none | none - deliberate | -- |
 
 ---
 
 ## Implementation Slices
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 ### Dependencies
 
@@ -294,18 +294,18 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 
 ### Recommended Order
 
-1. **Slice 1:** Kern-Picks — schließt die Sicherheitslücke zuerst, kleinstes Risiko.
-2. **Slice 3:** Einfügen + Drop — größter Nutzwert, unabhängig von Perf.
-3. **Slice 2 → 5:** Media-Pause, dann Animationen — teilen den Fenster-Sichtbarkeits-Zustand.
-4. **Slice 4:** Sichtbare Konsumenten — mit Messung.
-5. **Slice 6:** Lazy-Start — größter Konfliktbrocken (`vite.config`, `App.tsx`) zuletzt vor Deps.
-6. **Slice 7:** Deps + 0.8.7 — Abschluss, alle Gates.
+1. **Slice 1:** Kern-Picks - schließt die Sicherheitslücke zuerst, kleinstes Risiko.
+2. **Slice 3:** Einfügen + Drop - größter Nutzwert, unabhängig von Perf.
+3. **Slice 2 → 5:** Media-Pause, dann Animationen - teilen den Fenster-Sichtbarkeits-Zustand.
+4. **Slice 4:** Sichtbare Konsumenten - mit Messung.
+5. **Slice 6:** Lazy-Start - größter Konfliktbrocken (`vite.config`, `App.tsx`) zuletzt vor Deps.
+6. **Slice 7:** Deps + 0.8.7 - Abschluss, alle Gates.
 
 ---
 
 ## Context & Research
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 ### Ghostty-Bewertung (Fork-Feature-Matrix, Kurzfassung)
 
@@ -320,8 +320,8 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 | tmux-Copy mit ⌥ | Upstream nutzt ⇧; ⌥ = Rechteck-Auswahl | S |
 | Pane-Fokus dim/desaturate | bricht (Pixel im gemeinsamen Canvas unter dem DOM) | M |
 | SSH/tmux pro Pane, Reconnect-Hinweis | fehlt upstream, neu verdrahten | M |
-| Eigene OSC/DCS-Hooks in JS | nicht möglich, nur feste Ereignisliste; neue Codes brauchen Zig + WASM-Rebuild | — |
-| Gesamt | 105 Konfliktdateien; A = 5–7 Wellen, C (nur PTY-Transport) = 2 Wellen | — |
+| Eigene OSC/DCS-Hooks in JS | nicht möglich, nur feste Ereignisliste; neue Codes brauchen Zig + WASM-Rebuild | - |
+| Gesamt | 105 Konfliktdateien; A = 5–7 Wellen, C (nur PTY-Transport) = 2 Wellen | - |
 
 ### Similar Patterns in Codebase
 | Feature | Location | Relevant because |
@@ -335,7 +335,7 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 | Source | Finding |
 |--------|---------|
 | [gpuweb Implementation Status](https://github.com/gpuweb/gpuweb/wiki/Implementation-Status) | WebGPU ab macOS 26 standardmäßig an |
-| [Apple Developer Forums 770862](https://developer.apple.com/forums/thread/770862) | Safari-Flags wirken nicht auf WKWebView; WKWebView-WebGPU erst, wenn default an — für Tauri nicht direkt belegt |
+| [Apple Developer Forums 770862](https://developer.apple.com/forums/thread/770862) | Safari-Flags wirken nicht auf WKWebView; WKWebView-WebGPU erst, wenn default an - für Tauri nicht direkt belegt |
 | [coder/ghostty-web](https://github.com/coder/ghostty-web) | vergleichbarer Ansatz (Ghostty-WASM als xterm-Ersatz), jung, offiziell nur Chrome |
 | Upstream-Issues #1372, #1365, #1364, #1362, #1357 | macOS-Regressionen von 0.9.0 (Unschärfe, Speed, Scroll, Overflow, Links) |
 
@@ -343,7 +343,7 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 
 ## Open Questions
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 | # | Question | Options | Recommended | Decision |
 |---|----------|---------|-------------|----------|
@@ -354,20 +354,20 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 
 ## Nebenfunde
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 | Befund | Beleg |
 |--------|-------|
 | Upstream #1309 ist derselbe `panic=abort`-SIGABRT unter macOS 27, den der Fork in `ea901ca` behoben hat | `gh issue view 1309 --repo crynta/terax-ai` |
-| Upstream #1319 wünscht Pane-Verschieben zwischen Tabs/Splits ohne Neustart — im Fork mit Panes-Wellen A+B gebaut | `gh issue view 1319 --repo crynta/terax-ai` |
+| Upstream #1319 wünscht Pane-Verschieben zwischen Tabs/Splits ohne Neustart - im Fork mit Panes-Wellen A+B gebaut | `gh issue view 1319 --repo crynta/terax-ai` |
 | Upstream-0.9.0-Update setzt `terminalRenderer: "webgl"` still auf `"auto"` | Kommentar in #1372 |
-| Dry-Run-Agent nahm an, Finder-Einfügen bräuchte für SSH einen eigenen Weg — falsch, `fs_copy` leitet SSH schon an `ssh::copy` | `src-tauri/src/modules/fs/mutate.rs:227-229` |
+| Dry-Run-Agent nahm an, Finder-Einfügen bräuchte für SSH einen eigenen Weg - falsch, `fs_copy` leitet SSH schon an `ssh::copy` | `src-tauri/src/modules/fs/mutate.rs:227-229` |
 
 ---
 
 ## Research Log
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 | Date | Area | Finding |
 |------|------|---------|
@@ -391,20 +391,20 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 
 ## Q&A Log
 
-> No requirement IDs — context
+> No requirement IDs - context
 
 | # | Question | Answer |
 |---|----------|--------|
 | 1 | Gibt es ein GitHub-Issue zum Vorhaben? | Nicht gestellt: Issues sind im Fork deaktiviert (`gh issue list` → „repository has disabled issues“); Flow C ohne Issue. |
-| 2 | Wie gründlich soll recherchiert werden, bevor Entscheidungen fallen — essenzielle Fragen direkt oder umfassende Recherche zuerst? | Umfassend zuerst: jeden Kandidaten per cherry-pick-Dry-Run prüfen, jede Fork-Anpassung auf Ghostty mappen, WebGPU-Stand recherchieren. |
-| 3 | Wie tief soll das Discovery-Dokument werden — kurz, Standard oder detailliert? | Standard: Kandidatentabelle, Wellen, Skip-Liste, Ghostty-Feature-Matrix. |
-| 4 | Upstream 0.9.0 ersetzt das Terminal komplett; Umsteigen hieße, Cmd+Klick-Pfade, tmux pro Pane, SSH-Reconnect, Pane-Dimmen und OSC-52-Policy neu aufzubauen (5–7 Wellen), bei aktuellen macOS-Regressionen und Verlangsamung ab 9 Terminals. Wie gehen wir damit um — parken mit Kriterien, Probefahrt als Labor-App, Hybrid nur PTY-Transport, oder kompletter Umstieg? | Parken mit Wiedervorlage-Kriterien (BR-14). |
-| 5 | Was kommt in die Sync-Welle — Kern (SSRF, ⌘S, Media-Pause, clean Picks, Tests, Deps), Finder-Einfügen, Perf-Stücke, offene Upstream-PRs? | Kern + Finder → Explorer einfügen + Perf-Stücke; offene Upstream-PRs nicht. |
-| 6 | Bei Namensgleichheit bricht der Finder-Drop heute mit „already exists“ ab, Upstreams Einfügen legt „Datei copy.txt“ / „copy 2“ an. Wie sollen Einfügen und Drop sich verhalten — beide wie Finder, nur Einfügen umbenennen, oder beide abbrechen/überspringen? | Beide wie Finder (BR-1, BR-2). |
+| 2 | Wie gründlich soll recherchiert werden, bevor Entscheidungen fallen - essenzielle Fragen direkt oder umfassende Recherche zuerst? | Umfassend zuerst: jeden Kandidaten per cherry-pick-Dry-Run prüfen, jede Fork-Anpassung auf Ghostty mappen, WebGPU-Stand recherchieren. |
+| 3 | Wie tief soll das Discovery-Dokument werden - kurz, Standard oder detailliert? | Standard: Kandidatentabelle, Wellen, Skip-Liste, Ghostty-Feature-Matrix. |
+| 4 | Upstream 0.9.0 ersetzt das Terminal komplett; Umsteigen hieße, Cmd+Klick-Pfade, tmux pro Pane, SSH-Reconnect, Pane-Dimmen und OSC-52-Policy neu aufzubauen (5–7 Wellen), bei aktuellen macOS-Regressionen und Verlangsamung ab 9 Terminals. Wie gehen wir damit um - parken mit Kriterien, Probefahrt als Labor-App, Hybrid nur PTY-Transport, oder kompletter Umstieg? | Parken mit Wiedervorlage-Kriterien (BR-14). |
+| 5 | Was kommt in die Sync-Welle - Kern (SSRF, ⌘S, Media-Pause, clean Picks, Tests, Deps), Finder-Einfügen, Perf-Stücke, offene Upstream-PRs? | Kern + Finder → Explorer einfügen + Perf-Stücke; offene Upstream-PRs nicht. |
+| 6 | Bei Namensgleichheit bricht der Finder-Drop heute mit „already exists“ ab, Upstreams Einfügen legt „Datei copy.txt“ / „copy 2“ an. Wie sollen Einfügen und Drop sich verhalten - beide wie Finder, nur Einfügen umbenennen, oder beide abbrechen/überspringen? | Beide wie Finder (BR-1, BR-2). |
 | 7 | Der Finder-Drop lädt in SSH-Workspaces schon hoch, Upstream kennt kein SSH. Soll ⌘V aus dem Finder auch in SSH-Workspaces hochladen, oder nur lokal mit Hinweis? | Ja, wie der Drop, inklusive copy-Umbenennung auf dem Remote-Host. |
-| 8 | Welche der vier Perf-Stücke aus Upstreams Perf-Commit sollen rein — Animationen pausieren, Watcher nur sichtbar, git status nur sichtbar, schnellerer Start? | Alle vier. |
+| 8 | Welche der vier Perf-Stücke aus Upstreams Perf-Commit sollen rein - Animationen pausieren, Watcher nur sichtbar, git status nur sichtbar, schnellerer Start? | Alle vier. |
 | 9 | Upstream pausiert Animationen schon bei Fokusverlust; bei mehreren Spaces und Terax neben dem Browser würden Agent-Spinner einfrieren, während man hinschaut. Pause nur bei unsichtbarem Fenster oder wie Upstream? | Nur wenn unsichtbar (minimiert, verdeckt, anderer Space); dieselbe Regel für Media-Previews (BR-9, BR-12). |
 | 10 | Bisher übernahm der Fork die Upstream-Version; diesmal fehlt das Kernstück von 0.9.0. Version 0.8.7, 0.9.0 wie Upstream, oder bei 0.8.6 bleiben? | 0.8.7 (BR-19). |
-| 11 | Sign-off: Zusammenfassung mit 7 Entscheidungen, 6 Defaults (Teilfehler sammeln, Toast bei leerer Zwischenablage, ⌘V nur mit Explorer-Fokus, Zielregel, Git-Widgets als Konsumenten mit Hinweis auf geringe Ersparnis, Messung vorher/nachher), Skip-Liste und 7 Slices — passt das, Git-Status-Stück streichen, oder als Draft sichern? | Passt, schreiben; Status Ready. |
+| 11 | Sign-off: Zusammenfassung mit 7 Entscheidungen, 6 Defaults (Teilfehler sammeln, Toast bei leerer Zwischenablage, ⌘V nur mit Explorer-Fokus, Zielregel, Git-Widgets als Konsumenten mit Hinweis auf geringe Ersparnis, Messung vorher/nachher), Skip-Liste und 7 Slices - passt das, Git-Status-Stück streichen, oder als Draft sichern? | Passt, schreiben; Status Ready. |
 | 12 | Nachtrag 27.10.: Upstream hat seit der Bewertung `bf7e03d` nachgeschoben. Das Deps-Update dieser Welle kann die Hervorhebungs-Bibliothek doppelt installieren, dann färbt der Editor JS/TS still nicht mehr. Soll `bf7e03d` mit in den Scope (Teil von Slice 7)? Empfehlung: ja, weil wir genau das Deps-Update übernehmen, das den Fehler auslöst. | Ja, in Slice 7 (BR-20). |
-| 13 | Der User hat neue Wünsche genannt (tmux-Picker-Bug bei langen Namen, Bilder über SSH, Explorer-Navigation/Suche, Tab-Gruppen, Theme pro Space, tmux/Claude allgemein). Wie gehen wir vor — Vorschlag (Welle 0.8.7 unverändert + `bf7e03d`, dann beide Bugs als Fix-PR, dann je eine Discovery F1 Explorer → F3 Theme pro Space → F2 Tab-Gruppen), Bugs zuerst, sofort F1-Discovery, oder Bugs als Slices in die Welle? Empfehlung: Vorschlag, hält jeden PR klein und reviewbar. | Vorschlag so. Neue Themen stehen in `specs/open-topics.md`, nicht in dieser Discovery. |
+| 13 | Der User hat neue Wünsche genannt (tmux-Picker-Bug bei langen Namen, Bilder über SSH, Explorer-Navigation/Suche, Tab-Gruppen, Theme pro Space, tmux/Claude allgemein). Wie gehen wir vor - Vorschlag (Welle 0.8.7 unverändert + `bf7e03d`, dann beide Bugs als Fix-PR, dann je eine Discovery F1 Explorer → F3 Theme pro Space → F2 Tab-Gruppen), Bugs zuerst, sofort F1-Discovery, oder Bugs als Slices in die Welle? Empfehlung: Vorschlag, hält jeden PR klein und reviewbar. | Vorschlag so. Neue Themen stehen in `specs/open-topics.md`, nicht in dieser Discovery. |

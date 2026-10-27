@@ -40,7 +40,7 @@ Grund: Die Bestands-Behauptung „AI-SDK ist schon lazy" (Q&A #12, INV-19) hält
 
 ---
 
-## Check A — Feature Mapping (runtime-Anteil)
+## Check A - Feature Mapping (runtime-Anteil)
 
 | Item | Evidenz | Status |
 |------|---------|--------|
@@ -52,7 +52,7 @@ Grund: Die Bestands-Behauptung „AI-SDK ist schon lazy" (Q&A #12, INV-19) hält
 | BR-20 (eine Lezer-Kopie) → SVC-15/16, MIG-68/69 | heute genau 1× `@lezer+highlight@1.2.3` im Build und im Lock; Upstream nutzt dasselbe pnpm 11.9.0 mit `catalog:` + Override | PASS |
 | BR-3 / BR-21 (Staging, kein Überschreiben) lokal + SSH → SVC-1, SVC-3, API-3 | Publish-Semantik lokal und auf dem Host gemessen | PASS mit Auflagen O-3..O-5, O-10, O-11 |
 
-## Check B — Constraint Mapping (runtime-Anteil)
+## Check B - Constraint Mapping (runtime-Anteil)
 
 | Constraint | Architecture-Antwort | Evidenz | Status |
 |------------|----------------------|---------|--------|
@@ -65,7 +65,7 @@ Grund: Die Bestands-Behauptung „AI-SDK ist schon lazy" (Q&A #12, INV-19) hält
 | Dateisysteme ohne No-Replace (Risk) | exklusive Reservierung als Rückfall | exFAT gemessen: `ENOTSUP`, Rückfall funktioniert | PASS mit Auflage O-3 |
 | Windows-Build (CI `windows-latest` mit `cargo nextest`) | MIG-14 „sonst … exklusive Reservierung" | nicht messbar (kein Windows-Host); Upstream nutzt `MoveFileExW` ohne Replace | PASS mit Auflage O-4 |
 
-## Check C — Realistic Data
+## Check C - Realistic Data
 
 Keine Datenbank (architecture.md „Database Schema: N/A"). Geprüft sind die Laufzeit-Datenformate und Grenzwerte.
 
@@ -78,7 +78,7 @@ Keine Datenbank (architecture.md „Database Schema: N/A"). Geprüft sind die La
 | Externe Daten: Finder-Pasteboard | Typ `NSPasteboardTypeFileURL` je Item, Auflösung über `filePathURL` (SDK + objc2 0.3.2 vorhanden) | API PASS; Finder-Verhalten NICHT GEMESSEN (würde die Zwischenablage des Users überschreiben) |
 | SSH-Fehlertexte unbegrenzt | `ssh.rs:570` `str(ex)` | PASS |
 
-## Check D — Completeness + Dependency Version Check
+## Check D - Completeness + Dependency Version Check
 
 Existing-Projekt: Arch-Version, Pinning-Datei und aktueller Registry-Stand je Paket (gemessen am 27.10.2026 per `npm view` und crates.io-API).
 
@@ -102,7 +102,7 @@ Existing-Projekt: Arch-Version, Pinning-Datei und aktueller Registry-Stand je Pa
 
 Neu spezifizierte Mechanismen gegen Zielumgebungen: `renamex_np`/`RENAME_EXCL` (libc 0.2.189 `apple/mod.rs:3325,4761`), `renameat2`/`RENAME_NOREPLACE` (libc `linux/gnu/mod.rs:1114`, `linux/mod.rs:1216`), `codeSplitting.groups` (rolldown 1.2.6 `define-config-*.d.mts:864,881`) sind in den Fork-Versionen vorhanden.
 
-## Check F — Migration Completeness (runtime-Anteil)
+## Check F - Migration Completeness (runtime-Anteil)
 
 | Item | Evidenz | Status |
 |------|---------|--------|
@@ -111,7 +111,7 @@ Neu spezifizierte Mechanismen gegen Zielumgebungen: `renamex_np`/`RENAME_EXCL` (
 | MIG-62 `vite.config.ts` | Ziel nur „benannter Chunk für das Icon-Set"; Build-Output braucht zusätzlich die Eager/Lazy-Trennung | FAIL → R-1 |
 | Sweep Version / Lezer | Ausgangswerte gemessen (0.8.6 in drei Quellen, Lezer 1× 1.2.3) | PASS |
 
-## Check E — Pattern Consistency (Gate 1b, runtime-Anteil)
+## Check E - Pattern Consistency (Gate 1b, runtime-Anteil)
 
 | Empfehlung / Disposition | Umsetzung in architecture.md | Laufzeit-Evidenz | Status |
 |--------------------------|------------------------------|------------------|--------|
@@ -123,11 +123,11 @@ Neu spezifizierte Mechanismen gegen Zielumgebungen: `renamex_np`/`RENAME_EXCL` (
 | Anti-Slop #1 consolidate | MIG-25..39 + Guard | wie oben | PASS |
 | Anti-Slop #2, #3 | kein Laufzeit-Beleg in dieser Perspektive | – | außerhalb Perspektive (code) |
 
-## Check E2 — Bindings Coverage
+## Check E2 - Bindings Coverage
 
-N/A — kein `bindings_path` und kein `reconcile_path`.
+N/A - kein `bindings_path` und kein `reconcile_path`.
 
-## Check E3 — Existing-Behavior Invariants (runtime-Anteil)
+## Check E3 - Existing-Behavior Invariants (runtime-Anteil)
 
 | INV | Evidenz | Status |
 |-----|---------|--------|
@@ -163,7 +163,7 @@ N/A — kein `bindings_path` und kein `reconcile_path`.
 | B-01 | API-1/SVC-4: Pasteboard-Zugriff auf dem Main-Thread wie `clipboard_write_text` (`lib.rs:132-158`) | `lib.rs:139-158`: `async fn` + `run_on_main_thread` + Kanal | bestätigt |
 | B-02 | API-1: begrenztes Warten, Fehler `clipboard read timed out or was cancelled` (Research Log: 5 s) | `clipboard.rs@2723dc6:13-27` (`spawn_blocking(recv_timeout(5 s))`) | bestätigt (O-1) |
 | B-03 | `NSPasteboardTypeFileURL`, `filePathURL`, `pasteboardItems` verfügbar | objc2-app-kit 0.3.2 `NSPasteboard.rs:91,382`, `NSPasteboardItem.rs:85`; objc2-foundation `NSURL.rs:1181,1374`; SDK `NSURL.h:165` | bestätigt |
-| B-04 | Finder legt Datei-URLs je Item ab, als Dateireferenz-URLs (Assumption, SVC-4) | – | NICHT GEMESSEN — Messung würde die allgemeine Zwischenablage des Users überschreiben; e2e mit echtem Finder-⌘C ist in der Arch vorgesehen |
+| B-04 | Finder legt Datei-URLs je Item ab, als Dateireferenz-URLs (Assumption, SVC-4) | – | NICHT GEMESSEN - Messung würde die allgemeine Zwischenablage des Users überschreiben; e2e mit echtem Finder-⌘C ist in der Arch vorgesehen |
 | B-05 | Q&A #9: Sync-Commands laufen in Tauri auf dem Main-Thread | tauri-macros 2.6.3 `wrapper.rs:50` (Default `Blocking`), `:404-434` (Aufruf inline im IPC-Handler) | bestätigt |
 | B-06 | Fork-`fs_copy` ist sync | `mutate.rs:210-211` `#[tauri::command] pub fn fs_copy` | bestätigt |
 | B-07 | API-3 Ordner: exklusive Reservierung + atomarer Tausch gegen leere Reservierung | Python lokal (3.9.6, APFS) und Host (3.13.5, tmpfs + ext4): `rename(dir, leeres dir)` ok, auf nicht-leeres `ENOTEMPTY`, `mkdir` auf Vorhandenes `EEXIST` | bestätigt |
@@ -190,7 +190,7 @@ N/A — kein `bindings_path` und kein `reconcile_path`.
 | B-28 | System-WebKit 22625.1.29.11.27 (Safari 27.0), macOS 27.0 | `WebKit.framework/Resources/Info.plist`, `sw_vers` | bestätigt |
 | B-29 | WebKit meldet `hidden` bei minimiertem Fenster | Probe: `visibilitychange->hidden`, `occl=notVisible` | bestätigt |
 | B-30 | WebKit meldet `hidden` bei vollständig verdecktem Fenster | Probe: deckendes Fenster darüber → `hidden`, entfernt → `visible` | bestätigt |
-| B-31 | WebKit meldet `hidden` bei anderem Space | – | NICHT GEMESSEN — Space-Wechsel ist programmatisch nur über Mission Control/private APIs auslösbar; e2e in Slice 2 (O-7) |
+| B-31 | WebKit meldet `hidden` bei anderem Space | – | NICHT GEMESSEN - Space-Wechsel ist programmatisch nur über Mission Control/private APIs auslösbar; e2e in Slice 2 (O-7) |
 | B-32 | BR-9-Grundlage: Fokusverlust ändert die Sichtbarkeit nicht | Probe nach Wiederherstellen: `hasFocus=false`, `visible` | bestätigt |
 | B-33 | Q&A #24: `requestAnimationFrame` hält bei unsichtbarer Seite | Probe: rAF-Zähler steht während Verdeckung/Minimierung (271 bzw. 399), läuft danach weiter | bestätigt |
 | B-34 | Risk: WebKit drosselt verdeckte Seiten ohnehin | Probe: `getAnimations()[0].currentTime` bleibt bei 4603 ms, obwohl ~7 s vergangen sind (keine Rendering-Updates) | bestätigt (N-3) |
@@ -207,13 +207,13 @@ N/A — kein `bindings_path` und kein `reconcile_path`.
 | B-45 | NFR-2: Startzeit-Median aus 5 Starts der Dev-Instanz | `tauri dev` lädt vom Dev-Server (`tauri.conf.json` `devUrl` `http://localhost:1420`), nicht aus `frontendDist` | hält nur mit gebautem Frontend → O-9 |
 | B-46 | Isolierte Instanz über eigenen `identifier` + eigenes `MANAGED_PREFIX` | beide fest kodiert (`tauri.conf.json:5`, `managedTmux.ts:22`); Memory `terax-test-bridge.md` | bestätigt (N-5) |
 | B-47 | Risk/MIG-14: Dateisystem ohne No-Replace-Rename → exklusive Reservierung als Rückfall (exFAT) | exFAT-Image: `renamex_np(RENAME_EXCL)` freies Ziel `ENOTSUP`, belegtes `EEXIST`; Reservierung (Ordner auf leere Reservierung, Datei auf eigene `O_EXCL`-Datei) funktioniert; FAT unterstützt `RENAME_EXCL` | bestätigt (O-3) |
-| B-48 | Risk: SMB ohne No-Replace-Rename | – | NICHT GEMESSEN — keine SMB-Freigabe in der Umgebung |
+| B-48 | Risk: SMB ohne No-Replace-Rename | – | NICHT GEMESSEN - keine SMB-Freigabe in der Umgebung |
 | B-49 | `useSyncExternalStore` vorhanden (React ≥ 18) | gebauter React-19.2.8-Chunk exportiert `useSyncExternalStore` | bestätigt |
 | B-50 | UI-10: `getVersion()` liest `tauri.conf.json` | `"version": "0.8.6"` gesetzt (`tauri.conf.json:4`) | bestätigt |
 | B-51 | DTOs: feste Pfadlängen wären falsch (macOS 1024, Linux 4096) | `getconf PATH_MAX /` lokal 1024, Host 4096 | bestätigt |
 | B-52 | Monitoring: Lezer-Kopien über Sourcemaps zählbar | Build-Sourcemaps enthalten `.pnpm/@lezer+highlight@<ver>`-Pfade | bestätigt |
-| B-53 | Research Log: WebKit Bug 107494 (Verdeckung → Sichtbarkeit) | – | NICHT GEMESSEN — Web-Referenz; Sachverhalt durch B-30 direkt gemessen |
-| B-54 | MIG-14 „sonst … exklusive Reservierung" + Trade-off „Drop funktioniert dort (Linux/Windows) weiter" | kein Windows-Host; Upstream nutzt auf Windows `MoveFileExW` ohne `MOVEFILE_REPLACE_EXISTING` (`mutate.rs@2723dc6:157-183`); CI führt `cargo nextest` auf `windows-latest` aus (`ci.yml:107-129`) | NICHT GEMESSEN — Laufzeit Windows (O-4) |
+| B-53 | Research Log: WebKit Bug 107494 (Verdeckung → Sichtbarkeit) | – | NICHT GEMESSEN - Web-Referenz; Sachverhalt durch B-30 direkt gemessen |
+| B-54 | MIG-14 „sonst … exklusive Reservierung" + Trade-off „Drop funktioniert dort (Linux/Windows) weiter" | kein Windows-Host; Upstream nutzt auf Windows `MoveFileExW` ohne `MOVEFILE_REPLACE_EXISTING` (`mutate.rs@2723dc6:157-183`); CI führt `cargo nextest` auf `windows-latest` aus (`ci.yml:107-129`) | NICHT GEMESSEN - Laufzeit Windows (O-4) |
 
 **Self-Check:** erhoben 54 · gemessen 49 · NICHT GEMESSEN 5 (B-04, B-31, B-48, B-53, B-54) → 49 + 5 = 54.
 
