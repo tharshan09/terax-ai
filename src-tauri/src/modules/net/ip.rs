@@ -1,11 +1,7 @@
-//! Address classification for the SSRF guard. Pure: no I/O, no DNS.
-//!
-//! An IPv6 address can carry an IPv4 destination (IPv4-mapped, IPv4-compatible,
-//! NAT64, 6to4, Teredo). A dual-stack or translating network delivers such a
-//! packet to the embedded IPv4 host, so the embedded address decides the class:
-//! `::ffff:169.254.169.254` is the metadata service, not a public host.
-//! Everything outside global unicast (`2000::/3`) is treated as non-public.
+//! Pure SSRF address classes. An IPv6 address that carries an IPv4 destination
+//! takes the class of that IPv4, since a translating network delivers it there.
 
+use std::cmp;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -17,8 +13,7 @@ pub(super) enum IpKind {
 }
 
 impl IpKind {
-    /// How dangerous the class is; the highest of several addresses wins.
-    fn severity(self) -> u8 {
+    pub(super) fn severity(self) -> u8 {
         match self {
             Self::Public => 0,
             Self::Private => 1,
@@ -37,7 +32,7 @@ pub(super) fn ip_kind(ip: IpAddr) -> IpKind {
 
 fn ipv4_kind(v: Ipv4Addr) -> IpKind {
     let o = v.octets();
-    // Cloud metadata IPv4: 169.254.169.254
+    // Cloud metadata services live in link-local space (169.254.169.254).
     if v.is_link_local() {
         return IpKind::BlockedMetadata;
     }
@@ -45,7 +40,6 @@ fn ipv4_kind(v: Ipv4Addr) -> IpKind {
     if v.is_loopback() || o[0] == 0 || v.is_broadcast() || v.is_multicast() {
         return IpKind::Loopback;
     }
-    // RFC1918, CGNAT, benchmarking, IETF assignments, documentation, reserved.
     if o[0] == 10
         || (o[0] == 172 && (16..=31).contains(&o[1]))
         || (o[0] == 192 && o[1] == 168)
@@ -64,18 +58,22 @@ fn ipv4_kind(v: Ipv4Addr) -> IpKind {
 
 fn ipv6_kind(v: Ipv6Addr) -> IpKind {
     let s = v.segments();
+    let kind = prefix_kind(v, &s);
+    match isatap_ipv4(&s) {
+        Some(tunnel) => cmp::max_by_key(kind, ipv4_kind(tunnel), |k| k.severity()),
+        None => kind,
+    }
+}
+
+fn prefix_kind(v: Ipv6Addr, s: &[u16; 8]) -> IpKind {
     if v.is_unspecified() || v.is_loopback() || v.is_multicast() {
         return IpKind::Loopback;
     }
-    // Cloud metadata IPv6 (AWS): fd00:ec2::254
-    if s[0] == 0xfd00 && s[1] == 0xec2 {
+    // AWS serves instance metadata on fd00:ec2::254.
+    if (s[0] == 0xfd00 && s[1] == 0xec2) || v.is_unicast_link_local() {
         return IpKind::BlockedMetadata;
     }
-    // fe80::/10 link-local
-    if s[0] & 0xffc0 == 0xfe80 {
-        return IpKind::BlockedMetadata;
-    }
-    if let Some(embedded) = embedded_ipv4(&s) {
+    if let Some(embedded) = embedded_ipv4(s) {
         return embedded
             .into_iter()
             .flatten()
@@ -93,47 +91,60 @@ fn ipv6_kind(v: Ipv6Addr) -> IpKind {
             .max_by_key(|kind| kind.severity())
             .unwrap_or(IpKind::Private);
     }
-    // Outside global unicast: unique-local fc00::/7, site-local fec0::/10,
-    // discard 100::/64, and anything unallocated or reserved.
-    if s[0] & 0xe000 != 0x2000 {
-        return IpKind::Private;
-    }
-    // IETF protocol assignments 2001::/23 (Teredo is handled above),
-    // documentation 2001:db8::/32 and 3fff::/20.
-    if s[0] == 0x2001 && (s[1] < 0x0200 || s[1] == 0x0db8) || s[0] == 0x3fff && s[1] < 0x1000 {
+    // Deny by default: only global unicast 2000::/3 can be public.
+    if s[0] & 0xe000 != 0x2000 || is_special_purpose_non_global(s) {
         return IpKind::Private;
     }
     IpKind::Public
 }
 
-/// The IPv4 addresses a transition-mechanism IPv6 address delivers to, if it
-/// is one.
+// IANA special-purpose blocks inside 2000::/3 that are not globally reachable.
+fn is_special_purpose_non_global(s: &[u16; 8]) -> bool {
+    match *s {
+        [0x2001, 0x0db8, ..] => true,
+        [0x3fff, b, ..] => b < 0x1000,
+        [0x2001, 1, 0, 0, 0, 0, 0, 1 | 2]
+        | [0x2001, 3, ..]
+        | [0x2001, 4, 0x112, ..]
+        | [0x2001, 0x20..=0x3f, ..] => false,
+        [0x2001, b, ..] => b < 0x0200,
+        _ => false,
+    }
+}
+
+fn v4(hi: u16, lo: u16) -> Ipv4Addr {
+    let [a, b] = hi.to_be_bytes();
+    let [c, d] = lo.to_be_bytes();
+    Ipv4Addr::new(a, b, c, d)
+}
+
 fn embedded_ipv4(s: &[u16; 8]) -> Option<[Option<Ipv4Addr>; 2]> {
-    let v4 = |hi: u16, lo: u16| {
-        let [a, b] = hi.to_be_bytes();
-        let [c, d] = lo.to_be_bytes();
-        Some(Ipv4Addr::new(a, b, c, d))
-    };
-    match s {
-        // ::ffff:a.b.c.d (mapped) and ::a.b.c.d (compatible, deprecated)
-        [0, 0, 0, 0, 0, 0xffff, hi, lo] | [0, 0, 0, 0, 0, 0, hi, lo] => Some([v4(*hi, *lo), None]),
-        // ::ffff:0:a.b.c.d (SIIT-translated)
-        [0, 0, 0, 0, 0xffff, 0, hi, lo] => Some([v4(*hi, *lo), None]),
-        // 64:ff9b::/96 (NAT64)
-        [0x64, 0xff9b, 0, 0, 0, 0, hi, lo] => Some([v4(*hi, *lo), None]),
-        // 2002::/16 (6to4): the IPv4 address follows the prefix
-        [0x2002, hi, lo, ..] => Some([v4(*hi, *lo), None]),
-        // 2001:0::/32 (Teredo): server in segments 2-3, client obfuscated by
-        // inverting segments 6-7
-        [0x2001, 0, server_hi, server_lo, _, _, client_hi, client_lo] => {
-            Some([v4(*server_hi, *server_lo), v4(!*client_hi, !*client_lo)])
+    match *s {
+        [0, 0, 0, 0, 0, 0xffff, hi, lo] | [0, 0, 0, 0, 0, 0, hi, lo] => {
+            Some([Some(v4(hi, lo)), None])
         }
+        [0, 0, 0, 0, 0xffff, 0, hi, lo] => Some([Some(v4(hi, lo)), None]),
+        [0x64, 0xff9b, 0, 0, 0, 0, hi, lo] => Some([Some(v4(hi, lo)), None]),
+        [0x2002, hi, lo, ..] => Some([Some(v4(hi, lo)), None]),
+        // Teredo stores the client IPv4 bit-inverted.
+        [0x2001, 0, server_hi, server_lo, _, _, client_hi, client_lo] => Some([
+            Some(v4(server_hi, server_lo)),
+            Some(v4(!client_hi, !client_lo)),
+        ]),
         _ => None,
     }
 }
 
-/// The IPv4 candidates of a `64:ff9b:1::/48` address at the RFC 6052 offsets
-/// of prefix lengths 48, 56, 64 and 96. Byte 8 is the reserved u-octet.
+// ISATAP (RFC 5214) carries the IPv4 tunnel endpoint in the interface ID, under
+// any prefix, so it can hide behind an otherwise public /64.
+fn isatap_ipv4(s: &[u16; 8]) -> Option<Ipv4Addr> {
+    match *s {
+        [_, _, _, _, 0 | 0x0200, 0x5efe, hi, lo] => Some(v4(hi, lo)),
+        _ => None,
+    }
+}
+
+// RFC 6052 offsets for /48, /56, /64 and /96; byte 8 is the reserved u-octet.
 fn local_use_nat64_ipv4(b: &[u8; 16]) -> [Ipv4Addr; 4] {
     [
         Ipv4Addr::new(b[6], b[7], b[9], b[10]),
@@ -229,6 +240,68 @@ mod tests {
             kind("2001:0:808:808:0:0:5601:5601"),
             IpKind::BlockedMetadata
         );
+    }
+
+    #[test]
+    fn isatap_interface_ids_are_classified_by_their_ipv4_under_any_prefix() {
+        assert_eq!(kind("2400:cb00::5efe:a9fe:a9fe"), IpKind::BlockedMetadata);
+        assert_eq!(
+            kind("2400:cb00::200:5efe:169.254.169.254"),
+            IpKind::BlockedMetadata
+        );
+        assert_eq!(kind("2400:cb00::5efe:127.0.0.1"), IpKind::Loopback);
+        assert_eq!(kind("2400:cb00::200:5efe:a00:1"), IpKind::Private);
+        assert_eq!(
+            kind("2002:808:808::5efe:a9fe:a9fe"),
+            IpKind::BlockedMetadata
+        );
+        assert_eq!(kind("2400:cb00::5efe:8.8.8.8"), IpKind::Public);
+        assert_eq!(kind("2400:cb00::200:5efe:8.8.8.8"), IpKind::Public);
+    }
+
+    #[test]
+    fn isatap_with_a_public_ipv4_never_lifts_a_non_global_prefix() {
+        assert_eq!(kind("::5efe:8.8.8.8"), IpKind::Private);
+        assert_eq!(kind("fd12:3456::200:5efe:8.8.8.8"), IpKind::Private);
+        assert_eq!(kind("fe80::5efe:8.8.8.8"), IpKind::BlockedMetadata);
+    }
+
+    #[test]
+    fn globally_reachable_ietf_assignments_are_public() {
+        for addr in [
+            "2001:1::1",
+            "2001:1::2",
+            "2001:3::1",
+            "2001:3:ffff::1",
+            "2001:4:112::1",
+            "2001:4:112:ffff::1",
+            "2001:20::1",
+            "2001:2f:ffff::1",
+            "2001:30::1",
+            "2001:3f:ffff::1",
+        ] {
+            assert_eq!(kind(addr), IpKind::Public, "{addr}");
+        }
+    }
+
+    #[test]
+    fn the_rest_of_the_ietf_block_stays_private() {
+        for addr in [
+            "2001:1::",
+            "2001:1::4",
+            "2001:1::1:1",
+            "2001:2::1",
+            "2001:4::1",
+            "2001:4:113::1",
+            "2001:10::1",
+            "2001:1f:ffff::1",
+            "2001:40::1",
+            "2001:1ff:ffff::1",
+        ] {
+            assert_eq!(kind(addr), IpKind::Private, "{addr}");
+        }
+        assert_eq!(kind("2001:0:808:808:0:0:fefd:fcfb"), IpKind::Public);
+        assert_eq!(kind("2001:0:a00:1:0:0:fefd:fcfb"), IpKind::Private);
     }
 
     #[test]

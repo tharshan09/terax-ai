@@ -1,13 +1,17 @@
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::io;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::StreamExt;
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use reqwest::Method;
+use reqwest::{ClientBuilder, Method, Url};
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
+use url::Host;
 
 mod ip;
 use ip::{ip_kind, IpKind};
@@ -25,8 +29,14 @@ const HEADER_BLOCKLIST: &[&str] = &[
     "expect",
 ];
 
+type Lookup = fn(&str) -> io::Result<Vec<IpAddr>>;
+
+fn system_lookup(host: &str) -> io::Result<Vec<IpAddr>> {
+    Ok((host, 0u16).to_socket_addrs()?.map(|a| a.ip()).collect())
+}
+
 fn is_blocked_host_name(host: &str) -> bool {
-    let host = host.to_ascii_lowercase();
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
     matches!(
         host.as_str(),
         "metadata.google.internal" | "metadata" | "metadata.azure.com"
@@ -36,88 +46,100 @@ fn is_blocked_host_name(host: &str) -> bool {
 /// Resolve `host` once and return both its safety classification and the
 /// concrete IPs we resolved. Callers can pin reqwest to these IPs to defeat
 /// DNS rebinding (where a second lookup returns a different address).
-async fn resolve_and_classify(host: &str) -> Result<(IpKind, Vec<IpAddr>), String> {
-    // Direct literal? Skip DNS. `Url::host_str` keeps the brackets of IPv6.
-    if let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>() {
-        return Ok((ip_kind(ip), vec![ip]));
-    }
-    let host_owned = host.to_string();
-    let lookup = tokio::task::spawn_blocking(move || {
-        (host_owned.as_str(), 0u16)
-            .to_socket_addrs()
-            .map(|it| it.map(|a| a.ip()).collect::<Vec<_>>())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| format!("dns: {e}"))?;
-    if lookup.is_empty() {
-        return Err("dns: no addresses".into());
-    }
-    let mut worst = IpKind::Public;
-    for ip in &lookup {
-        let k = ip_kind(*ip);
-        worst = match (worst, k) {
-            (_, IpKind::BlockedMetadata) => IpKind::BlockedMetadata,
-            (IpKind::BlockedMetadata, _) => IpKind::BlockedMetadata,
-            (IpKind::Public, x) => x,
-            (x, IpKind::Public) => x,
-            (a, _) => a,
-        };
-    }
-    Ok((worst, lookup))
+async fn resolve_and_classify(
+    host: &Host<&str>,
+    lookup: Lookup,
+) -> Result<(IpKind, Vec<IpAddr>), String> {
+    let ips = match *host {
+        Host::Ipv4(ip) => vec![IpAddr::V4(ip)],
+        Host::Ipv6(ip) => vec![IpAddr::V6(ip)],
+        Host::Domain(name) => {
+            let name = name.to_owned();
+            tokio::task::spawn_blocking(move || lookup(&name))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| format!("dns: {e}"))?
+        }
+    };
+    let worst = ips
+        .iter()
+        .map(|ip| ip_kind(*ip))
+        .max_by_key(|kind| kind.severity())
+        .ok_or("dns: no addresses")?;
+    Ok((worst, ips))
 }
 
-use std::net::ToSocketAddrs;
-
-fn validate_url(url: &str, allow_private: bool) -> Result<reqwest::Url, String> {
-    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
-    match parsed.scheme() {
+fn check_url_shape(url: &Url) -> Result<Host<&str>, String> {
+    match url.scheme() {
         "http" | "https" => {}
         s => return Err(format!("scheme not allowed: {s}")),
     }
-    if parsed.username() != "" || parsed.password().is_some() {
+    if !url.username().is_empty() || url.password().is_some() {
         return Err("userinfo in url is not allowed".into());
     }
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| "missing host".to_string())?;
-    if is_blocked_host_name(host) {
+    let host = url.host().ok_or_else(|| "missing host".to_string())?;
+    if matches!(host, Host::Domain(name) if is_blocked_host_name(name)) {
         return Err(format!("host not allowed: {host}"));
     }
-    // The actual IP classification has to be async — caller does it.
-    let _ = allow_private;
+    Ok(host)
+}
+
+fn validate_url(url: &str) -> Result<Url, String> {
+    let parsed = Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
+    check_url_shape(&parsed)?;
     Ok(parsed)
+}
+
+fn admit(host: &Host<&str>, kind: IpKind, allow_private: bool) -> Result<(), String> {
+    match kind {
+        IpKind::BlockedMetadata => Err(format!("host not allowed: {host}")),
+        IpKind::Loopback | IpKind::Private if !allow_private => Err(format!(
+            "host {host} resolves to a private/loopback address; this endpoint requires explicit opt-in",
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// Classify the host AND return safe IPs to pin reqwest's resolver to.
 /// Defeats DNS rebinding (second-lookup-returns-different-IP) by reusing
 /// exactly the addresses that passed `ip_kind`.
 async fn classify_and_collect_safe_ips(
-    host: &str,
+    host: &Host<&str>,
     allow_private: bool,
+    lookup: Lookup,
 ) -> Result<Vec<IpAddr>, String> {
-    let (worst, ips) = resolve_and_classify(host).await?;
-    match worst {
-        IpKind::BlockedMetadata => return Err(format!("host not allowed: {host}")),
-        IpKind::Loopback | IpKind::Private if !allow_private => {
-            return Err(format!(
-                "host {host} resolves to a private/loopback address; this endpoint requires explicit opt-in",
-            ));
-        }
-        _ => {}
-    }
-    let safe: Vec<IpAddr> = ips
-        .into_iter()
-        .filter(|ip| match ip_kind(*ip) {
-            IpKind::BlockedMetadata => false,
-            IpKind::Loopback | IpKind::Private => allow_private,
-            IpKind::Public => true,
+    let (worst, ips) = resolve_and_classify(host, lookup).await?;
+    admit(host, worst, allow_private)?;
+    Ok(ips)
+}
+
+// Names the client looks up itself, redirect hops to another host included,
+// pass the same classification as the request target.
+struct GuardedResolver {
+    allow_private: bool,
+    lookup: Lookup,
+}
+
+impl Resolve for GuardedResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let (allow_private, lookup) = (self.allow_private, self.lookup);
+        Box::pin(async move {
+            let host = Host::Domain(name.as_str());
+            let ips = classify_and_collect_safe_ips(&host, allow_private, lookup).await?;
+            let addrs: Addrs = Box::new(ips.into_iter().map(|ip| SocketAddr::new(ip, 0)));
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(addrs)
         })
-        .collect();
-    if safe.is_empty() {
-        return Err(format!("host {host}: no safe IPs"));
     }
-    Ok(safe)
+}
+
+// Connect to exactly the classified addresses instead of looking the name up
+// again; port 0 is replaced by the URL's port.
+fn pin_to(builder: ClientBuilder, host: &Host<&str>, ips: &[IpAddr]) -> ClientBuilder {
+    let Host::Domain(name) = *host else {
+        return builder;
+    };
+    let addrs: Vec<SocketAddr> = ips.iter().map(|ip| SocketAddr::new(*ip, 0)).collect();
+    builder.resolve_to_addrs(name, &addrs)
 }
 
 fn sanitize_headers(headers: Option<HashMap<String, String>>) -> Result<HeaderMap, String> {
@@ -146,19 +168,16 @@ pub async fn lm_ping(base_url: String) -> Result<u16, String> {
         return Err("empty base url".into());
     }
     let probe = format!("{trimmed}/models");
-    let parsed = validate_url(&probe, true)?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| "missing host".to_string())?
-        .to_string();
-    let safe_ips = classify_and_collect_safe_ips(&host, true).await?;
+    let parsed = validate_url(&probe)?;
+    let host = parsed.host().ok_or_else(|| "missing host".to_string())?;
+    let safe_ips = classify_and_collect_safe_ips(&host, true, system_lookup).await?;
 
-    let mut builder = reqwest::Client::builder()
+    let builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::none());
-    let addrs: Vec<SocketAddr> = safe_ips.iter().map(|ip| SocketAddr::new(*ip, 0)).collect();
-    builder = builder.resolve_to_addrs(&host, &addrs);
-    let client = builder.build().map_err(|e| e.to_string())?;
+    let client = pin_to(builder, &host, &safe_ips)
+        .build()
+        .map_err(|e| e.to_string())?;
     client
         .get(parsed)
         .send()
@@ -179,7 +198,7 @@ pub struct HttpResponse {
 fn build_request(
     client: &reqwest::Client,
     method: &str,
-    url: reqwest::Url,
+    url: Url,
     headers: Option<HashMap<String, String>>,
     body: Option<Vec<u8>>,
 ) -> Result<reqwest::RequestBuilder, String> {
@@ -195,22 +214,17 @@ fn build_request(
 
 fn build_safe_client(
     allow_private: bool,
-    pinned: &[(String, Vec<IpAddr>)],
+    host: &Host<&str>,
+    safe_ips: &[IpAddr],
+    lookup: Lookup,
 ) -> Result<reqwest::Client, String> {
-    let mut builder = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10));
-    // Pin reqwest's resolver to the IPs we just classified. Without this,
-    // reqwest's own DNS lookup could return a different (private/metadata) IP
-    // for the same hostname between classify and connect — classic DNS
-    // rebinding attack. We pin port 0 because reqwest fills in the actual
-    // port from the URL when wiring up the override map.
-    for (host, ips) in pinned {
-        let addrs: Vec<SocketAddr> = ips.iter().map(|ip| SocketAddr::new(*ip, 0)).collect();
-        if !addrs.is_empty() {
-            builder = builder.resolve_to_addrs(host, &addrs);
-        }
-    }
-    builder
+    let builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .dns_resolver(Arc::new(GuardedResolver {
+            allow_private,
+            lookup,
+        }));
+    pin_to(builder, host, safe_ips)
         .redirect(reqwest::redirect::Policy::custom(
             move |attempt| match redirect_decision(
                 attempt.url(),
@@ -234,47 +248,30 @@ enum RedirectDecision {
     TooMany,
 }
 
-/// Scheme, userinfo and host checks mirror the request validation. Without
-/// `allow_private` a redirect may not leave the host whose addresses were
-/// pinned, so a public API cannot bounce a request onto an internal address.
 fn redirect_decision(
-    next: &reqwest::Url,
-    last_previous: Option<&reqwest::Url>,
+    next: &Url,
+    last_previous: Option<&Url>,
     previous_len: usize,
     allow_private: bool,
 ) -> RedirectDecision {
     if previous_len > 10 {
         return RedirectDecision::TooMany;
     }
-    match next.scheme() {
-        "http" | "https" => {}
-        _ => return RedirectDecision::Stop,
-    }
-    if next.username() != "" || next.password().is_some() {
-        return RedirectDecision::Stop;
-    }
-    let Some(host) = next.host_str() else {
+    let Ok(host) = check_url_shape(next) else {
         return RedirectDecision::Stop;
     };
-    if is_blocked_host_name(host) {
-        return RedirectDecision::Stop;
+    let allowed = match host {
+        Host::Ipv4(ip) => admit(&host, ip_kind(ip.into()), allow_private).is_ok(),
+        Host::Ipv6(ip) => admit(&host, ip_kind(ip.into()), allow_private).is_ok(),
+        Host::Domain(_) => {
+            allow_private || last_previous.is_none_or(|prev| prev.host().is_some_and(|h| h == host))
+        }
+    };
+    if allowed {
+        RedirectDecision::Follow
+    } else {
+        RedirectDecision::Stop
     }
-    if let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>() {
-        let kind = ip_kind(ip);
-        if kind == IpKind::BlockedMetadata {
-            return RedirectDecision::Stop;
-        }
-        if !allow_private && matches!(kind, IpKind::Loopback | IpKind::Private) {
-            return RedirectDecision::Stop;
-        }
-    } else if !allow_private {
-        if let Some(prev) = last_previous {
-            if prev.host_str() != Some(host) {
-                return RedirectDecision::Stop;
-            }
-        }
-    }
-    RedirectDecision::Follow
 }
 
 fn header_map_to_strings(headers: &HeaderMap) -> HashMap<String, String> {
@@ -296,14 +293,11 @@ pub async fn ai_http_request(
     allow_private_network: Option<bool>,
 ) -> Result<HttpResponse, String> {
     let allow_private = allow_private_network.unwrap_or(false);
-    let parsed = validate_url(&url, allow_private)?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| "missing host".to_string())?
-        .to_string();
-    let safe_ips = classify_and_collect_safe_ips(&host, allow_private).await?;
+    let parsed = validate_url(&url)?;
+    let host = parsed.host().ok_or_else(|| "missing host".to_string())?;
+    let safe_ips = classify_and_collect_safe_ips(&host, allow_private, system_lookup).await?;
 
-    let client = build_safe_client(allow_private, &[(host, safe_ips)])?;
+    let client = build_safe_client(allow_private, &host, &safe_ips, system_lookup)?;
 
     let req = build_request(&client, &method, parsed, headers, body)?;
     let resp = req.send().await.map_err(|e| e.to_string())?;
@@ -344,22 +338,22 @@ pub async fn ai_http_stream(
     on_event: Channel<AiStreamEvent>,
 ) -> Result<(), String> {
     let allow_private = allow_private_network.unwrap_or(false);
-    let parsed = match validate_url(&url, allow_private) {
+    let parsed = match validate_url(&url) {
         Ok(p) => p,
         Err(e) => {
             let _ = on_event.send(AiStreamEvent::Error { message: e.clone() });
             return Err(e);
         }
     };
-    let host = match parsed.host_str() {
-        Some(h) => h.to_string(),
+    let host = match parsed.host() {
+        Some(h) => h,
         None => {
             let e = "missing host".to_string();
             let _ = on_event.send(AiStreamEvent::Error { message: e.clone() });
             return Err(e);
         }
     };
-    let safe_ips = match classify_and_collect_safe_ips(&host, allow_private).await {
+    let safe_ips = match classify_and_collect_safe_ips(&host, allow_private, system_lookup).await {
         Ok(v) => v,
         Err(e) => {
             let _ = on_event.send(AiStreamEvent::Error { message: e.clone() });
@@ -367,7 +361,7 @@ pub async fn ai_http_stream(
         }
     };
 
-    let client = build_safe_client(allow_private, &[(host, safe_ips)])?;
+    let client = build_safe_client(allow_private, &host, &safe_ips, system_lookup)?;
 
     let req = build_request(&client, &method, parsed, headers, body)?;
     let resp = match req.send().await {
@@ -415,7 +409,81 @@ pub async fn ai_http_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use std::io::{Read, Write};
+    use std::net::{Ipv4Addr, TcpListener};
+    use std::thread::JoinHandle;
+
+    fn no_dns(host: &str) -> io::Result<Vec<IpAddr>> {
+        Err(io::Error::other(format!("{host} must not reach DNS")))
+    }
+
+    fn fake_dns(host: &str) -> io::Result<Vec<IpAddr>> {
+        let records: &[&str] = match host {
+            "metadata-alias.test" => &["169.254.169.254"],
+            "loopback-alias.test" => &["127.0.0.1"],
+            "private-then-loopback.test" => &["10.0.0.1", "127.0.0.1"],
+            "loopback-then-private.test" => &["127.0.0.1", "10.0.0.1"],
+            "public-and-metadata.test" => &["8.8.8.8", "fd00:ec2::254"],
+            _ => return Err(io::ErrorKind::NotFound.into()),
+        };
+        Ok(records.iter().map(|r| r.parse().unwrap()).collect())
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    fn url(s: &str) -> Url {
+        Url::parse(s).unwrap()
+    }
+
+    fn error_chain(err: &dyn std::error::Error) -> String {
+        let mut out = err.to_string();
+        let mut source = err.source();
+        while let Some(e) = source {
+            out.push_str(": ");
+            out.push_str(&e.to_string());
+            source = e.source();
+        }
+        out
+    }
+
+    fn serve(responses: impl FnOnce(u16) -> Vec<String> + Send + 'static) -> (u16, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            for response in responses(port) {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut head = Vec::new();
+                let mut buf = [0u8; 512];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = stream.read(&mut buf).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    head.extend_from_slice(&buf[..n]);
+                }
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        (port, server)
+    }
+
+    fn redirect_to(name: &str, port: u16) -> String {
+        format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://{name}:{port}/landed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+    }
+
+    const LANDED: &str = "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nlanded";
+
+    fn loopback_client(lookup: Lookup) -> reqwest::Client {
+        let origin = Host::Ipv4(Ipv4Addr::LOCALHOST);
+        build_safe_client(true, &origin, &[Ipv4Addr::LOCALHOST.into()], lookup).unwrap()
+    }
 
     #[test]
     fn metadata_ips_classified_as_blocked() {
@@ -490,10 +558,8 @@ mod tests {
 
     #[test]
     fn embedded_ipv4_literals_cannot_smuggle_internal_hosts_past_the_guard() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        for (host, kind) in [
+        let rt = runtime();
+        for (literal, kind) in [
             ("[::ffff:127.0.0.1]", IpKind::Loopback),
             ("[::ffff:169.254.169.254]", IpKind::BlockedMetadata),
             ("[::ffff:10.0.0.1]", IpKind::Private),
@@ -501,32 +567,99 @@ mod tests {
             ("[2002:7f00:1::]", IpKind::Loopback),
             ("[::127.0.0.1]", IpKind::Loopback),
         ] {
-            let (found, _) = rt.block_on(resolve_and_classify(host)).unwrap();
-            assert_eq!(found, kind, "{host}");
-            let refused = rt.block_on(classify_and_collect_safe_ips(host, false));
-            assert!(refused.is_err(), "{host} must need explicit opt-in");
-            let opted_in = rt.block_on(classify_and_collect_safe_ips(host, true));
+            let parsed = url(&format!("http://{literal}/"));
+            let host = parsed.host().unwrap();
+            let (found, _) = rt.block_on(resolve_and_classify(&host, no_dns)).unwrap();
+            assert_eq!(found, kind, "{literal}");
+            let refused = rt.block_on(classify_and_collect_safe_ips(&host, false, no_dns));
+            assert!(refused.is_err(), "{literal} must need explicit opt-in");
+            let opted_in = rt.block_on(classify_and_collect_safe_ips(&host, true, no_dns));
             assert_eq!(
                 opted_in.is_err(),
                 kind == IpKind::BlockedMetadata,
-                "{host}: metadata stays blocked even with opt-in"
+                "{literal}: metadata stays blocked even with opt-in"
             );
         }
+        let parsed = url("http://[::ffff:8.8.8.8]/");
         let (kind, _) = rt
-            .block_on(resolve_and_classify("[::ffff:8.8.8.8]"))
+            .block_on(resolve_and_classify(&parsed.host().unwrap(), no_dns))
             .unwrap();
         assert_eq!(kind, IpKind::Public);
     }
 
     #[test]
-    fn ipv6_literal_urls_are_classified_instead_of_failing_dns() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
+    fn dns_records_take_the_most_dangerous_class_in_any_order() {
+        let rt = runtime();
+        for (name, kind) in [
+            ("private-then-loopback.test", IpKind::Loopback),
+            ("loopback-then-private.test", IpKind::Loopback),
+            ("public-and-metadata.test", IpKind::BlockedMetadata),
+        ] {
+            let (found, ips) = rt
+                .block_on(resolve_and_classify(&Host::Domain(name), fake_dns))
+                .unwrap();
+            assert_eq!(found, kind, "{name}");
+            assert_eq!(ips.len(), 2, "{name}");
+        }
+    }
+
+    #[test]
+    fn guarded_resolver_classifies_every_name_it_resolves() {
+        let rt = runtime();
+        let resolve = |name: &str, allow_private: bool| {
+            let resolver = GuardedResolver {
+                allow_private,
+                lookup: fake_dns,
+            };
+            rt.block_on(resolver.resolve(name.parse().unwrap()))
+                .map(|addrs| addrs.collect::<Vec<_>>())
+                .map_err(|e| e.to_string())
+        };
+        let blocked = resolve("metadata-alias.test", true).unwrap_err();
+        assert_eq!(blocked, "host not allowed: metadata-alias.test");
+        let refused = resolve("loopback-alias.test", false).unwrap_err();
+        assert!(refused.contains("requires explicit opt-in"), "{refused}");
+        assert_eq!(
+            resolve("loopback-alias.test", true).unwrap(),
+            vec![SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)]
+        );
+    }
+
+    #[test]
+    fn redirect_to_a_name_with_a_metadata_record_is_refused_even_with_private_access() {
+        let (port, server) = serve(|port| vec![redirect_to("metadata-alias.test", port)]);
+        let client = loopback_client(fake_dns);
+        let err = runtime()
+            .block_on(client.get(format!("http://127.0.0.1:{port}/")).send())
+            .unwrap_err();
+        let chain = error_chain(&err);
+        assert!(
+            chain.contains("host not allowed: metadata-alias.test"),
+            "{chain}"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn redirect_hops_to_another_name_resolve_through_the_guard() {
+        let (port, server) =
+            serve(|port| vec![redirect_to("loopback-alias.test", port), LANDED.to_string()]);
+        let client = loopback_client(fake_dns);
+        let resp = runtime()
+            .block_on(client.get(format!("http://127.0.0.1:{port}/")).send())
             .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.url().host_str(), Some("loopback-alias.test"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn ipv6_literal_urls_are_classified_instead_of_failing_dns() {
+        let rt = runtime();
         let classify = |url: &str, allow_private: bool| {
-            let parsed = validate_url(url, allow_private).unwrap();
-            let host = parsed.host_str().unwrap().to_string();
-            rt.block_on(classify_and_collect_safe_ips(&host, allow_private))
+            let parsed = validate_url(url).unwrap();
+            let host = parsed.host().unwrap();
+            rt.block_on(classify_and_collect_safe_ips(&host, allow_private, no_dns))
         };
         let refused = classify("http://[::ffff:127.0.0.1]:11434/", false).unwrap_err();
         assert!(refused.contains("requires explicit opt-in"), "{refused}");
@@ -536,10 +669,6 @@ mod tests {
         );
         let blocked = classify("http://[::ffff:169.254.169.254]/", true).unwrap_err();
         assert!(blocked.starts_with("host not allowed: "), "{blocked}");
-    }
-
-    fn url(s: &str) -> reqwest::Url {
-        reqwest::Url::parse(s).unwrap()
     }
 
     #[test]
@@ -621,20 +750,67 @@ mod tests {
     }
 
     #[test]
+    fn redirects_to_another_name_need_private_access() {
+        let from = url("https://api.example.com/v1");
+        assert_eq!(
+            redirect_decision(&url("https://api.example.com/v2"), Some(&from), 1, false),
+            RedirectDecision::Follow
+        );
+        assert_eq!(
+            redirect_decision(&url("https://cdn.example.com/"), Some(&from), 1, false),
+            RedirectDecision::Stop
+        );
+        assert_eq!(
+            redirect_decision(&url("https://cdn.example.com/"), Some(&from), 1, true),
+            RedirectDecision::Follow
+        );
+        assert_eq!(
+            redirect_decision(&url("https://cdn.example.com/"), Some(&from), 11, true),
+            RedirectDecision::TooMany
+        );
+    }
+
+    #[test]
     fn validate_url_blocks_userinfo_and_metadata_hostnames() {
         // URLs with userinfo can confuse browsers / leak creds in redirects.
-        assert!(validate_url("http://user:pass@example.com/", true).is_err());
+        assert!(validate_url("http://user:pass@example.com/").is_err());
         // Cloud metadata-by-name.
-        assert!(validate_url("http://metadata.google.internal/", true).is_err());
-        assert!(validate_url("http://metadata/", true).is_err());
-        assert!(validate_url("http://metadata.azure.com/", true).is_err());
+        assert!(validate_url("http://metadata.google.internal/").is_err());
+        assert!(validate_url("http://metadata/").is_err());
+        assert!(validate_url("http://metadata.azure.com/").is_err());
+    }
+
+    #[test]
+    fn metadata_hostnames_stay_blocked_with_a_trailing_dot_or_capitals() {
+        for target in [
+            "http://metadata.google.internal./computeMetadata/v1/",
+            "http://METADATA.Google.Internal./",
+            "http://metadata./",
+            "http://metadata.azure.com../",
+        ] {
+            let refused = validate_url(target).unwrap_err();
+            assert!(
+                refused.starts_with("host not allowed: "),
+                "{target}: {refused}"
+            );
+            assert_eq!(
+                redirect_decision(
+                    &url(target),
+                    Some(&url("https://api.example.com/")),
+                    1,
+                    true
+                ),
+                RedirectDecision::Stop,
+                "{target}"
+            );
+        }
     }
 
     #[test]
     fn validate_url_rejects_non_http_schemes() {
-        assert!(validate_url("ftp://example.com/", true).is_err());
-        assert!(validate_url("file:///etc/passwd", true).is_err());
-        assert!(validate_url("javascript:alert(1)", true).is_err());
+        assert!(validate_url("ftp://example.com/").is_err());
+        assert!(validate_url("file:///etc/passwd").is_err());
+        assert!(validate_url("javascript:alert(1)").is_err());
     }
 
     #[test]
