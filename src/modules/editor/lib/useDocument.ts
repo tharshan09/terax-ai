@@ -25,7 +25,32 @@ type Options = {
   onDirtyChange?: (dirty: boolean) => void;
 };
 
-type DocTarget = { path: string; workspace?: WorkspaceEnv };
+// One per loaded file: a hung write of the previous file never holds up or
+// race-checks the saves and reloads of the next one.
+type DocTarget = {
+  path: string;
+  workspace?: WorkspaceEnv;
+  // One save at a time: a later one waits, so its conflict check compares
+  // against the mtime of our own write instead of reporting it as a conflict.
+  queue: Promise<unknown>;
+  // Bumped as each write starts and ends, so odd while one runs.
+  writeGen: number;
+  rereadPending: boolean;
+};
+
+function newTarget(path: string, workspace?: WorkspaceEnv): DocTarget {
+  return {
+    path,
+    workspace,
+    queue: Promise.resolve(),
+    writeGen: 0,
+    rereadPending: false,
+  };
+}
+
+function isWriting(target: DocTarget): boolean {
+  return target.writeGen % 2 === 1;
+}
 
 const SLOW_SAVE_HINT_MS = 5_000;
 
@@ -34,12 +59,22 @@ function afterPrevious(
   previous: Promise<unknown>,
   path: string,
 ): Promise<void> {
+  const id = `save-wait:${path}`;
+  let hinted = false;
   const hint = setTimeout(() => {
-    toast.message("Waiting for the previous save to finish", {
-      id: `save-wait:${path}`,
-    });
+    hinted = true;
+    toast.message("Waiting for the previous save to finish", { id });
   }, SLOW_SAVE_HINT_MS);
-  return previous.then(() => clearTimeout(hint));
+  return previous.then(() => {
+    clearTimeout(hint);
+    if (hinted) toast.dismiss(id);
+  });
+}
+
+function enqueue<T>(target: DocTarget, task: () => Promise<T>): Promise<T> {
+  const run = afterPrevious(target.queue, target.path).then(task);
+  target.queue = run.catch(() => {});
+  return run;
 }
 
 function notSaved(target: DocTarget): false {
@@ -75,18 +110,7 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
   const diskMtimeRef = useRef<number | null>(null);
   // The file the refs above describe; replaced on load so a save that started
   // for the previous file never writes into or updates the next one.
-  const targetRef = useRef<DocTarget>({ path, workspace });
-  // One save at a time: a later one waits, so its conflict check compares
-  // against the mtime of our own write instead of reporting it as a conflict.
-  const saveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
-  // Bumped as each write starts and ends: a reload read that overlaps a write
-  // may predate it and must not become the buffer.
-  const writeGenRef = useRef(0);
-  const writingRef = useRef(false);
-  const dirtyRef = useRef(false);
-  useEffect(() => {
-    dirtyRef.current = dirty;
-  }, [dirty]);
+  const targetRef = useRef<DocTarget>(newTarget(path, workspace));
 
   const autoSaveRef = useRef({ autoSave, autoSaveDelay });
   autoSaveRef.current = { autoSave, autoSaveDelay };
@@ -100,21 +124,13 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
     }
   }, []);
 
-  const enqueueSave = useCallback(<T>(task: () => Promise<T>): Promise<T> => {
-    const previous = saveQueueRef.current;
-    const run = afterPrevious(previous, targetRef.current.path).then(task);
-    saveQueueRef.current = run.catch(() => {});
-    return run;
-  }, []);
-
   // Persist the buffer (restoring the file's original EOL) and adopt the
   // returned disk mtime as the new conflict baseline, with no follow-up stat.
   const writeToDisk = useCallback(async (target: DocTarget) => {
     if (targetRef.current !== target) return notSaved(target);
     const content = bufferRef.current;
     let mtime: number;
-    writeGenRef.current += 1;
-    writingRef.current = true;
+    target.writeGen += 1;
     try {
       mtime = await invoke<number>("fs_write_file", {
         path: target.path,
@@ -133,8 +149,7 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
       toast.error(`Couldn’t save ${basename(target.path)}: ${String(e)}`);
       throw e;
     } finally {
-      writingRef.current = false;
-      writeGenRef.current += 1;
+      target.writeGen += 1;
     }
     // Written to the path it was saved for; the editor has since left it.
     if (targetRef.current !== target) return true;
@@ -147,31 +162,39 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
 
   // Resolves false when the write was withheld: the editor left the file, or it
   // changed on disk since load and overwriting is an explicit toast action.
-  const saveIfChanged = useCallback(async (): Promise<boolean> => {
-    const target = targetRef.current;
-    if (bufferRef.current === savedRef.current) return true;
-    const known = diskMtimeRef.current;
-    if (known !== null) {
-      const stat = await invoke<FileStat>("fs_stat", {
-        path: target.path,
-        workspace: target.workspace ?? currentWorkspaceEnv(),
-      }).catch(() => null);
+  const saveIfChanged = useCallback(
+    async (target: DocTarget): Promise<boolean> => {
       if (targetRef.current !== target) return notSaved(target);
-      if (stat && stat.mtime !== known) {
-        toast.warning("File changed on disk", {
-          id: `save-conflict:${target.path}`,
-          description: `${basename(target.path)} was modified by another program while you had unsaved changes. Overwrite to keep your version.`,
-          action: {
-            label: "Overwrite",
-            onClick: () =>
-              void enqueueSave(() => writeToDisk(target)).catch(() => {}),
-          },
-        });
-        return false;
+      if (bufferRef.current === savedRef.current) return true;
+      const known = diskMtimeRef.current;
+      if (known !== null) {
+        const stat = await invoke<FileStat>("fs_stat", {
+          path: target.path,
+          workspace: target.workspace ?? currentWorkspaceEnv(),
+        }).catch(() => null);
+        if (targetRef.current !== target) return notSaved(target);
+        if (stat && stat.mtime !== known) {
+          toast.warning("File changed on disk", {
+            id: `save-conflict:${target.path}`,
+            description: `${basename(target.path)} was modified by another program while you had unsaved changes. Overwrite to keep your version.`,
+            action: {
+              label: "Overwrite",
+              onClick: () =>
+                void enqueue(target, () => writeToDisk(target)).catch(() => {}),
+            },
+          });
+          return false;
+        }
       }
-    }
-    return writeToDisk(target);
-  }, [enqueueSave, writeToDisk]);
+      return writeToDisk(target);
+    },
+    [writeToDisk],
+  );
+
+  const queueSave = useCallback((): Promise<boolean> => {
+    const target = targetRef.current;
+    return enqueue(target, () => saveIfChanged(target));
+  }, [saveIfChanged]);
 
   // Notify parent of dirty transitions.
   const onDirtyChangeRef = useRef(onDirtyChange);
@@ -205,7 +228,7 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
   // Load on path or workspace change.
   useEffect(() => {
     let cancelled = false;
-    const target = { path, workspace };
+    const target = newTarget(path, workspace);
     targetRef.current = target;
     savedRef.current = "";
     bufferRef.current = "";
@@ -229,27 +252,40 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
 
   // Skipped while dirty: never clobber unsaved edits. Re-checked when the read
   // resolves, since typing or a path change can happen while it is in flight.
-  const reload = useCallback((): boolean => {
-    if (dirtyRef.current) return false;
-    const target = targetRef.current;
-    const writeGen = writeGenRef.current;
-    void readFromDisk(target)
-      .then((res) => {
-        const raced = writeGenRef.current !== writeGen || writingRef.current;
-        if (targetRef.current === target && !dirtyRef.current && !raced) {
-          adoptRead(res, true);
-        }
-      })
-      // Transient failures (e.g. ENOENT mid atomic-rename) must not replace a
-      // healthy buffer with an error screen.
-      .catch((e) => console.warn("[editor] reload failed", target.path, e));
-    return true;
-  }, [adoptRead]);
+  // Reads the refs, as `dirty` lags a render behind a finished write.
+  const reload = useCallback(
+    function reload(): boolean {
+      const clean = () => bufferRef.current === savedRef.current;
+      if (!clean()) return false;
+      const target = targetRef.current;
+      const writeGen = target.writeGen;
+      void readFromDisk(target)
+        .then((res) => {
+          if (targetRef.current !== target) return;
+          if (target.writeGen === writeGen && !isWriting(target)) {
+            if (clean()) adoptRead(res, true);
+            return;
+          }
+          // The read may predate our own write: read once more after it ends.
+          if (target.rereadPending) return;
+          target.rereadPending = true;
+          void target.queue.then(() => {
+            target.rereadPending = false;
+            if (targetRef.current === target) reload();
+          });
+        })
+        // Transient failures (e.g. ENOENT mid atomic-rename) must not replace a
+        // healthy buffer with an error screen.
+        .catch((e) => console.warn("[editor] reload failed", target.path, e));
+      return true;
+    },
+    [adoptRead],
+  );
 
   const save = useCallback(async (): Promise<boolean> => {
     clearAutoSaveTimer();
-    return enqueueSave(saveIfChanged);
-  }, [clearAutoSaveTimer, enqueueSave, saveIfChanged]);
+    return queueSave();
+  }, [clearAutoSaveTimer, queueSave]);
 
   const onChange = useCallback(
     (next: string) => {
@@ -262,13 +298,11 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
       const { autoSave: active, autoSaveDelay: delay } = autoSaveRef.current;
       if (active && isDirty) {
         timeoutRef.current = setTimeout(() => {
-          enqueueSave(saveIfChanged).catch((e) =>
-            console.error("[autosave]", e),
-          );
+          queueSave().catch((e) => console.error("[autosave]", e));
         }, delay);
       }
     },
-    [clearAutoSaveTimer, enqueueSave, saveIfChanged],
+    [clearAutoSaveTimer, queueSave],
   );
 
   useEffect(() => clearAutoSaveTimer, [path, clearAutoSaveTimer]);

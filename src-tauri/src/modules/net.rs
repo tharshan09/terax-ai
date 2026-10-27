@@ -100,10 +100,10 @@ fn admit(host: &Host<impl AsRef<str>>, kind: IpKind, allow_private: bool) -> Res
     }
 }
 
-/// Classify the host AND return its class plus the safe IPs to pin reqwest's
-/// resolver to. Defeats DNS rebinding (second-lookup-returns-different-IP) by
-/// reusing exactly the addresses that passed `ip_kind`.
-async fn classify_and_collect_safe_ips(
+/// Resolve the host once and let `admit` judge its worst class; on success,
+/// return that class and every resolved IP, for pinning reqwest's resolver to
+/// exactly the addresses that were judged (defeats DNS rebinding).
+async fn resolve_and_admit(
     host: &Host<String>,
     allow_private: bool,
 ) -> Result<(IpKind, Vec<IpAddr>), String> {
@@ -154,17 +154,24 @@ pub async fn lm_ping(base_url: String) -> Result<u16, String> {
     }
     let probe = format!("{trimmed}/models");
     let (parsed, host) = validate_url(&probe)?;
-    let (kind, safe_ips) = classify_and_collect_safe_ips(&host, true).await?;
+    let (kind, safe_ips) = resolve_and_admit(&host, true).await?;
 
-    // Same client as the AI calls, so a redirect the AI calls refuse fails here too.
-    let client = build_safe_client(true, &host, kind, &safe_ips)?;
+    // Any answer, a 3xx included, means the server is reachable.
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none());
+    if !uses_env_proxy(kind) {
+        builder = builder.no_proxy();
+    }
+    let client = pin_to(builder, &host, &safe_ips)
+        .build()
+        .map_err(|e| e.to_string())?;
     client
         .get(parsed)
-        .timeout(Duration::from_secs(5))
         .send()
         .await
         .map(|r| r.status().as_u16())
-        .map_err(send_error)
+        .map_err(|e| e.to_string())
 }
 // AI HTTP proxy — bypasses webview CORS / Mixed-Content / PNA so local-network
 // model servers (LM Studio, Ollama, vLLM) work in the production bundle.
@@ -199,7 +206,7 @@ fn build_safe_client(
     kind: IpKind,
     safe_ips: &[IpAddr],
 ) -> Result<reqwest::Client, String> {
-    let via_proxy = uses_env_proxy(kind);
+    let origin_public = kind == IpKind::Public;
     let mut builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::custom(
@@ -208,46 +215,19 @@ fn build_safe_client(
                 attempt.previous().last(),
                 attempt.previous().len(),
                 allow_private,
-                via_proxy,
+                origin_public,
             ) {
                 RedirectDecision::Follow => attempt.follow(),
-                RedirectDecision::Stop => {
-                    let blocked = RedirectBlocked::new(attempt.url());
-                    attempt.error(blocked)
-                }
+                RedirectDecision::Stop => attempt.stop(),
                 RedirectDecision::TooMany => attempt.error("too many redirects"),
             },
         ));
-    if !via_proxy {
+    if !uses_env_proxy(kind) {
         builder = builder.no_proxy();
     }
     pin_to(builder, host, safe_ips)
         .build()
         .map_err(|e| e.to_string())
-}
-
-#[derive(Debug)]
-struct RedirectBlocked(String);
-
-impl RedirectBlocked {
-    fn new(next: &Url) -> Self {
-        Self(next.host_str().unwrap_or(next.as_str()).to_string())
-    }
-}
-
-impl std::fmt::Display for RedirectBlocked {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "redirect to another host blocked: {}", self.0)
-    }
-}
-
-impl std::error::Error for RedirectBlocked {}
-
-// reqwest only says "error following redirect"; name the blocked host instead.
-fn send_error(e: reqwest::Error) -> String {
-    std::error::Error::source(&e)
-        .and_then(|source| source.downcast_ref::<RedirectBlocked>())
-        .map_or_else(|| e.to_string(), ToString::to_string)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -262,7 +242,7 @@ fn redirect_decision(
     last_previous: Option<&Url>,
     previous_len: usize,
     allow_private: bool,
-    via_proxy: bool,
+    origin_public: bool,
 ) -> RedirectDecision {
     if previous_len > 10 {
         return RedirectDecision::TooMany;
@@ -271,10 +251,11 @@ fn redirect_decision(
         return RedirectDecision::Stop;
     };
     let allowed = match host_ip(&host) {
-        // A proxied client would send a hop to a local address through the proxy.
+        // The proxy setting was chosen for the origin's class: a public hop must
+        // not bypass the env proxy, a local one must not go through it.
         Some(ip) => {
             let kind = ip_kind(ip);
-            admit(&host, kind, allow_private).is_ok() && (!via_proxy || uses_env_proxy(kind))
+            admit(&host, kind, allow_private).is_ok() && (kind == IpKind::Public) == origin_public
         }
         // Fork deviation: reqwest resolves a new name itself, unclassified and
         // unpinned, so a hop to another name is stopped even with private access.
@@ -307,12 +288,12 @@ pub async fn ai_http_request(
 ) -> Result<HttpResponse, String> {
     let allow_private = allow_private_network.unwrap_or(false);
     let (parsed, host) = validate_url(&url)?;
-    let (kind, safe_ips) = classify_and_collect_safe_ips(&host, allow_private).await?;
+    let (kind, safe_ips) = resolve_and_admit(&host, allow_private).await?;
 
     let client = build_safe_client(allow_private, &host, kind, &safe_ips)?;
 
     let req = build_request(&client, &method, parsed, headers, body)?;
-    let resp = req.send().await.map_err(send_error)?;
+    let resp = req.send().await.map_err(|e| e.to_string())?;
 
     let status = resp.status().as_u16();
     let headers = header_map_to_strings(resp.headers());
@@ -357,7 +338,7 @@ pub async fn ai_http_stream(
             return Err(e);
         }
     };
-    let (kind, safe_ips) = match classify_and_collect_safe_ips(&host, allow_private).await {
+    let (kind, safe_ips) = match resolve_and_admit(&host, allow_private).await {
         Ok(v) => v,
         Err(e) => {
             let _ = on_event.send(AiStreamEvent::Error { message: e.clone() });
@@ -383,11 +364,10 @@ pub async fn ai_http_stream(
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            let message = send_error(e);
             let _ = on_event.send(AiStreamEvent::Error {
-                message: message.clone(),
+                message: e.to_string(),
             });
-            return Err(message);
+            return Err(e.to_string());
         }
     };
 
@@ -481,6 +461,9 @@ mod tests {
 
     const LANDED: &str = "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nlanded";
 
+    const PUBLIC_ORIGIN: bool = true;
+    const LOCAL_ORIGIN: bool = false;
+
     fn loopback_client() -> reqwest::Client {
         build_safe_client(
             true,
@@ -523,10 +506,7 @@ mod tests {
             IpKind::BlockedMetadata
         );
         // IPv6 link-local fe80::/10
-        assert_eq!(
-            ip_kind("fe80::1".parse().unwrap()),
-            IpKind::BlockedMetadata
-        );
+        assert_eq!(ip_kind("fe80::1".parse().unwrap()), IpKind::BlockedMetadata);
     }
 
     #[test]
@@ -590,9 +570,9 @@ mod tests {
             let host = host_of(&format!("http://{literal}/"));
             let (found, _) = rt.block_on(resolve_and_classify(&host)).unwrap();
             assert_eq!(found, kind, "{literal}");
-            let refused = rt.block_on(classify_and_collect_safe_ips(&host, false));
+            let refused = rt.block_on(resolve_and_admit(&host, false));
             assert!(refused.is_err(), "{literal} must need explicit opt-in");
-            let opted_in = rt.block_on(classify_and_collect_safe_ips(&host, true));
+            let opted_in = rt.block_on(resolve_and_admit(&host, true));
             assert_eq!(
                 opted_in.is_err(),
                 kind == IpKind::BlockedMetadata,
@@ -619,39 +599,65 @@ mod tests {
     }
 
     #[test]
-    fn a_redirect_to_another_name_fails_with_the_blocked_host_instead_of_the_3xx() {
-        let (port, server) = serve(|port| vec![redirect_to("metadata-alias.test", port); 3]);
+    fn a_stopped_redirect_returns_the_3xx_with_its_location() {
+        let (port, server) = serve(|port| vec![redirect_to("metadata-alias.test", port); 2]);
         let rt = runtime();
-        let base = format!("http://127.0.0.1:{port}");
-        let expected = "redirect to another host blocked: metadata-alias.test";
+        let target = format!("http://127.0.0.1:{port}/");
+        let location = format!("http://metadata-alias.test:{port}/landed");
 
-        let request = rt.block_on(ai_http_request(
-            format!("{base}/"),
-            "GET".into(),
-            None,
-            None,
-            Some(true),
-        ));
-        assert_eq!(request.unwrap_err(), expected);
+        let resp = rt
+            .block_on(ai_http_request(
+                target.clone(),
+                "GET".into(),
+                None,
+                None,
+                Some(true),
+            ))
+            .unwrap();
+        assert_eq!(resp.status, 302);
+        assert_eq!(resp.headers["location"], location);
 
         let (channel, events) = recording_channel();
-        let stream = rt.block_on(ai_http_stream(
-            format!("{base}/"),
+        rt.block_on(ai_http_stream(
+            target,
             "GET".into(),
             None,
             None,
             Some(true),
             channel,
-        ));
-        assert_eq!(stream.unwrap_err(), expected);
-        assert_eq!(
-            *events.lock().unwrap(),
-            [serde_json::json!({ "kind": "error", "message": expected })]
-        );
+        ))
+        .unwrap();
+        let events = events.lock().unwrap();
+        assert_eq!(events[0]["kind"], "headers");
+        assert_eq!(events[0]["status"], 302);
+        assert_eq!(events[0]["headers"]["location"], location.as_str());
+        assert_eq!(events.last(), Some(&serde_json::json!({ "kind": "end" })));
+        server.join().unwrap();
+    }
 
-        assert_eq!(rt.block_on(lm_ping(base)).unwrap_err(), expected);
+    #[test]
+    fn lm_ping_reports_the_3xx_of_a_redirecting_server_as_reachable() {
+        let (port, server) = serve(|port| vec![redirect_to("127.0.0.1", port)]);
+        let rt = runtime();
+        let status = rt.block_on(lm_ping(format!("http://127.0.0.1:{port}/")));
+        assert_eq!(status.unwrap(), 302);
         let heads = server.join().unwrap();
-        assert!(heads[2].starts_with("GET /models "), "{}", heads[2]);
+        assert!(heads[0].starts_with("GET /models "), "{}", heads[0]);
+    }
+
+    #[test]
+    fn a_local_origin_returns_a_redirect_to_a_public_literal_instead_of_following_it() {
+        let (port, server) = serve(|port| vec![redirect_to("8.8.8.8", port)]);
+        let rt = runtime();
+        let resp = rt
+            .block_on(
+                loopback_client()
+                    .get(format!("http://127.0.0.1:{port}/"))
+                    .send(),
+            )
+            .unwrap();
+        assert_eq!(resp.status(), 302);
+        server.join().unwrap();
     }
 
     #[test]
@@ -683,7 +689,7 @@ mod tests {
     fn ipv6_literal_urls_are_classified_instead_of_failing_dns() {
         let rt = runtime();
         let classify = |url: &str, allow_private: bool| {
-            rt.block_on(classify_and_collect_safe_ips(&host_of(url), allow_private))
+            rt.block_on(resolve_and_admit(&host_of(url), allow_private))
         };
         let refused = classify("http://[::ffff:127.0.0.1]:11434/", false).unwrap_err();
         assert!(refused.contains("requires explicit opt-in"), "{refused}");
@@ -698,6 +704,7 @@ mod tests {
     #[test]
     fn redirects_to_internal_addresses_hidden_in_ipv6_are_stopped() {
         let from = url("https://api.example.com/");
+        let local = url("http://127.0.0.1:11434/");
         for target in [
             "http://[::ffff:127.0.0.1]/",
             "http://[::ffff:10.0.0.1]/",
@@ -714,7 +721,7 @@ mod tests {
             "http://[::]/",
         ] {
             assert_eq!(
-                redirect_decision(&url(target), Some(&from), 1, false, false),
+                redirect_decision(&url(target), Some(&from), 1, false, PUBLIC_ORIGIN),
                 RedirectDecision::Stop,
                 "{target}"
             );
@@ -726,7 +733,7 @@ mod tests {
             "http://[fe80::1]/",
         ] {
             assert_eq!(
-                redirect_decision(&url(target), Some(&from), 1, true, false),
+                redirect_decision(&url(target), Some(&local), 1, true, LOCAL_ORIGIN),
                 RedirectDecision::Stop,
                 "{target} is metadata even with private access"
             );
@@ -736,7 +743,7 @@ mod tests {
             "http://[::ffff:10.0.0.1]/",
         ] {
             assert_eq!(
-                redirect_decision(&url(target), Some(&from), 1, true, false),
+                redirect_decision(&url(target), Some(&local), 1, true, LOCAL_ORIGIN),
                 RedirectDecision::Follow,
                 "{target}"
             );
@@ -747,7 +754,7 @@ mod tests {
                 Some(&from),
                 1,
                 false,
-                false
+                PUBLIC_ORIGIN
             ),
             RedirectDecision::Follow
         );
@@ -756,26 +763,25 @@ mod tests {
     #[test]
     fn redirect_decision_keeps_metadata_blocked_and_gates_loopback_on_opt_in() {
         let from = url("https://api.example.com/");
+        let local = url("http://127.0.0.1:11434/");
+        for origin_public in [PUBLIC_ORIGIN, LOCAL_ORIGIN] {
+            for target in [
+                "http://[::ffff:169.254.169.254]/",
+                "http://[fd00:ec2::254]/",
+            ] {
+                assert_eq!(
+                    redirect_decision(&url(target), Some(&local), 1, true, origin_public),
+                    RedirectDecision::Stop,
+                    "{target} origin_public={origin_public}"
+                );
+            }
+        }
         assert_eq!(
-            redirect_decision(
-                &url("http://[::ffff:169.254.169.254]/"),
-                Some(&from),
-                1,
-                true,
-                false
-            ),
+            redirect_decision(&url("http://[::1]/"), Some(&from), 1, false, PUBLIC_ORIGIN),
             RedirectDecision::Stop
         );
         assert_eq!(
-            redirect_decision(&url("http://[fd00:ec2::254]/"), Some(&from), 1, true, false),
-            RedirectDecision::Stop
-        );
-        assert_eq!(
-            redirect_decision(&url("http://[::1]/"), Some(&from), 1, false, false),
-            RedirectDecision::Stop
-        );
-        assert_eq!(
-            redirect_decision(&url("http://[::1]/"), Some(&from), 1, true, false),
+            redirect_decision(&url("http://[::1]/"), Some(&local), 1, true, LOCAL_ORIGIN),
             RedirectDecision::Follow
         );
     }
@@ -790,7 +796,7 @@ mod tests {
                     Some(&from),
                     1,
                     allow_private,
-                    false
+                    PUBLIC_ORIGIN
                 ),
                 RedirectDecision::Follow,
                 "allow_private={allow_private}"
@@ -801,7 +807,7 @@ mod tests {
                     Some(&from),
                     1,
                     allow_private,
-                    false
+                    PUBLIC_ORIGIN
                 ),
                 RedirectDecision::Stop,
                 "allow_private={allow_private}"
@@ -813,14 +819,14 @@ mod tests {
                 Some(&from),
                 11,
                 true,
-                false
+                PUBLIC_ORIGIN
             ),
             RedirectDecision::TooMany
         );
     }
 
     #[test]
-    fn a_proxied_client_stops_hops_to_non_public_literals_even_with_private_access() {
+    fn a_redirect_from_a_public_origin_stays_on_public_literals() {
         let from = url("https://api.example.com/");
         for target in [
             "http://127.0.0.1:11434/",
@@ -828,24 +834,51 @@ mod tests {
             "http://[::1]/",
             "http://[::ffff:192.168.0.1]/",
         ] {
-            assert_eq!(
-                redirect_decision(&url(target), Some(&from), 1, true, true),
-                RedirectDecision::Stop,
-                "{target} via proxy"
-            );
-            assert_eq!(
-                redirect_decision(&url(target), Some(&from), 1, true, false),
-                RedirectDecision::Follow,
-                "{target} without proxy"
-            );
+            for allow_private in [false, true] {
+                assert_eq!(
+                    redirect_decision(&url(target), Some(&from), 1, allow_private, PUBLIC_ORIGIN),
+                    RedirectDecision::Stop,
+                    "{target} allow_private={allow_private}"
+                );
+            }
         }
         for target in [
             "https://8.8.8.8/",
             "https://[::ffff:8.8.8.8]/",
+            "https://[2606:4700::1111]/",
             "https://api.example.com/v2",
         ] {
             assert_eq!(
-                redirect_decision(&url(target), Some(&from), 1, true, true),
+                redirect_decision(&url(target), Some(&from), 1, true, PUBLIC_ORIGIN),
+                RedirectDecision::Follow,
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_redirect_from_a_local_origin_stops_at_public_literals() {
+        let from = url("http://ollama.lan:11434/v1");
+        for target in [
+            "https://8.8.8.8/",
+            "https://[::ffff:8.8.8.8]/",
+            "https://[2606:4700::1111]/",
+        ] {
+            assert_eq!(
+                redirect_decision(&url(target), Some(&from), 1, true, LOCAL_ORIGIN),
+                RedirectDecision::Stop,
+                "{target}"
+            );
+        }
+        for target in [
+            "http://127.0.0.1:11434/",
+            "http://10.0.0.1/",
+            "http://[::1]/",
+            "http://[::ffff:192.168.0.1]/",
+            "http://ollama.lan:11434/v2",
+        ] {
+            assert_eq!(
+                redirect_decision(&url(target), Some(&from), 1, true, LOCAL_ORIGIN),
                 RedirectDecision::Follow,
                 "{target}"
             );
@@ -881,7 +914,7 @@ mod tests {
                     Some(&url("https://api.example.com/")),
                     1,
                     true,
-                    false
+                    LOCAL_ORIGIN
                 ),
                 RedirectDecision::Stop,
                 "{target}"

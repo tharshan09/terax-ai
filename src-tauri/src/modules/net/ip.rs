@@ -45,12 +45,14 @@ fn ipv4_kind(v: Ipv4Addr) -> IpKind {
     if v.is_loopback() || o[0] == 0 || v.is_broadcast() || v.is_multicast() {
         return IpKind::Loopback;
     }
+    // IANA lists the PCP and TURN anycasts 192.0.0.9 and .10 as globally reachable.
+    let ietf_global = matches!(o, [192, 0, 0, 9 | 10]);
     if o[0] == 10
         || (o[0] == 172 && (16..=31).contains(&o[1]))
         || (o[0] == 192 && o[1] == 168)
         || (o[0] == 100 && (64..=127).contains(&o[1]))
         || (o[0] == 198 && (o[1] == 18 || o[1] == 19))
-        || (o[0] == 192 && o[1] == 0 && o[2] == 0)
+        || (o[0] == 192 && o[1] == 0 && o[2] == 0 && !ietf_global)
         || (o[0] == 192 && o[1] == 0 && o[2] == 2)
         || (o[0] == 198 && o[1] == 51 && o[2] == 100)
         || (o[0] == 203 && o[1] == 0 && o[2] == 113)
@@ -407,6 +409,22 @@ mod tests {
                 IpKind::Public
             };
             assert_eq!(kind(addr), expected, "{addr}");
+        }
+    }
+
+    #[test]
+    fn only_the_globally_reachable_anycasts_of_the_ietf_ipv4_block_are_public() {
+        for addr in ["192.0.0.9", "192.0.0.10", "::ffff:192.0.0.9"] {
+            assert_eq!(kind(addr), IpKind::Public, "{addr}");
+        }
+        for addr in [
+            "192.0.0.0",
+            "192.0.0.8",
+            "192.0.0.11",
+            "192.0.0.170",
+            "192.0.0.255",
+        ] {
+            assert_eq!(kind(addr), IpKind::Private, "{addr}");
         }
     }
 }
