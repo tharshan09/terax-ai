@@ -42,3 +42,6 @@ stats.html
 /terax-progress.md
 /terax-roadmap.html
 /tmux-session-switcher-plan.md
+# zip pipeline run state (local only, contains machine paths)
+specs/**/.build-state.json
+specs/**/.feature-state.json
