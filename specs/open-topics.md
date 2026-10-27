@@ -1,4 +1,4 @@
-# Offene Themen (Stand 2026-09-06, nach Session terax-ai-98)
+# Offene Themen (Stand 2026-10-27; Abschnitte 1 bis 4 vom 2026-09-06)
 
 `main` = `e41418a`, Version 0.8.6. Upstream-Sync Runde 3 und beide Follow-up-Runden sind
 abgeschlossen. Diese Datei ist der Einstieg für die nächste Session.
@@ -6,6 +6,32 @@ abgeschlossen. Diese Datei ist der Einstieg für die nächste Session.
 **Panes/Tabs: Discovery abgeschlossen, Wellen A und B gemergt.** Die Entscheidungen und
 der Bauplan stehen in `specs/panes-ux/discovery.md`, dort weiterlesen statt hier.
 Als Nächstes steht Welle C an (Pane von Tab A nach Tab B).
+
+---
+
+## 0. Reihenfolge ab 27.10.2026 (vom User so bestätigt)
+
+1. **Upstream-Sync 0.8.7 bauen.** Discovery `specs/2026-10-20-upstream-sync-090/discovery.md`
+   ist Ready, inklusive Nachtrag `bf7e03d` (BR-20). Ghostty bleibt geparkt (BR-14-Check
+   vom 27.10.: alle vier Issues offen). Vor jedem Pull auf `main`: `git pull origin main`,
+   weil `main` `upstream/main` trackt.
+2. **Fix-PR mit zwei Bugs**, ohne Discovery:
+   - **B1** tmux-Picker: Bei einem sehr langen Sessionnamen sind Umbenennen und Schließen
+     nicht erreichbar. Die Zeile kürzt eigentlich ab; Verdacht ist die Scroll-Fläche um die
+     Liste, die das Kürzen aushebelt und die Knöpfe aus dem Bild schiebt.
+   - **B2** Bilder über SSH: Die Bildvorschau holt die Datei immer vom Mac, bei SSH liegt
+     sie auf dem Server, die Vorschau bleibt leer. Fix: Bild über SSH lesen und anzeigen.
+     Offen: Ist die "Indexdatei mit Bildern" HTML (dann bekannte Grenze, relative Bilder in
+     Remote-HTML wurden bewusst verworfen) oder Markdown?
+3. **Features, je eine eigene Discovery:**
+   - **F1** Explorer: Suche findet nichts im übergeordneten Ordner, Wunsch nach oben zu
+     navigieren. Kernfrage: Wann folgt der Explorer dem Terminal-Ordner, wann bleibt er
+     stehen? (Heute folgt er immer, die Suche ist auf diese Wurzel begrenzt.)
+   - **F3** Theme und Hintergrund pro Space (privat vs. Arbeit). Heute global, ein Space
+     hat nur eine Akzentfarbe.
+   - **F2** Tab-Gruppen, ein- und ausklappbar. Groß, berührt dieselben Stellen wie die
+     Panes-Wellen C bis E, deshalb zuletzt.
+   - **F4** tmux und Claude allgemein verbessern: Der User sammelt konkrete Punkte.
 
 ---
 

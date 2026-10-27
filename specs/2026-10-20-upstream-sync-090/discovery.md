@@ -5,7 +5,7 @@
 **Status:** Ready
 **Wireframes:** -- (UI-Änderungen sind klein und folgen bestehenden Mustern)
 
-Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewertung: `upstream/main` = `5502f82` (19.10.2026), Release v0.9.0 vom 16.10.2026. Zuletzt bewertet: `47d3c8b`. Fork: `main` = `67120d9`, Version 0.8.6. merge-base bleibt `d77476e`.
+Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewertung: `upstream/main` = `5502f82` (19.10.2026), Release v0.9.0 vom 16.10.2026; Nachtrag 27.10.2026 bis `640e8b2` (siehe Research Log, BR-20). Zuletzt bewertet: `47d3c8b`. Fork: `main` = `67120d9`, Version 0.8.6. merge-base bleibt `d77476e`.
 
 ---
 
@@ -46,6 +46,7 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 | Perf aus `f6f0004`: Animationen pausieren (Fork-Variante), Explorer-Watcher nur bei sichtbarem Explorer, `git status` nur für sichtbare Konsumenten, Lazy-Start (AI-SDK, Editor, Icon-Set) mit Build-Budget-Test |
 | Test-Commits: `d766567` (iconResolver), `258d119` (applyTheme), `13ded38` (customThemes) |
 | Deps auf v0.9.0-Niveau regenerieren (u.a. tauri 2.12, react 19.3, vite 8.3, `dirs` 6→7) |
+| Nachtrag 27.10.: `bf7e03d` (JS/TS-Syntax-Hervorhebung nach Deps-Update wiederherstellen, Handarbeit) als Teil von Slice 7 (BR-20) |
 | Version 0.8.7 |
 
 | Out of Scope |
@@ -221,6 +222,7 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 - BR-17: ⌘S speichert den aktiven Editor-Tab zuverlässig; das WebView darf ⌘S nicht als „Seite sichern“ abfangen.
 - BR-18: Lazy-Start: AI-SDK, Editor und Icon-Set sind nicht Teil des Startpakets; ein Build-Test schlägt fehl, wenn sie wieder hineinrutschen. Erstes Öffnen eines Editors darf kurz nachladen.
 - BR-19: Fork-Version nach dem Sync `0.8.7` (alle Versionsquellen synchron); 0.9.x bleibt für den Ghostty-Umstieg reserviert.
+- BR-20: Nach dem Deps-Update färbt der Editor JavaScript und TypeScript in jedem Editor-Theme ein, ebenso Code-Blöcke im Chat. Ein Build-Test schlägt fehl, wenn die Hervorhebungs-Bibliothek mehr als einmal im Build landet (doppelte Kopien lassen die Färbung still verschwinden).
 
 ---
 
@@ -287,7 +289,7 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 | 4 | Sichtbare Konsumenten | BR-11, BR-13 | vitest Konsumenten-Logik; Messung BR-15; e2e Sidebar zu → Datei ändern → auf | 1 |
 | 5 | Animationen | BR-9, BR-10 | CSS-Budget-Test (Endlos nur mit Stufen); e2e Fenster minimieren; Messung BR-15 | 2 |
 | 6 | Lazy-Start | BR-18 | Build-Budget-Test; Startzeit-Messung BR-15 | 1 |
-| 7 | Deps + Version | Deps auf v0.9.0-Niveau, BR-19 | alle Gates (`check-types`, `lint`, `vitest`, `cargo test`, `clippy -D warnings`, Build) | 1–6 |
+| 7 | Deps + Version | Deps auf v0.9.0-Niveau, BR-19, BR-20 (`bf7e03d`) | Build-Test einfache Hervorhebungs-Bibliothek; e2e: `.ts`-Datei öffnen, Färbung sichtbar; alle Gates (`check-types`, `lint`, `vitest`, `cargo test`, `clippy -D warnings`, Build) | 1–6 |
 
 ### Recommended Order
 
@@ -380,6 +382,9 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 | 2026-10-20 | Codebase | Deps-Majors: `dirs` 6→7 (Fork nutzt nur `home_dir`, 13 Stellen), `getrandom` 0.3→0.4 transitiv, `wasmparser` nur Ghostty |
 | 2026-10-20 | Web/GitHub | macOS-Regressionen 0.9.0 (#1372, #1365, #1364, #1362); neue offene PRs #1367–#1371 |
 | 2026-10-20 | Web | WebGPU in WKWebView ab macOS 26 default (Safari belegt, Tauri abgeleitet, nicht geprüft) |
+| 2026-10-27 | Git | Nachtrag: `5502f82..upstream/main` (`640e8b2`) = 3 Dependabot-Bumps (`640e8b2`, `b9abe0f`, `e2d376f`) + `bf7e03d` (Syntax-Hervorhebung); kein Release nach v0.9.0 |
+| 2026-10-27 | Codebase | `bf7e03d`: Deps-Update kann die Hervorhebungs-Bibliothek doppelt installieren → JS/TS still ungefärbt; Upstream pinnt eine Version zentral und prüft im Build-Test auf genau eine Kopie. Betrifft Slice 7 direkt. |
+| 2026-10-27 | GitHub | BR-14-Check: #1372, #1365, #1364, #1362 weiter OPEN → Ghostty bleibt geparkt |
 
 ---
 
@@ -400,3 +405,5 @@ Vorgänger: `specs/upstream-sync-0.8.6/` (Runde 3). Upstream-Stand dieser Bewert
 | 9 | Upstream pausiert Animationen schon bei Fokusverlust; bei mehreren Spaces und Terax neben dem Browser würden Agent-Spinner einfrieren, während man hinschaut. Pause nur bei unsichtbarem Fenster oder wie Upstream? | Nur wenn unsichtbar (minimiert, verdeckt, anderer Space); dieselbe Regel für Media-Previews (BR-9, BR-12). |
 | 10 | Bisher übernahm der Fork die Upstream-Version; diesmal fehlt das Kernstück von 0.9.0. Version 0.8.7, 0.9.0 wie Upstream, oder bei 0.8.6 bleiben? | 0.8.7 (BR-19). |
 | 11 | Sign-off: Zusammenfassung mit 7 Entscheidungen, 6 Defaults (Teilfehler sammeln, Toast bei leerer Zwischenablage, ⌘V nur mit Explorer-Fokus, Zielregel, Git-Widgets als Konsumenten mit Hinweis auf geringe Ersparnis, Messung vorher/nachher), Skip-Liste und 7 Slices — passt das, Git-Status-Stück streichen, oder als Draft sichern? | Passt, schreiben; Status Ready. |
+| 12 | Nachtrag 27.10.: Upstream hat seit der Bewertung `bf7e03d` nachgeschoben. Das Deps-Update dieser Welle kann die Hervorhebungs-Bibliothek doppelt installieren, dann färbt der Editor JS/TS still nicht mehr. Soll `bf7e03d` mit in den Scope (Teil von Slice 7)? Empfehlung: ja, weil wir genau das Deps-Update übernehmen, das den Fehler auslöst. | Ja, in Slice 7 (BR-20). |
+| 13 | Der User hat neue Wünsche genannt (tmux-Picker-Bug bei langen Namen, Bilder über SSH, Explorer-Navigation/Suche, Tab-Gruppen, Theme pro Space, tmux/Claude allgemein). Wie gehen wir vor — Vorschlag (Welle 0.8.7 unverändert + `bf7e03d`, dann beide Bugs als Fix-PR, dann je eine Discovery F1 Explorer → F3 Theme pro Space → F2 Tab-Gruppen), Bugs zuerst, sofort F1-Discovery, oder Bugs als Slices in die Welle? Empfehlung: Vorschlag, hält jeden PR klein und reviewbar. | Vorschlag so. Neue Themen stehen in `specs/open-topics.md`, nicht in dieser Discovery. |
