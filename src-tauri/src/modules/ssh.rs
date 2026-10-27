@@ -1268,10 +1268,11 @@ fn plan_upload(
     rel: String,
     depth: usize,
     plan: &mut Vec<Upload>,
+    registry: &crate::modules::workspace::WorkspaceRegistry,
 ) -> std::io::Result<()> {
     use crate::modules::fs::copy;
     copy::check_depth(depth)?;
-    copy::guard_read(src)?;
+    copy::guard_read(registry, src)?;
     let meta = std::fs::symlink_metadata(src)?;
     if meta.is_dir() {
         plan.push(Upload::Dir(rel.clone()));
@@ -1284,13 +1285,13 @@ fn plan_upload(
                     format!("non-UTF-8 filename under {}", src.display()),
                 )
             })?;
-            plan_upload(&entry.path(), format!("{rel}/{name}"), depth + 1, plan)?;
+            let rel = format!("{rel}/{name}");
+            plan_upload(&entry.path(), rel, depth + 1, plan, registry)?;
         }
         return Ok(());
     }
     // The helper writes plain files only: a symlink uploads its target's bytes.
     let target = if meta.file_type().is_symlink() {
-        copy::guard_read(&std::fs::canonicalize(src)?)?;
         std::fs::metadata(src)?
     } else {
         meta
@@ -1357,6 +1358,7 @@ pub fn copy(
     sources: &[String],
     dest_dir: &str,
     rename_on_conflict: bool,
+    registry: &crate::modules::workspace::WorkspaceRegistry,
 ) -> Result<crate::modules::fs::copy::CopyResult, String> {
     copy_with(
         &mut |request, timeout| run_remote_json(host, request, timeout),
@@ -1364,6 +1366,7 @@ pub fn copy(
         sources,
         dest_dir,
         rename_on_conflict,
+        registry,
     )
 }
 
@@ -1389,6 +1392,7 @@ fn copy_with(
     sources: &[String],
     dest_dir: &str,
     rename_on_conflict: bool,
+    registry: &crate::modules::workspace::WorkspaceRegistry,
 ) -> Result<crate::modules::fs::copy::CopyResult, String> {
     use crate::modules::fs::copy::{CopyFailure, CopyResult};
     let dest = dest_dir.trim_end_matches('/');
@@ -1399,13 +1403,15 @@ fn copy_with(
         message: message.to_string(),
     };
     for (index, source) in sources.iter().enumerate() {
-        match copy_one(
+        let item = copy_one(
             run,
             std::path::Path::new(source),
             dest,
             rename_on_conflict,
             &mut taken,
-        ) {
+            registry,
+        );
+        match item {
             Ok(name) => result.created.push(format!("{dest}/{name}")),
             Err(ItemError::Remote(RemoteError::Failed(message))) => {
                 log::warn!("ssh copy({source} -> {host}:{dest}) failed: {message}");
@@ -1459,26 +1465,26 @@ fn listed_names(
     }
 }
 
+// The remote landing gets no deny-list check, like a remote editor save.
 fn copy_one(
     run: &mut RemoteRun,
     src: &std::path::Path,
     dest: &str,
     rename_on_conflict: bool,
     taken: &mut std::collections::HashSet<String>,
+    registry: &crate::modules::workspace::WorkspaceRegistry,
 ) -> Result<String, ItemError> {
     use crate::modules::fs::copy;
     let failed = |error: std::io::Error| RemoteError::Failed(error.to_string());
-    let (name, metadata) = copy::check_source(src).map_err(failed)?;
+    let (name, metadata) = copy::check_source(src, registry).map_err(failed)?;
     let name = name
         .to_str()
         .ok_or_else(|| RemoteError::Failed(format!("non-UTF-8 filename: {}", src.display())))?;
-    let target = format!("{dest}/{name}");
-    copy::guard_write(&target).map_err(failed)?;
     if !rename_on_conflict && taken.contains(name) {
-        return Err(failed(copy::already_exists(target)).into());
+        return Err(failed(copy::already_exists(format!("{dest}/{name}"))).into());
     }
     let mut plan = Vec::new();
-    plan_upload(src, String::new(), 0, &mut plan).map_err(failed)?;
+    plan_upload(src, String::new(), 0, &mut plan, registry).map_err(failed)?;
 
     let staging = format!("{dest}/{}{}", copy::STAGING_PREFIX, staging_suffix());
     run(
@@ -1531,10 +1537,9 @@ fn publish_staged(
         if rename_on_conflict && taken.contains(&candidate) {
             continue;
         }
-        let target = format!("{dest}/{candidate}");
-        copy::guard_write(&target).map_err(|e| RemoteError::Failed(e.to_string()))?;
         let request = serde_json::json!({
-            "op": "publish", "from": staged, "to": target, "staging": staging,
+            "op": "publish", "from": staged, "to": format!("{dest}/{candidate}"),
+            "staging": staging,
         });
         match run(&request, None) {
             Ok(_) => {
@@ -2093,6 +2098,7 @@ Host !secret prod
             sources,
             "/remote",
             true,
+            &crate::modules::workspace::WorkspaceRegistry::default(),
         );
         (result, requests)
     }
@@ -2367,28 +2373,12 @@ Host !secret prod
     }
 
     #[test]
-    fn the_deny_list_fails_secret_sources_and_destinations_before_any_upload() {
+    fn copy_uploads_what_the_editor_may_open_by_name() {
         let src = tempfile::tempdir().unwrap();
-        let sources = local_sources(src.path(), &["id_ed25519", "ok.txt"]);
-        std::fs::create_dir_all(src.path().join("pkg/deploy")).unwrap();
-        std::fs::write(src.path().join("pkg/readme.md"), b"r").unwrap();
-        std::fs::write(src.path().join("pkg/deploy/id_ed25519"), b"PRIVATE").unwrap();
-        let pkg = src.path().join("pkg").to_string_lossy().into_owned();
-        let mixed = [sources[0].clone(), pkg.clone(), sources[1].clone()];
-
-        let (result, requests) = stub_copy(&mixed, healthy);
-        let result = result.unwrap();
-        assert_eq!(result.created, ["/remote/ok.txt"]);
-        let secret = "refused: \"id_ed25519\" matches a sensitive-file pattern".to_string();
-        assert_eq!(
-            failures(&result),
-            [(sources[0].clone(), secret.clone()), (pkg, secret)]
-        );
-        let stagings = requests
-            .iter()
-            .filter(|r| r["op"] == "create_dir" && r["parents"] == false)
-            .count();
-        assert_eq!(stagings, 1, "only ok.txt may reach the host");
+        let mut sources = local_sources(src.path(), &[".env", "id_ed25519"]);
+        std::fs::create_dir_all(src.path().join("app/node_modules")).unwrap();
+        std::fs::write(src.path().join("app/node_modules/x.pem"), b"pem").unwrap();
+        sources.push(src.path().join("app").to_string_lossy().into_owned());
 
         let mut requests = Vec::new();
         let result = copy_with(
@@ -2397,24 +2387,62 @@ Host !secret prod
                 healthy(request)
             },
             "stub",
-            &sources[1..],
+            &sources,
             "~/.ssh",
             true,
+            &crate::modules::workspace::WorkspaceRegistry::default(),
         )
         .unwrap();
-        assert!(result.created.is_empty());
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
         assert_eq!(
-            result.failed[0].message,
-            "refused: path is inside a protected directory (.ssh)"
+            result.created,
+            ["~/.ssh/.env", "~/.ssh/id_ed25519", "~/.ssh/app"]
         );
-        assert!(
-            requests.iter().all(|r| r["op"] == "read_dir"),
-            "{requests:?}"
+        let pem = |r: &serde_json::Value| {
+            r["op"] == "write_bytes"
+                && r["path"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with("/item/node_modules/x.pem")
+        };
+        assert!(requests.iter().any(pem));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_detour_to_a_secret_fails_before_any_upload() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(src.path().join("keys")).unwrap();
+        std::fs::write(src.path().join("keys/id_ed25519"), b"PRIVATE").unwrap();
+        std::fs::create_dir(src.path().join("pkg")).unwrap();
+        std::fs::write(src.path().join("pkg/readme.md"), b"r").unwrap();
+        std::os::unix::fs::symlink("../keys/id_ed25519", src.path().join("pkg/notes.txt")).unwrap();
+        let pkg = src.path().join("pkg").to_string_lossy().into_owned();
+        let ok = local_sources(src.path(), &["ok.txt"]).remove(0);
+
+        let (result, requests) = stub_copy(&[pkg.clone(), ok], healthy);
+        let result = result.unwrap();
+        assert_eq!(result.created, ["/remote/ok.txt"]);
+        assert_eq!(
+            failures(&result),
+            [(
+                pkg,
+                "refused: \"id_ed25519\" matches a sensitive-file pattern".to_string()
+            )]
         );
+        let stagings = requests
+            .iter()
+            .filter(|r| r["op"] == "create_dir" && r["parents"] == false)
+            .count();
+        assert_eq!(stagings, 1, "only ok.txt may reach the host");
     }
 
     #[test]
     fn upload_plan_checks_depth_and_kinds_before_any_remote_call() {
+        let reg = crate::modules::workspace::WorkspaceRegistry::default();
+        let plan_upload = |src: &std::path::Path, plan: &mut Vec<Upload>| {
+            plan_upload(src, String::new(), 0, plan, &reg)
+        };
         let src = tempfile::tempdir().unwrap();
         let nested = |name: &str, levels: usize| {
             let mut path = src.path().join(name);
@@ -2427,10 +2455,10 @@ Host !secret prod
         let ok = nested("ok", 128);
         let deep = nested("deep", 129);
         let mut plan = Vec::new();
-        plan_upload(&ok, String::new(), 0, &mut plan).unwrap();
+        plan_upload(&ok, &mut plan).unwrap();
         assert_eq!(plan.len(), 129);
         assert_eq!(plan[0], Upload::Dir(String::new()));
-        let err = plan_upload(&deep, String::new(), 0, &mut Vec::new()).unwrap_err();
+        let err = plan_upload(&deep, &mut Vec::new()).unwrap_err();
         assert_eq!(err.to_string(), "folder nesting exceeds the copy limit");
 
         #[cfg(unix)]
@@ -2440,13 +2468,13 @@ Host !secret prod
             std::fs::write(pkg.join("sub/a.txt"), b"a").unwrap();
             std::os::unix::fs::symlink("sub/a.txt", pkg.join("file-link")).unwrap();
             let mut plan = Vec::new();
-            plan_upload(&pkg, String::new(), 0, &mut plan).unwrap();
+            plan_upload(&pkg, &mut plan).unwrap();
             assert!(plan.iter().any(|step| matches!(
                 step,
                 Upload::File { rel, .. } if rel == "/file-link"
             )));
             std::os::unix::fs::symlink("sub", pkg.join("dir-link")).unwrap();
-            let err = plan_upload(&pkg, String::new(), 0, &mut Vec::new()).unwrap_err();
+            let err = plan_upload(&pkg, &mut Vec::new()).unwrap_err();
             assert_eq!(
                 err.to_string(),
                 "folder symlinks cannot be copied to an SSH host"
@@ -2513,8 +2541,15 @@ Host !secret prod
         std::fs::write(local.join("bin.dat"), [0u8, 1, 2, 255, 254]).unwrap();
         std::fs::write(local.join("d/inner.txt"), b"inner").unwrap();
         let local_path = |rel: &str| local.join(rel).to_string_lossy().into_owned();
-        let uploaded = copy(&host, &[local_path("bin.dat"), local_path("d")], &base, true)
-            .expect("copy/upload");
+        let reg = crate::modules::workspace::WorkspaceRegistry::default();
+        let uploaded = copy(
+            &host,
+            &[local_path("bin.dat"), local_path("d")],
+            &base,
+            true,
+            &reg,
+        )
+        .expect("copy/upload");
         assert!(uploaded.failed.is_empty(), "{:?}", uploaded.failed);
         assert_eq!(
             uploaded.created,
@@ -2532,7 +2567,7 @@ Host !secret prod
         }
 
         // A clash never overwrites: refused without renaming, Finder name with it.
-        let refused = copy(&host, &[local_path("bin.dat")], &base, false).expect("copy");
+        let refused = copy(&host, &[local_path("bin.dat")], &base, false, &reg).expect("copy");
         assert!(refused.failed[0].message.contains("already exists"));
         create_file(&host, &format!("{base}/a.txt")).expect("create a.txt");
         std::fs::write(local.join("a.txt"), b"a").unwrap();
@@ -2545,6 +2580,7 @@ Host !secret prod
                 &[local_path("a.txt"), local_path("linked")],
                 &base,
                 true,
+                &reg,
             )
             .expect("copy");
             assert_eq!(mixed.created, [format!("{base}/a copy.txt")]);
