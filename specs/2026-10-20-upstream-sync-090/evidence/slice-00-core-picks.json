@@ -1,0 +1,40 @@
+{
+  "feature": "upstream-sync-090",
+  "slice": "slice-00-core-picks",
+  "timestamp": "2026-10-27T21:23:04Z",
+  "status": "merged",
+  "implementation": {
+    "branch": "upstream-sync-090--slice-00-core-picks",
+    "head": "6e3d6fcccfb881d1ed139795c9f090c6f52502b7",
+    "pr": 83
+  },
+  "review": {
+    "pipeline_code_reviewer": "APPROVED, 0 findings",
+    "code_review_high_rounds": 16,
+    "final": "only upstream-identical documented residuals and tie-break items",
+    "tie_break_rule": "where review rounds contradict, upstream behaviour wins"
+  },
+  "deterministic_gate": {
+    "marker_scrub": "clean",
+    "lint": "0 errors",
+    "typecheck": "clean",
+    "clippy": "-D warnings clean",
+    "build": "ok"
+  },
+  "tests": {
+    "vitest": 659,
+    "cargo": 443
+  },
+  "merge_commit": "b10bcf9b502a0d52deb00f65bfa3862af8bf192c",
+  "obligations_open": [
+    "AC6/AC9/AC12 QA: Cmd+S Save-Page-Dialog in echter WebView, Video/Poll bei minimiertem Fenster"
+  ],
+  "residual_risks": [
+    "Hostname-Redirect mit Opt-in ohne DNS-Klassifikation (upstream)",
+    "Env-Proxy loest Ziel selbst auf (upstream)",
+    "Key-Header folgen Redirect auf oeffentliches Literal / https->http (upstream)",
+    "Client-Cache 90 s Idle, Schluessel mit IP-Set (upstream)",
+    "Cmd+S nur im Editor-Tab, nicht in iframes/Settings (upstream)",
+    "Autosave-Wettlauf gegen Cmd+S (Bestand)"
+  ]
+}
