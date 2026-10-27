@@ -15,6 +15,9 @@ export type DocumentState =
   | { status: "toolarge"; size: number; limit: number }
   | { status: "error"; message: string };
 
+/** Result of an explicit save; only `"written"` put the buffer on disk. */
+export type SaveOutcome = "written" | "unchanged" | "conflict";
+
 type Options = {
   path: string;
   /** Execution env the file lives in (e.g. an SSH host). Falls back to the
@@ -87,9 +90,9 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
     setDirty(bufferRef.current !== content);
   }, [path, workspace]);
 
-  // Resolves false when the write was withheld because the file changed on disk
-  // since load; overwriting is then an explicit user action from the toast.
-  const saveNow = useCallback(async (): Promise<boolean> => {
+  // Resolves "conflict" when the write was withheld because the file changed on
+  // disk since load; overwriting is then an explicit user action from the toast.
+  const saveNow = useCallback(async (): Promise<"written" | "conflict"> => {
     const known = diskMtimeRef.current;
     if (known !== null) {
       const stat = await invoke<FileStat>("fs_stat", {
@@ -103,11 +106,11 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
           description: `${name} was modified by another program while you had unsaved changes. Overwrite to keep your version.`,
           action: { label: "Overwrite", onClick: () => void writeToDisk() },
         });
-        return false;
+        return "conflict";
       }
     }
     await writeToDisk();
-    return true;
+    return "written";
   }, [path, workspace, writeToDisk]);
 
   // Notify parent of dirty transitions.
@@ -184,9 +187,11 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
     return true;
   }, [readFromDisk, adoptRead, path]);
 
-  const save = useCallback(async (): Promise<boolean> => {
+  // A clean buffer, also the untouched one of a loading or binary doc, has
+  // nothing to write.
+  const save = useCallback(async (): Promise<SaveOutcome> => {
     clearAutoSaveTimer();
-    if (bufferRef.current === savedRef.current) return true;
+    if (bufferRef.current === savedRef.current) return "unchanged";
     return saveNow();
   }, [clearAutoSaveTimer, saveNow]);
 

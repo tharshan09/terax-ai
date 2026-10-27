@@ -50,11 +50,11 @@ import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { isHtmlPath, isMarkdownPath } from "@/lib/utils";
 import {
+  isEditorTabShortcut,
   useGlobalShortcuts,
   type ShortcutHandlers,
   type ShortcutId,
 } from "@/modules/shortcuts";
-import { isEditorTabShortcut } from "@/modules/shortcuts/shortcuts";
 import {
   SidebarRail,
   SIDEBAR_MAX_WIDTH,

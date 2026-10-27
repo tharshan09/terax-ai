@@ -142,6 +142,21 @@ fn pin_to(builder: ClientBuilder, host: &Host<&str>, ips: &[IpAddr]) -> ClientBu
     builder.resolve_to_addrs(name, &addrs)
 }
 
+// SECURITY: no proxy. A proxy resolves the target itself, past the pinning and
+// the GuardedResolver, and its own host name would have to pass the guard.
+fn direct_client() -> ClientBuilder {
+    reqwest::Client::builder().no_proxy()
+}
+
+fn probe_client(host: &Host<&str>, ips: &[IpAddr]) -> Result<reqwest::Client, String> {
+    let builder = direct_client()
+        .timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none());
+    pin_to(builder, host, ips)
+        .build()
+        .map_err(|e| e.to_string())
+}
+
 fn sanitize_headers(headers: Option<HashMap<String, String>>) -> Result<HeaderMap, String> {
     let mut map = HeaderMap::new();
     let Some(h) = headers else { return Ok(map) };
@@ -172,13 +187,7 @@ pub async fn lm_ping(base_url: String) -> Result<u16, String> {
     let host = parsed.host().ok_or_else(|| "missing host".to_string())?;
     let safe_ips = classify_and_collect_safe_ips(&host, true, system_lookup).await?;
 
-    let builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none());
-    let client = pin_to(builder, &host, &safe_ips)
-        .build()
-        .map_err(|e| e.to_string())?;
-    client
+    probe_client(&host, &safe_ips)?
         .get(parsed)
         .send()
         .await
@@ -218,7 +227,7 @@ fn build_safe_client(
     safe_ips: &[IpAddr],
     lookup: Lookup,
 ) -> Result<reqwest::Client, String> {
-    let builder = reqwest::Client::builder()
+    let builder = direct_client()
         .connect_timeout(Duration::from_secs(10))
         .dns_resolver(Arc::new(GuardedResolver {
             allow_private,
@@ -361,9 +370,21 @@ pub async fn ai_http_stream(
         }
     };
 
-    let client = build_safe_client(allow_private, &host, &safe_ips, system_lookup)?;
+    let client = match build_safe_client(allow_private, &host, &safe_ips, system_lookup) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = on_event.send(AiStreamEvent::Error { message: e.clone() });
+            return Err(e);
+        }
+    };
 
-    let req = build_request(&client, &method, parsed, headers, body)?;
+    let req = match build_request(&client, &method, parsed, headers, body) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = on_event.send(AiStreamEvent::Error { message: e.clone() });
+            return Err(e);
+        }
+    };
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
@@ -409,8 +430,10 @@ pub async fn ai_http_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::io::{Read, Write};
     use std::net::{Ipv4Addr, TcpListener};
+    use std::sync::{Mutex, MutexGuard};
     use std::thread::JoinHandle;
 
     fn no_dns(host: &str) -> io::Result<Vec<IpAddr>> {
@@ -483,6 +506,47 @@ mod tests {
     fn loopback_client(lookup: Lookup) -> reqwest::Client {
         let origin = Host::Ipv4(Ipv4Addr::LOCALHOST);
         build_safe_client(true, &origin, &[Ipv4Addr::LOCALHOST.into()], lookup).unwrap()
+    }
+
+    static PROXY_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const PROXY_VARS: [&str; 3] = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"];
+    const NO_PROXY_VARS: [&str; 2] = ["NO_PROXY", "no_proxy"];
+
+    // Points every proxy variable at a host that cannot resolve; dropping it
+    // restores the previous environment before the lock is released.
+    struct UnreachableProxyEnv {
+        saved: Vec<(&'static str, Option<OsString>)>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl UnreachableProxyEnv {
+        fn set() -> Self {
+            let lock = PROXY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let saved = PROXY_VARS
+                .iter()
+                .chain(&NO_PROXY_VARS)
+                .map(|&k| (k, std::env::var_os(k)))
+                .collect();
+            for k in PROXY_VARS {
+                std::env::set_var(k, "http://proxy.invalid:3128");
+            }
+            for k in NO_PROXY_VARS {
+                std::env::remove_var(k);
+            }
+            Self { saved, _lock: lock }
+        }
+    }
+
+    impl Drop for UnreachableProxyEnv {
+        fn drop(&mut self) {
+            for (k, v) in &self.saved {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
     }
 
     #[test]
@@ -650,6 +714,35 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 200);
         assert_eq!(resp.url().host_str(), Some("loopback-alias.test"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn clients_connect_directly_even_with_proxy_variables_set() {
+        let (port, server) = serve(|_| vec![LANDED.to_string(), LANDED.to_string()]);
+        let origin = Host::Ipv4(Ipv4Addr::LOCALHOST);
+        let ips = [IpAddr::from(Ipv4Addr::LOCALHOST)];
+        let (safe, probe) = {
+            let _env = UnreachableProxyEnv::set();
+            (
+                build_safe_client(true, &origin, &ips, no_dns).unwrap(),
+                probe_client(&origin, &ips).unwrap(),
+            )
+        };
+        let rt = runtime();
+        for client in [safe, probe] {
+            let body = rt.block_on(async {
+                let resp = client
+                    .get(format!("http://127.0.0.1:{port}/"))
+                    .send()
+                    .await
+                    .map_err(|e| error_chain(&e))
+                    .unwrap();
+                assert_eq!(resp.status(), 200);
+                resp.text().await.unwrap()
+            });
+            assert_eq!(body, "landed");
+        }
         server.join().unwrap();
     }
 

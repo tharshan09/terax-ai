@@ -60,7 +60,7 @@ export type EditorPaneHandle = {
   /** Apply CodeMirror's undo/redo commands. */
   undo: () => void;
   redo: () => void;
-  /** Rejects when the write fails; skips `onSaved` on a disk conflict. */
+  /** Rejects when the write fails; calls `onSaved` only after a real write. */
   save: () => Promise<void>;
 };
 
@@ -148,10 +148,10 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
     const onCloseRef = useRef(onClose);
     onCloseRef.current = onClose;
 
-    // saveRef resolves false when a disk conflict withheld the write and
-    // rejects on failure (useDocument toasts it); onSaved needs a real write.
+    // saveRef rejects on failure (useDocument toasts it); onSaved needs a real
+    // write, not a clean buffer or a write withheld by a disk conflict.
     const saveAndNotify = useCallback(async () => {
-      if (await saveRef.current()) onSavedRef.current?.();
+      if ((await saveRef.current()) === "written") onSavedRef.current?.();
     }, []);
 
     const pathRef = useRef(path);

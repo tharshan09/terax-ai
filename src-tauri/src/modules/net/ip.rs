@@ -136,10 +136,13 @@ fn embedded_ipv4(s: &[u16; 8]) -> Option<[Option<Ipv4Addr>; 2]> {
 }
 
 // ISATAP (RFC 5214) carries the IPv4 tunnel endpoint in the interface ID, under
-// any prefix, so it can hide behind an otherwise public /64.
+// any prefix, so it can hide behind an otherwise public /64; every u/g bit
+// combination counts.
+// Conservative on purpose: a lookalike IID over a private IPv4 needs opt-in, as
+// a real tunnel endpoint cannot be ruled out from the address alone.
 fn isatap_ipv4(s: &[u16; 8]) -> Option<Ipv4Addr> {
     match *s {
-        [_, _, _, _, 0 | 0x0200, 0x5efe, hi, lo] => Some(v4(hi, lo)),
+        [_, _, _, _, 0 | 0x0100 | 0x0200 | 0x0300, 0x5efe, hi, lo] => Some(v4(hi, lo)),
         _ => None,
     }
 }
@@ -257,6 +260,37 @@ mod tests {
         );
         assert_eq!(kind("2400:cb00::5efe:8.8.8.8"), IpKind::Public);
         assert_eq!(kind("2400:cb00::200:5efe:8.8.8.8"), IpKind::Public);
+    }
+
+    #[test]
+    fn isatap_interface_ids_with_the_group_bit_set_are_classified_too() {
+        assert_eq!(
+            kind("2400:cb00::100:5efe:a9fe:a9fe"),
+            IpKind::BlockedMetadata
+        );
+        assert_eq!(
+            kind("2400:cb00::300:5efe:169.254.169.254"),
+            IpKind::BlockedMetadata
+        );
+        assert_eq!(kind("2400:cb00::100:5efe:127.0.0.1"), IpKind::Loopback);
+        assert_eq!(kind("2400:cb00::300:5efe:127.0.0.1"), IpKind::Loopback);
+        assert_eq!(kind("2400:cb00::100:5efe:a00:1"), IpKind::Private);
+        assert_eq!(kind("2400:cb00::300:5efe:192.168.1.1"), IpKind::Private);
+        assert_eq!(kind("2400:cb00::100:5efe:8.8.8.8"), IpKind::Public);
+        assert_eq!(kind("2400:cb00::300:5efe:8.8.8.8"), IpKind::Public);
+        assert_eq!(kind("2400:cb00::400:5efe:a9fe:a9fe"), IpKind::Public);
+    }
+
+    #[test]
+    fn a_global_address_with_an_isatap_iid_over_a_private_ipv4_needs_opt_in() {
+        for addr in [
+            "2400:cb00::5efe:10.0.0.1",
+            "2400:cb00::100:5efe:10.0.0.1",
+            "2400:cb00::200:5efe:172.16.0.1",
+            "2400:cb00::300:5efe:192.168.0.1",
+        ] {
+            assert_eq!(kind(addr), IpKind::Private, "{addr}");
+        }
     }
 
     #[test]
