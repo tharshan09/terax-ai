@@ -21,8 +21,10 @@ Als Nächstes steht Welle C an (Pane von Tab A nach Tab B).
      Liste, die das Kürzen aushebelt und die Knöpfe aus dem Bild schiebt.
    - **B2** Bilder über SSH: Die Bildvorschau holt die Datei immer vom Mac, bei SSH liegt
      sie auf dem Server, die Vorschau bleibt leer. Fix: Bild über SSH lesen und anzeigen.
-     Offen: Ist die "Indexdatei mit Bildern" HTML (dann bekannte Grenze, relative Bilder in
-     Remote-HTML wurden bewusst verworfen) oder Markdown?
+     Laut User zeigt schon ein einfaches Foto nur das Fragezeichen-Symbol (Bild nicht
+     gefunden), das passt zur Diagnose. Beim Fix zusätzlich gegentesten: eine Indexdatei
+     mit eingebetteten Bildern (HTML wäre die bekannte Grenze für relative Bilder in
+     Remote-HTML, Markdown bräuchte denselben Ladeweg wie die Bildvorschau).
 3. **Features, je eine eigene Discovery:**
    - **F1** Explorer: Suche findet nichts im übergeordneten Ordner, Wunsch nach oben zu
      navigieren. Kernfrage: Wann folgt der Explorer dem Terminal-Ordner, wann bleibt er
