@@ -50,8 +50,8 @@ import { usePreferencesStore } from "@/modules/settings/preferences";
 import { isHtmlPath, isMarkdownPath } from "@/lib/utils";
 import {
   useGlobalShortcuts,
-  type Shortcut,
   type ShortcutHandlers,
+  type ShortcutId,
 } from "@/modules/shortcuts";
 import {
   SidebarRail,
@@ -1009,8 +1009,12 @@ export default function App() {
   );
 
   const shortcutsDisabled = useCallback(
-    ({ id, scope }: Shortcut, e: KeyboardEvent) => {
-      if (scope === "editorTab") {
+    (id: ShortcutId, e: KeyboardEvent) => {
+      if (
+        id === "editor.undo" ||
+        id === "editor.redo" ||
+        id === "editor.save"
+      ) {
         return activeTab?.kind !== "editor";
       }
       if (id === "ai.askSelection") {

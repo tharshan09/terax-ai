@@ -71,16 +71,8 @@ export type Shortcut = {
   group: ShortcutGroup;
   defaultBindings: KeyBinding[];
   allowRepeat?: boolean;
-  /** Applies only while the active tab is an editor; read by the app's isDisabled. */
-  scope?: "editorTab";
-  /** "swallow" claims a held key without running again instead of skipping it. */
-  onRepeat?: "swallow";
-  /** Focus in a field outside CodeMirror: "native" leaves the key to the field,
-   *  "swallow" claims it without running. */
-  inField?: "swallow" | "native";
-  /** "preventDefault": while disabled the key still reaches other listeners but
-   *  never the WebView's default action. */
-  whenDisabled?: "preventDefault";
+  /** A match always blocks the WebView default, even when the handler is skipped. */
+  claimDefault?: boolean;
 };
 
 export const SHORTCUTS: Shortcut[] = [
@@ -336,8 +328,6 @@ export const SHORTCUTS: Shortcut[] = [
     label: "Undo",
     group: "Editor",
     defaultBindings: [{ [MOD_PROP]: true, key: "z" }],
-    scope: "editorTab",
-    inField: "native",
   },
   {
     id: "editor.redo",
@@ -347,20 +337,14 @@ export const SHORTCUTS: Shortcut[] = [
       { [MOD_PROP]: true, key: "y" },
       { [MOD_PROP]: true, shift: true, key: "z" },
     ],
-    scope: "editorTab",
-    inField: "native",
   },
-  // Its binding never reaches the WebView's Save Page, in any tab or field;
-  // it saves only in an editor tab with focus outside other fields.
+  // Mod+S at the app layer so WKWebView cannot open "Save Page" (#969).
   {
     id: "editor.save",
     label: "Save file",
     group: "Editor",
     defaultBindings: [{ [MOD_PROP]: true, key: "s" }],
-    scope: "editorTab",
-    onRepeat: "swallow",
-    inField: "swallow",
-    whenDisabled: "preventDefault",
+    claimDefault: true,
   },
 ];
 

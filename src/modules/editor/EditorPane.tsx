@@ -60,7 +60,7 @@ export type EditorPaneHandle = {
   /** Apply CodeMirror's undo/redo commands. */
   undo: () => void;
   redo: () => void;
-  /** Rejects when the write fails; useDocument has already toasted it. */
+  /** Same save as Mod-s / :w; rejects when the write fails. */
   save: () => Promise<void>;
 };
 
@@ -71,6 +71,7 @@ type Props = {
   workspace?: WorkspaceEnv;
   overrideLanguage?: string | null;
   onDirtyChange?: (dirty: boolean) => void;
+  onSaved?: () => void;
   onClose?: () => void;
 };
 
@@ -82,7 +83,8 @@ function formatBytes(n: number): string {
 
 export const EditorPane = forwardRef<EditorPaneHandle, Props>(
   function EditorPane(props, ref) {
-    const { path, workspace, overrideLanguage, onDirtyChange, onClose } = props;
+    const { path, workspace, overrideLanguage, onDirtyChange, onSaved, onClose } =
+      props;
 
     const { doc, onChange, save, reload } = useDocument({
       path,
@@ -136,10 +138,13 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
         unsubPrefs();
       };
     }, []);
-    // A stable save keeps the extensions identity fixed; a new one makes
-    // @uiw/react-codemirror reconfigure the state and wipe the language.
+    // Stabilize save + onSaved via refs so the extensions array never changes
+    // identity — a new identity makes @uiw/react-codemirror reconfigure the
+    // whole state, wiping the language compartment.
     const saveRef = useRef(save);
     saveRef.current = save;
+    const onSavedRef = useRef(onSaved);
+    onSavedRef.current = onSaved;
     const onCloseRef = useRef(onClose);
     onCloseRef.current = onClose;
 
@@ -182,7 +187,13 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
         ),
         vimHandlersExtension(() => ({
           save: () => {
-            void saveRef.current().catch(() => {});
+            // onSaved must only fire on a real write: saveRef rejects on
+            // failure (surfaced via a toast in useDocument) and resolves false
+            // when the write was withheld on a disk-conflict. Swallow the
+            // rejection here to avoid an unhandled promise.
+            void (async () => {
+              if (await saveRef.current()) onSavedRef.current?.();
+            })().catch(() => {});
           },
           close: () => onCloseRef.current?.(),
         })),
@@ -227,13 +238,14 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
           getPath: () => pathRef.current,
           getLanguage: () => languageRef.current,
         }),
-        // Fallback for when editor.save is rebound away from Mod+S.
         keymap.of([
           {
             key: "Mod-s",
             preventDefault: true,
             run: () => {
-              void saveRef.current().catch(() => {});
+              void (async () => {
+                if (await saveRef.current()) onSavedRef.current?.();
+              })().catch(() => {});
               return true;
             },
           },
@@ -341,7 +353,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
           if (view) redo(view);
         },
         save: async () => {
-          await saveRef.current();
+          if (await saveRef.current()) onSavedRef.current?.();
         },
       }),
       [path, applyPendingGoto],

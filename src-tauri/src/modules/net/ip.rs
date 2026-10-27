@@ -36,9 +36,9 @@ pub(super) fn ip_kind(ip: IpAddr) -> IpKind {
 
 fn ipv4_kind(v: Ipv4Addr) -> IpKind {
     let o = v.octets();
-    // Cloud metadata services: link-local 169.254.169.254, and Alibaba Cloud's
-    // 100.100.100.200 inside the otherwise private CGNAT range.
-    if v.is_link_local() || o == [100, 100, 100, 200] {
+    // Metadata services stay blocked even with private access: link-local
+    // 169.254.169.254, Alibaba's 100.100.100.200 and Oracle's 192.0.0.192.
+    if v.is_link_local() || o == [100, 100, 100, 200] || o == [192, 0, 0, 192] {
         return IpKind::BlockedMetadata;
     }
     // 0.0.0.0/8 is "this host" to most stacks.
@@ -76,8 +76,11 @@ fn prefix_kind(v: Ipv6Addr, s: &[u16; 8]) -> IpKind {
     if v.is_unspecified() || v.is_loopback() || v.is_multicast() {
         return IpKind::Loopback;
     }
-    // AWS serves instance metadata on fd00:ec2::254.
-    if (s[0] == 0xfd00 && s[1] == 0xec2) || v.is_unicast_link_local() {
+    // AWS and GCP serve instance metadata on fd00:ec2::254 and fd20:ce::254.
+    if (s[0] == 0xfd00 && s[1] == 0xec2)
+        || (s[0] == 0xfd20 && s[1] == 0xce)
+        || v.is_unicast_link_local()
+    {
         return IpKind::BlockedMetadata;
     }
     if let Some(kind) = embedded_ipv4(s)
@@ -187,6 +190,17 @@ mod tests {
         assert_eq!(kind("64:ff9b::6464:64c8"), IpKind::BlockedMetadata);
         assert_eq!(kind("100.100.100.199"), IpKind::Private);
         assert_eq!(kind("100.100.100.201"), IpKind::Private);
+    }
+
+    #[test]
+    fn oracle_and_gcp_metadata_are_blocked_inside_private_space() {
+        assert_eq!(kind("192.0.0.192"), IpKind::BlockedMetadata);
+        assert_eq!(kind("::ffff:192.0.0.192"), IpKind::BlockedMetadata);
+        assert_eq!(kind("64:ff9b::c000:c0"), IpKind::BlockedMetadata);
+        assert_eq!(kind("192.0.0.191"), IpKind::Private);
+        assert_eq!(kind("192.0.0.193"), IpKind::Private);
+        assert_eq!(kind("fd20:ce::254"), IpKind::BlockedMetadata);
+        assert_eq!(kind("fd20:cf::254"), IpKind::Private);
     }
 
     #[test]

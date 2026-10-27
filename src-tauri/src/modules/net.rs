@@ -100,9 +100,8 @@ fn admit(host: &Host<impl AsRef<str>>, kind: IpKind, allow_private: bool) -> Res
     }
 }
 
-/// Resolve the host once and let `admit` judge its worst class; on success,
-/// return that class and every resolved IP, for pinning reqwest's resolver to
-/// exactly the addresses that were judged (defeats DNS rebinding).
+/// The returned IPs pin reqwest to exactly the addresses `admit` judged, so a
+/// second lookup cannot rebind the host.
 async fn resolve_and_admit(
     host: &Host<String>,
     allow_private: bool,
