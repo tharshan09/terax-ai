@@ -75,10 +75,14 @@ export function useGlobalShortcuts(
           () => options?.isDisabled?.(s, e) ?? false,
         );
         if (verdict === "skip") continue;
+        if (verdict === "native") return;
+        if (verdict === "block") {
+          e.preventDefault();
+          return;
+        }
         const h = handlers[s.id];
-        if (verdict === "native" || !h) return;
+        if (!h) return;
         e.preventDefault();
-        if (verdict === "block") return;
         e.stopImmediatePropagation();
         if (verdict === "run") h(e);
         return;

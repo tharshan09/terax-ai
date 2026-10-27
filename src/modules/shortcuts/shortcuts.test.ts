@@ -104,6 +104,16 @@ describe("SHORTCUTS registry", () => {
     expect(laterListener).toHaveBeenCalledTimes(2);
   });
 
+  it("[AC-7] blocks the WebView default of a disabled Mod+S without a handler", () => {
+    renderHook(() =>
+      useGlobalShortcuts({}, { isDisabled: (s) => s.scope === "editorTab" }),
+    );
+    window.addEventListener("keydown", laterListener);
+    const e = press({ ...MOD, key: "s" });
+    expect(e.defaultPrevented).toBe(true);
+    expect(laterListener).toHaveBeenCalledTimes(1);
+  });
+
   it("[AC-6] swallows a held Mod+S without saving again", () => {
     const handlers = mountShortcuts("editor");
     const e = press({ ...MOD, key: "s", repeat: true }, editorContent());

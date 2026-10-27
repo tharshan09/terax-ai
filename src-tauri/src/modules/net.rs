@@ -43,9 +43,7 @@ fn host_ip<S>(host: &Host<S>) -> Option<IpAddr> {
 }
 
 fn worst_kind(ips: &[IpAddr]) -> Option<IpKind> {
-    ips.iter()
-        .map(|ip| ip_kind(*ip))
-        .max_by_key(|kind| kind.severity())
+    ips.iter().map(|ip| ip_kind(*ip)).reduce(IpKind::worse)
 }
 
 async fn lookup(name: String) -> Result<Vec<IpAddr>, String> {
@@ -102,20 +100,25 @@ fn admit(host: &Host<impl AsRef<str>>, kind: IpKind, allow_private: bool) -> Res
     }
 }
 
-/// Classify the host AND return safe IPs to pin reqwest's resolver to.
-/// Defeats DNS rebinding (second-lookup-returns-different-IP) by reusing
-/// exactly the addresses that passed `ip_kind`.
+/// Classify the host AND return its class plus the safe IPs to pin reqwest's
+/// resolver to. Defeats DNS rebinding (second-lookup-returns-different-IP) by
+/// reusing exactly the addresses that passed `ip_kind`.
 async fn classify_and_collect_safe_ips(
     host: &Host<String>,
     allow_private: bool,
-) -> Result<Vec<IpAddr>, String> {
+) -> Result<(IpKind, Vec<IpAddr>), String> {
     let (worst, ips) = resolve_and_classify(host).await?;
     admit(host, worst, allow_private)?;
-    Ok(ips)
+    Ok((worst, ips))
+}
+
+// Local models never go through an env proxy. Residual risk only for public
+// targets: behind an env proxy the proxy resolves them again.
+fn uses_env_proxy(kind: IpKind) -> bool {
+    kind == IpKind::Public
 }
 
 // Reuse the classified addresses, not a second lookup; reqwest fills in port 0.
-// Residual risk, as upstream: behind an env proxy the proxy resolves the target.
 fn pin_to(builder: ClientBuilder, host: &Host<String>, ips: &[IpAddr]) -> ClientBuilder {
     let Host::Domain(name) = host else {
         return builder;
@@ -151,20 +154,17 @@ pub async fn lm_ping(base_url: String) -> Result<u16, String> {
     }
     let probe = format!("{trimmed}/models");
     let (parsed, host) = validate_url(&probe)?;
-    let safe_ips = classify_and_collect_safe_ips(&host, true).await?;
+    let (kind, safe_ips) = classify_and_collect_safe_ips(&host, true).await?;
 
-    let builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none());
-    let client = pin_to(builder, &host, &safe_ips)
-        .build()
-        .map_err(|e| e.to_string())?;
+    // Same client as the AI calls, so a redirect the AI calls refuse fails here too.
+    let client = build_safe_client(true, &host, kind, &safe_ips)?;
     client
         .get(parsed)
+        .timeout(Duration::from_secs(5))
         .send()
         .await
         .map(|r| r.status().as_u16())
-        .map_err(|e| e.to_string())
+        .map_err(send_error)
 }
 // AI HTTP proxy — bypasses webview CORS / Mixed-Content / PNA so local-network
 // model servers (LM Studio, Ollama, vLLM) work in the production bundle.
@@ -196,9 +196,10 @@ fn build_request(
 fn build_safe_client(
     allow_private: bool,
     host: &Host<String>,
+    kind: IpKind,
     safe_ips: &[IpAddr],
 ) -> Result<reqwest::Client, String> {
-    let builder = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::custom(
             move |attempt| match redirect_decision(
@@ -208,13 +209,43 @@ fn build_safe_client(
                 allow_private,
             ) {
                 RedirectDecision::Follow => attempt.follow(),
-                RedirectDecision::Stop => attempt.stop(),
+                RedirectDecision::Stop => {
+                    let blocked = RedirectBlocked::new(attempt.url());
+                    attempt.error(blocked)
+                }
                 RedirectDecision::TooMany => attempt.error("too many redirects"),
             },
         ));
+    if !uses_env_proxy(kind) {
+        builder = builder.no_proxy();
+    }
     pin_to(builder, host, safe_ips)
         .build()
         .map_err(|e| e.to_string())
+}
+
+#[derive(Debug)]
+struct RedirectBlocked(String);
+
+impl RedirectBlocked {
+    fn new(next: &Url) -> Self {
+        Self(next.host_str().unwrap_or(next.as_str()).to_string())
+    }
+}
+
+impl std::fmt::Display for RedirectBlocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "redirect to another host blocked: {}", self.0)
+    }
+}
+
+impl std::error::Error for RedirectBlocked {}
+
+// reqwest only says "error following redirect"; name the blocked host instead.
+fn send_error(e: reqwest::Error) -> String {
+    std::error::Error::source(&e)
+        .and_then(|source| source.downcast_ref::<RedirectBlocked>())
+        .map_or_else(|| e.to_string(), ToString::to_string)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -269,12 +300,12 @@ pub async fn ai_http_request(
 ) -> Result<HttpResponse, String> {
     let allow_private = allow_private_network.unwrap_or(false);
     let (parsed, host) = validate_url(&url)?;
-    let safe_ips = classify_and_collect_safe_ips(&host, allow_private).await?;
+    let (kind, safe_ips) = classify_and_collect_safe_ips(&host, allow_private).await?;
 
-    let client = build_safe_client(allow_private, &host, &safe_ips)?;
+    let client = build_safe_client(allow_private, &host, kind, &safe_ips)?;
 
     let req = build_request(&client, &method, parsed, headers, body)?;
-    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let resp = req.send().await.map_err(send_error)?;
 
     let status = resp.status().as_u16();
     let headers = header_map_to_strings(resp.headers());
@@ -319,7 +350,7 @@ pub async fn ai_http_stream(
             return Err(e);
         }
     };
-    let safe_ips = match classify_and_collect_safe_ips(&host, allow_private).await {
+    let (kind, safe_ips) = match classify_and_collect_safe_ips(&host, allow_private).await {
         Ok(v) => v,
         Err(e) => {
             let _ = on_event.send(AiStreamEvent::Error { message: e.clone() });
@@ -327,7 +358,7 @@ pub async fn ai_http_stream(
         }
     };
 
-    let client = match build_safe_client(allow_private, &host, &safe_ips) {
+    let client = match build_safe_client(allow_private, &host, kind, &safe_ips) {
         Ok(c) => c,
         Err(e) => {
             let _ = on_event.send(AiStreamEvent::Error { message: e.clone() });
@@ -345,10 +376,11 @@ pub async fn ai_http_stream(
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
+            let message = send_error(e);
             let _ = on_event.send(AiStreamEvent::Error {
-                message: e.to_string(),
+                message: message.clone(),
             });
-            return Err(e.to_string());
+            return Err(message);
         }
     };
 
@@ -389,7 +421,9 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::{Ipv4Addr, TcpListener};
+    use std::sync::{Arc, Mutex};
     use std::thread::JoinHandle;
+    use tauri::ipc::InvokeResponseBody;
 
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
@@ -444,9 +478,24 @@ mod tests {
         build_safe_client(
             true,
             &host_of("http://127.0.0.1/"),
+            IpKind::Loopback,
             &[Ipv4Addr::LOCALHOST.into()],
         )
         .unwrap()
+    }
+
+    fn recording_channel() -> (Channel<AiStreamEvent>, Arc<Mutex<Vec<serde_json::Value>>>) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&events);
+        let channel = Channel::new(move |body| {
+            if let InvokeResponseBody::Json(json) = body {
+                sink.lock()
+                    .unwrap()
+                    .push(serde_json::from_str(&json).unwrap());
+            }
+            Ok(())
+        });
+        (channel, events)
     }
 
     #[test]
@@ -563,19 +612,47 @@ mod tests {
     }
 
     #[test]
-    fn the_client_returns_a_redirect_to_another_name_instead_of_following_it() {
-        let (port, server) = serve(|port| vec![redirect_to("metadata-alias.test", port)]);
+    fn a_redirect_to_another_name_fails_with_the_blocked_host_instead_of_the_3xx() {
+        let (port, server) = serve(|port| vec![redirect_to("metadata-alias.test", port); 3]);
         let rt = runtime();
-        let resp = rt
-            .block_on(
-                loopback_client()
-                    .get(format!("http://127.0.0.1:{port}/"))
-                    .send(),
-            )
-            .unwrap();
-        assert_eq!(resp.status(), 302);
-        assert_eq!(resp.url().host_str(), Some("127.0.0.1"));
-        server.join().unwrap();
+        let base = format!("http://127.0.0.1:{port}");
+        let expected = "redirect to another host blocked: metadata-alias.test";
+
+        let request = rt.block_on(ai_http_request(
+            format!("{base}/"),
+            "GET".into(),
+            None,
+            None,
+            Some(true),
+        ));
+        assert_eq!(request.unwrap_err(), expected);
+
+        let (channel, events) = recording_channel();
+        let stream = rt.block_on(ai_http_stream(
+            format!("{base}/"),
+            "GET".into(),
+            None,
+            None,
+            Some(true),
+            channel,
+        ));
+        assert_eq!(stream.unwrap_err(), expected);
+        assert_eq!(
+            *events.lock().unwrap(),
+            [serde_json::json!({ "kind": "error", "message": expected })]
+        );
+
+        assert_eq!(rt.block_on(lm_ping(base)).unwrap_err(), expected);
+        let heads = server.join().unwrap();
+        assert!(heads[2].starts_with("GET /models "), "{}", heads[2]);
+    }
+
+    #[test]
+    fn only_public_targets_may_use_an_env_proxy() {
+        assert!(uses_env_proxy(IpKind::Public));
+        for kind in [IpKind::Private, IpKind::Loopback, IpKind::BlockedMetadata] {
+            assert!(!uses_env_proxy(kind), "{kind:?}");
+        }
     }
 
     #[test]
@@ -605,7 +682,7 @@ mod tests {
         assert!(refused.contains("requires explicit opt-in"), "{refused}");
         assert_eq!(
             classify("http://[::1]:11434/", true).unwrap(),
-            vec!["::1".parse::<IpAddr>().unwrap()]
+            (IpKind::Loopback, vec!["::1".parse::<IpAddr>().unwrap()])
         );
         let blocked = classify("http://[::ffff:169.254.169.254]/", true).unwrap_err();
         assert!(blocked.starts_with("host not allowed: "), "{blocked}");

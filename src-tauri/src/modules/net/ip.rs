@@ -13,13 +13,17 @@ pub(super) enum IpKind {
 }
 
 impl IpKind {
-    pub(super) fn severity(self) -> u8 {
+    fn severity(self) -> u8 {
         match self {
             Self::Public => 0,
             Self::Private => 1,
             Self::Loopback => 2,
             Self::BlockedMetadata => 3,
         }
+    }
+
+    pub(super) fn worse(self, other: Self) -> Self {
+        cmp::max_by_key(self, other, |kind| kind.severity())
     }
 }
 
@@ -61,7 +65,7 @@ fn ipv6_kind(v: Ipv6Addr) -> IpKind {
     let s = v.segments();
     let kind = prefix_kind(v, &s);
     match isatap_ipv4(&s) {
-        Some(tunnel) => cmp::max_by_key(kind, ipv4_kind(tunnel), |k| k.severity()),
+        Some(tunnel) => kind.worse(ipv4_kind(tunnel)),
         None => kind,
     }
 }
@@ -74,13 +78,12 @@ fn prefix_kind(v: Ipv6Addr, s: &[u16; 8]) -> IpKind {
     if (s[0] == 0xfd00 && s[1] == 0xec2) || v.is_unicast_link_local() {
         return IpKind::BlockedMetadata;
     }
-    if let Some(embedded) = embedded_ipv4(s) {
-        return embedded
-            .into_iter()
-            .flatten()
-            .map(ipv4_kind)
-            .max_by_key(|kind| kind.severity())
-            .unwrap_or(IpKind::Public);
+    if let Some(kind) = embedded_ipv4(s)
+        .into_iter()
+        .map(ipv4_kind)
+        .reduce(IpKind::worse)
+    {
+        return kind;
     }
     // Fork deviation: upstream rates all of 64:ff9b:1::/48 Private; reading the
     // embedded IPv4 too keeps metadata blocked even with private access.
@@ -88,9 +91,7 @@ fn prefix_kind(v: Ipv6Addr, s: &[u16; 8]) -> IpKind {
         return local_use_nat64_ipv4(&v.octets())
             .into_iter()
             .map(ipv4_kind)
-            .chain([IpKind::Private])
-            .max_by_key(|kind| kind.severity())
-            .unwrap_or(IpKind::Private);
+            .fold(IpKind::Private, IpKind::worse);
     }
     // Deny by default: only global unicast 2000::/3 can be public.
     if s[0] & 0xe000 != 0x2000 || is_special_purpose_non_global(s) {
@@ -104,7 +105,7 @@ fn is_special_purpose_non_global(s: &[u16; 8]) -> bool {
     match *s {
         [0x2001, 0x0db8, ..] => true,
         [0x3fff, b, ..] => b < 0x1000,
-        [0x2001, 1, 0, 0, 0, 0, 0, 1 | 2]
+        [0x2001, 1, 0, 0, 0, 0, 0, 1..=3]
         | [0x2001, 3, ..]
         | [0x2001, 4, 0x112, ..]
         | [0x2001, 0x20..=0x3f, ..] => false,
@@ -119,20 +120,19 @@ fn v4(hi: u16, lo: u16) -> Ipv4Addr {
     Ipv4Addr::new(a, b, c, d)
 }
 
-fn embedded_ipv4(s: &[u16; 8]) -> Option<[Option<Ipv4Addr>; 2]> {
+// The IPv4 destinations a translation prefix carries; empty for any other address.
+fn embedded_ipv4(s: &[u16; 8]) -> Vec<Ipv4Addr> {
     match *s {
-        [0, 0, 0, 0, 0, 0xffff, hi, lo] | [0, 0, 0, 0, 0, 0, hi, lo] => {
-            Some([Some(v4(hi, lo)), None])
-        }
-        [0, 0, 0, 0, 0xffff, 0, hi, lo] => Some([Some(v4(hi, lo)), None]),
-        [0x64, 0xff9b, 0, 0, 0, 0, hi, lo] => Some([Some(v4(hi, lo)), None]),
-        [0x2002, hi, lo, ..] => Some([Some(v4(hi, lo)), None]),
+        [0, 0, 0, 0, 0, 0xffff, hi, lo]
+        | [0, 0, 0, 0, 0, 0, hi, lo]
+        | [0, 0, 0, 0, 0xffff, 0, hi, lo]
+        | [0x64, 0xff9b, 0, 0, 0, 0, hi, lo]
+        | [0x2002, hi, lo, ..] => vec![v4(hi, lo)],
         // Teredo stores the client IPv4 bit-inverted.
-        [0x2001, 0, server_hi, server_lo, _, _, client_hi, client_lo] => Some([
-            Some(v4(server_hi, server_lo)),
-            Some(v4(!client_hi, !client_lo)),
-        ]),
-        _ => None,
+        [0x2001, 0, server_hi, server_lo, _, _, client_hi, client_lo] => {
+            vec![v4(server_hi, server_lo), v4(!client_hi, !client_lo)]
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -312,6 +312,7 @@ mod tests {
         for addr in [
             "2001:1::1",
             "2001:1::2",
+            "2001:1::3",
             "2001:3::1",
             "2001:3:ffff::1",
             "2001:4:112::1",

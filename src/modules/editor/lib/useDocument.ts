@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { basename } from "@/lib/utils";
 import type { ReadResult } from "@/modules/ai/lib/native";
 import { currentWorkspaceEnv, type WorkspaceEnv } from "@/modules/workspace";
 import { usePreferencesStore } from "@/modules/settings/preferences";
@@ -26,18 +27,24 @@ type Options = {
 
 type DocTarget = { path: string; workspace?: WorkspaceEnv };
 
-// A write or stat that never settles must not hold every later save forever.
-const SAVE_WAIT_MS = 15_000;
+const SLOW_SAVE_HINT_MS = 5_000;
 
-function settledOrTimedOut(previous: Promise<unknown>): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, SAVE_WAIT_MS);
-    const done = () => {
-      clearTimeout(timer);
-      resolve();
-    };
-    previous.then(done, done);
-  });
+// No timeout: a second write beside a hung one could land in either order.
+function afterPrevious(
+  previous: Promise<unknown>,
+  path: string,
+): Promise<void> {
+  const hint = setTimeout(() => {
+    toast.message("Waiting for the previous save to finish", {
+      id: `save-wait:${path}`,
+    });
+  }, SLOW_SAVE_HINT_MS);
+  return previous.then(() => clearTimeout(hint));
+}
+
+function notSaved(target: DocTarget): false {
+  toast.error(`Not saved: ${basename(target.path)} was moved or closed`);
+  return false;
 }
 
 function readFromDisk({ path, workspace }: DocTarget) {
@@ -72,6 +79,10 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
   // One save at a time: a later one waits, so its conflict check compares
   // against the mtime of our own write instead of reporting it as a conflict.
   const saveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  // Bumped as each write starts and ends: a reload read that overlaps a write
+  // may predate it and must not become the buffer.
+  const writeGenRef = useRef(0);
+  const writingRef = useRef(false);
   const dirtyRef = useRef(false);
   useEffect(() => {
     dirtyRef.current = dirty;
@@ -90,7 +101,8 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
   }, []);
 
   const enqueueSave = useCallback(<T>(task: () => Promise<T>): Promise<T> => {
-    const run = settledOrTimedOut(saveQueueRef.current).then(task);
+    const previous = saveQueueRef.current;
+    const run = afterPrevious(previous, targetRef.current.path).then(task);
     saveQueueRef.current = run.catch(() => {});
     return run;
   }, []);
@@ -98,9 +110,11 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
   // Persist the buffer (restoring the file's original EOL) and adopt the
   // returned disk mtime as the new conflict baseline, with no follow-up stat.
   const writeToDisk = useCallback(async (target: DocTarget) => {
-    if (targetRef.current !== target) return;
+    if (targetRef.current !== target) return notSaved(target);
     const content = bufferRef.current;
     let mtime: number;
+    writeGenRef.current += 1;
+    writingRef.current = true;
     try {
       mtime = await invoke<number>("fs_write_file", {
         path: target.path,
@@ -116,19 +130,23 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
       // are skipped, so the unsaved edits are preserved. Remote saves in
       // particular can fail (permission denied, dropped connection) and must
       // never be swallowed. Re-throw so callers don't signal a successful save.
-      const name = target.path.split(/[\\/]/).pop() || target.path;
-      toast.error(`Couldn’t save ${name}: ${String(e)}`);
+      toast.error(`Couldn’t save ${basename(target.path)}: ${String(e)}`);
       throw e;
+    } finally {
+      writingRef.current = false;
+      writeGenRef.current += 1;
     }
-    if (targetRef.current !== target) return;
+    // Written to the path it was saved for; the editor has since left it.
+    if (targetRef.current !== target) return true;
     diskMtimeRef.current = mtime;
     savedRef.current = content;
     // Edits typed while the write was in flight must stay dirty.
     setDirty(bufferRef.current !== content);
+    return true;
   }, []);
 
-  // Resolves false when the write was withheld because the file changed on disk
-  // since load; overwriting is then an explicit user action from the toast.
+  // Resolves false when the write was withheld: the editor left the file, or it
+  // changed on disk since load and overwriting is an explicit toast action.
   const saveIfChanged = useCallback(async (): Promise<boolean> => {
     const target = targetRef.current;
     if (bufferRef.current === savedRef.current) return true;
@@ -138,12 +156,11 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
         path: target.path,
         workspace: target.workspace ?? currentWorkspaceEnv(),
       }).catch(() => null);
-      if (targetRef.current !== target) return true;
+      if (targetRef.current !== target) return notSaved(target);
       if (stat && stat.mtime !== known) {
-        const name = target.path.split(/[\\/]/).pop() ?? target.path;
         toast.warning("File changed on disk", {
           id: `save-conflict:${target.path}`,
-          description: `${name} was modified by another program while you had unsaved changes. Overwrite to keep your version.`,
+          description: `${basename(target.path)} was modified by another program while you had unsaved changes. Overwrite to keep your version.`,
           action: {
             label: "Overwrite",
             onClick: () =>
@@ -153,8 +170,7 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
         return false;
       }
     }
-    await writeToDisk(target);
-    return true;
+    return writeToDisk(target);
   }, [enqueueSave, writeToDisk]);
 
   // Notify parent of dirty transitions.
@@ -216,9 +232,11 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
   const reload = useCallback((): boolean => {
     if (dirtyRef.current) return false;
     const target = targetRef.current;
+    const writeGen = writeGenRef.current;
     void readFromDisk(target)
       .then((res) => {
-        if (targetRef.current === target && !dirtyRef.current) {
+        const raced = writeGenRef.current !== writeGen || writingRef.current;
+        if (targetRef.current === target && !dirtyRef.current && !raced) {
           adoptRead(res, true);
         }
       })
