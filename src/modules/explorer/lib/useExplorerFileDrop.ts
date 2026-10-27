@@ -2,9 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { parentDir } from "@/lib/utils";
 import {
   type CopyResult,
-  parentDir,
   reportCopyFailures,
 } from "@/modules/explorer/lib/clipboardPaste";
 import { currentWorkspaceEnv } from "@/modules/workspace";
@@ -35,7 +35,7 @@ function dirAt(
   const row = el.closest<HTMLElement>("[data-fs-path]");
   if (row) {
     const p = row.getAttribute("data-fs-path") as string;
-    return isDir(p) ? p : parentDir(p, rootPath ?? p);
+    return isDir(p) ? p : parentDir(p);
   }
   if (el.closest("[data-explorer-drop]")) return rootPath;
   return null;

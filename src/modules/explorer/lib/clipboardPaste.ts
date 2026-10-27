@@ -1,13 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
+import { parentDir } from "@/lib/utils";
+import {
+  isTerminalPasteChord,
+  type TerminalKeyEvent,
+} from "@/modules/terminal/lib/keymap";
 import type { WorkspaceEnv } from "@/modules/workspace";
-
-export function parentDir(path: string, fallback: string): string {
-  const i = path.lastIndexOf("/");
-  if (i === 0) return "/";
-  if (i === 2 && /^[a-z]:\//i.test(path)) return path.slice(0, 3);
-  return i > 0 ? path.slice(0, i) : fallback;
-}
 
 // Paste lands inside the selected folder, beside the selected file, or at the
 // root when nothing is selected.
@@ -17,15 +15,12 @@ export function pasteTargetDir(
   rootPath: string,
 ): string {
   if (!selected) return rootPath;
-  return isDir(selected) ? selected : parentDir(selected, rootPath);
+  return isDir(selected) ? selected : parentDir(selected);
 }
 
-export function isPasteShortcut(
-  e: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey">,
-  isMac: boolean,
-): boolean {
-  if (e.key.toLowerCase() !== "v" || e.altKey || e.shiftKey) return false;
-  return isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+// Files come from the macOS pasteboard only, so other platforms get no shortcut.
+export function isPasteShortcut(e: TerminalKeyEvent, isMac: boolean): boolean {
+  return isMac && isTerminalPasteChord(e, { isMac });
 }
 
 export type CopyResult = {
@@ -35,8 +30,11 @@ export type CopyResult = {
 
 type PasteOptions = {
   workspace: WorkspaceEnv;
+  rootPath: string;
   isCurrent: () => boolean;
-  refresh: (destDir: string) => void;
+  isExpanded: (dir: string) => boolean;
+  refresh: (dir: string) => void;
+  expand: (dir: string) => void;
 };
 
 export function reportCopyFailures(result: CopyResult): void {
@@ -52,8 +50,10 @@ export function reportCopyFailures(result: CopyResult): void {
 // paths, or nothing once the explorer has moved to another root or workspace.
 export async function pasteClipboardFiles(
   destDir: string,
-  { workspace, isCurrent, refresh }: PasteOptions,
+  { workspace, rootPath, isCurrent, isExpanded, refresh, expand }: PasteOptions,
 ): Promise<string[]> {
+  // A collapsed folder is read when it opens, so it gets no extra re-read.
+  const isOpen = () => destDir === rootPath || isExpanded(destDir);
   let copyStarted = false;
   try {
     const sources = await invoke<string[]>("fs_clipboard_paths");
@@ -71,11 +71,12 @@ export async function pasteClipboardFiles(
     });
     reportCopyFailures(result);
     if (!isCurrent()) return [];
-    refresh(destDir);
+    if (isOpen()) refresh(destDir);
+    else if (result.created.length > 0) expand(destDir);
     return result.created;
   } catch (err) {
     toast.error(`Paste failed: ${String(err)}`);
-    if (copyStarted && isCurrent()) refresh(destDir);
+    if (copyStarted && isCurrent() && isOpen()) refresh(destDir);
     return [];
   }
 }

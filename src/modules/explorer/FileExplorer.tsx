@@ -29,7 +29,7 @@ import {
 } from "react";
 import { openWithDefaultApp } from "@/lib/openWith";
 import { IS_MAC } from "@/lib/platform";
-import { basename, cn } from "@/lib/utils";
+import { basename, cn, parentDir } from "@/lib/utils";
 import { ExplorerSearch, type ExplorerSearchHandle } from "./ExplorerSearch";
 import { EntryRow, PendingRow, StatusRow, type RowActions } from "./TreeRow";
 import { InlineInput } from "./InlineInput";
@@ -40,7 +40,6 @@ import {
 } from "./lib/contextActions";
 import {
   isPasteShortcut,
-  parentDir,
   pasteClipboardFiles,
   pasteTargetDir,
 } from "@/modules/explorer/lib/clipboardPaste";
@@ -100,7 +99,6 @@ type Row =
 
 const ROW_HEIGHT = 24;
 const OVERSCAN = 8;
-const PASTE_HINT = IS_MAC ? "⌘V" : "Ctrl+V";
 
 type PasteScope = { rootPath: string | null; workspace: WorkspaceEnv };
 
@@ -214,6 +212,7 @@ export const FileExplorer = memo(
     const workspace = useWorkspaceEnvStore((s) => s.env);
     const pasteBusyRef = useRef(false);
     const pasteScopeRef = useRef<PasteScope>({ rootPath, workspace });
+    const expandedRef = useRef(tree.expanded);
     // `selection` is the selection the paste started from; once the user picks
     // something else, the pasted item must not take it over.
     const [pastedSelection, setPastedSelection] = useState<{
@@ -227,6 +226,9 @@ export const FileExplorer = memo(
         pasteScopeRef.current = { rootPath: null, workspace };
       };
     }, [rootPath, workspace]);
+    useLayoutEffect(() => {
+      expandedRef.current = tree.expanded;
+    }, [tree.expanded]);
 
     // biome-ignore lint/correctness/useExhaustiveDependencies: `tree` is intentionally omitted (its identity changes every render); the listed fields are the only inputs buildRows actually reads.
     const { rows, entryIndexByPath } = useMemo(() => {
@@ -349,12 +351,14 @@ export const FileExplorer = memo(
         try {
           const created = await pasteClipboardFiles(destDir, {
             workspace,
+            rootPath,
             isCurrent,
+            isExpanded: (dir) => expandedRef.current.has(dir),
             refresh: tree.refresh,
+            expand: tree.expand,
           });
           const first = created[0];
           if (!first || !isCurrent()) return;
-          if (destDir !== rootPath) tree.expand(destDir);
           setPastedSelection({ scope, path: first, selection: selectedPath });
         } finally {
           pasteBusyRef.current = false;
@@ -769,7 +773,7 @@ export const FileExplorer = memo(
                       tree.beginCreate(
                         menuTarget.isDir
                           ? menuTarget.path
-                          : parentDir(menuTarget.path, rootPath),
+                          : parentDir(menuTarget.path),
                         "file",
                       )
                     }
@@ -782,28 +786,30 @@ export const FileExplorer = memo(
                       tree.beginCreate(
                         menuTarget.isDir
                           ? menuTarget.path
-                          : parentDir(menuTarget.path, rootPath),
+                          : parentDir(menuTarget.path),
                         "dir",
                       )
                     }
                   >
                     New Folder
                   </ContextMenuItem>
-                  <ContextMenuItem
-                    className={COMPACT_ITEM}
-                    onSelect={() =>
-                      void pasteInto(
-                        pasteTargetDir(
-                          menuTarget.path,
-                          () => menuTarget.isDir,
-                          rootPath,
-                        ),
-                      )
-                    }
-                  >
-                    Paste
-                    <ContextMenuShortcut>{PASTE_HINT}</ContextMenuShortcut>
-                  </ContextMenuItem>
+                  {IS_MAC && (
+                    <ContextMenuItem
+                      className={COMPACT_ITEM}
+                      onSelect={() =>
+                        void pasteInto(
+                          pasteTargetDir(
+                            menuTarget.path,
+                            () => menuTarget.isDir,
+                            rootPath,
+                          ),
+                        )
+                      }
+                    >
+                      Paste
+                      <ContextMenuShortcut>⌘V</ContextMenuShortcut>
+                    </ContextMenuItem>
+                  )}
                   <ContextMenuSeparator />
                   <ContextMenuItem
                     className={COMPACT_ITEM}
@@ -873,13 +879,15 @@ export const FileExplorer = memo(
                   >
                     New Folder
                   </ContextMenuItem>
-                  <ContextMenuItem
-                    className={COMPACT_ITEM}
-                    onSelect={() => void pasteInto(rootPath)}
-                  >
-                    Paste
-                    <ContextMenuShortcut>{PASTE_HINT}</ContextMenuShortcut>
-                  </ContextMenuItem>
+                  {IS_MAC && (
+                    <ContextMenuItem
+                      className={COMPACT_ITEM}
+                      onSelect={() => void pasteInto(rootPath)}
+                    >
+                      Paste
+                      <ContextMenuShortcut>⌘V</ContextMenuShortcut>
+                    </ContextMenuItem>
+                  )}
                   <ContextMenuSeparator />
                   <ContextMenuItem
                     className={COMPACT_ITEM}

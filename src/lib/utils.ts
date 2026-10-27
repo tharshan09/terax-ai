@@ -23,6 +23,18 @@ export function basename(path: string): string {
   return parts.length ? parts[parts.length - 1] : path
 }
 
+/**
+ * Parent folder, tolerant of both `/` and `\` separators; `/x` and `C:/x` keep
+ * their root. Returns the original string when it has no separator.
+ */
+export function parentDir(path: string): string {
+  const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"))
+  if (i < 0) return path
+  if (i === 0) return path.slice(0, 1)
+  if (i === 2 && /^[a-z]:/i.test(path)) return path.slice(0, 3)
+  return path.slice(0, i)
+}
+
 /** Host of a URL for a compact tab title, falling back to the raw string. */
 export function titleFromUrl(url: string): string {
   try {

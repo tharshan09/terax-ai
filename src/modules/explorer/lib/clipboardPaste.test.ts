@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   isPasteShortcut,
-  parentDir,
   pasteClipboardFiles,
   pasteTargetDir,
 } from "@/modules/explorer/lib/clipboardPaste";
@@ -34,21 +33,35 @@ describe("pasteTargetDir", () => {
   it.each([
     ["C:/a.txt", "C:/"],
     ["C:/repo/a.txt", "C:/repo"],
+    ["C:\\repo\\a.txt", "C:\\repo"],
     ["/a.txt", "/"],
     ["//server/share/a.txt", "//server/share"],
-  ])("keeps absolute roots for %s", (path, parent) => {
-    expect(parentDir(path, "fallback")).toBe(parent);
+  ])("keeps absolute roots beside a selected file %s", (path, parent) => {
+    expect(pasteTargetDir(path, () => false, "/ws")).toBe(parent);
   });
 });
 
 describe("isPasteShortcut", () => {
   const key = (k: Partial<KeyboardEvent>) => ({
     key: "v",
+    code: "KeyV",
     metaKey: false,
     ctrlKey: false,
     altKey: false,
     shiftKey: false,
     ...k,
+  });
+
+  it("matches the physical V key on non-Latin layouts", () => {
+    expect(isPasteShortcut(key({ key: "м", metaKey: true }), true)).toBe(true);
+    expect(
+      isPasteShortcut(key({ key: "м", code: "KeyM", metaKey: true }), true),
+    ).toBe(false);
+  });
+
+  it("offers no shortcut off macOS, where files cannot be read", () => {
+    expect(isPasteShortcut(key({ ctrlKey: true }), false)).toBe(false);
+    expect(isPasteShortcut(key({ metaKey: true }), false)).toBe(false);
   });
 
   it("accepts only Cmd+V on macOS", () => {
@@ -64,7 +77,9 @@ describe("isPasteShortcut", () => {
     expect(isPasteShortcut(key({ metaKey: true, ctrlKey: true }), true)).toBe(
       false,
     );
-    expect(isPasteShortcut(key({ key: "c", metaKey: true }), true)).toBe(false);
+    expect(
+      isPasteShortcut(key({ key: "c", code: "KeyC", metaKey: true }), true),
+    ).toBe(false);
   });
 });
 
@@ -79,8 +94,11 @@ function deferred<T>() {
 function options() {
   return {
     workspace: { kind: "ssh" as const, host: "litha-claude" },
+    rootPath: "/ws",
     isCurrent: vi.fn(() => true),
+    isExpanded: vi.fn((_dir: string) => false),
     refresh: vi.fn((_path: string) => {}),
+    expand: vi.fn((_path: string) => {}),
   };
 }
 
@@ -103,8 +121,29 @@ describe("pasteClipboardFiles", () => {
       workspace: { kind: "ssh", host: "litha-claude" },
       renameOnConflict: true,
     });
-    expect(opts.refresh).toHaveBeenCalledWith("/ws/docs");
+    expect(opts.expand).toHaveBeenCalledTimes(1);
+    expect(opts.expand).toHaveBeenCalledWith("/ws/docs");
+    expect(opts.refresh).not.toHaveBeenCalled();
     expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("re-reads an open folder and leaves a collapsed one alone when nothing landed", async () => {
+    const copied = { created: ["/ws/docs/a.txt"], failed: [] };
+    invoke.mockResolvedValueOnce(["/tmp/a.txt"]).mockResolvedValueOnce(copied);
+    const open = options();
+    open.isExpanded.mockReturnValue(true);
+    await pasteClipboardFiles("/ws/docs", open);
+    expect(open.refresh).toHaveBeenCalledWith("/ws/docs");
+    expect(open.expand).not.toHaveBeenCalled();
+
+    invoke.mockResolvedValueOnce(["/tmp/a.txt"]).mockResolvedValueOnce({
+      created: [],
+      failed: [{ source: "/tmp/a.txt", message: "Permission denied" }],
+    });
+    const collapsed = options();
+    await pasteClipboardFiles("/ws/docs", collapsed);
+    expect(collapsed.refresh).not.toHaveBeenCalled();
+    expect(collapsed.expand).not.toHaveBeenCalled();
   });
 
   it("stops with a hint when the clipboard holds no files", async () => {
@@ -198,5 +237,6 @@ describe("pasteClipboardFiles", () => {
       description: "/x/b: boom",
     });
     expect(opts.refresh).not.toHaveBeenCalled();
+    expect(opts.expand).not.toHaveBeenCalled();
   });
 });

@@ -41,8 +41,8 @@ pub struct CopyFailure {
 }
 
 /// Copies each source into `dest_dir` on its own; per-item failures land in
-/// `failed`, whole-call failures (jail, destination, batch size, SSH transport)
-/// reject. Sources stay unconstrained: the user picked them in the OS.
+/// `failed`, whole-call failures (jail, destination, batch size, SSH transport
+/// on the first item) reject. Sources stay unconstrained: the user picked them in the OS.
 #[tauri::command]
 pub async fn fs_copy(
     app: tauri::AppHandle,
