@@ -112,11 +112,15 @@ describe("editor.save in the capture phase", () => {
     expect(handlers["editor.save"]).not.toHaveBeenCalled();
   });
 
-  it("skips a held Mod+S without preventing its default", () => {
+  it("claims a held Mod+S without saving again", () => {
     const handlers = mount("editor");
-    const e = press({ ...MOD, key: "s", repeat: true }, editorContent());
-    expect(handlers["editor.save"]).not.toHaveBeenCalled();
-    expect(e.defaultPrevented).toBe(false);
+    const content = editorContent();
+    content.addEventListener("keydown", laterListener);
+    press({ ...MOD, key: "s" }, content);
+    const held = press({ ...MOD, key: "s", repeat: true }, content);
+    expect(handlers["editor.save"]).toHaveBeenCalledTimes(1);
+    expect(held.defaultPrevented).toBe(true);
+    expect(laterListener).not.toHaveBeenCalled();
   });
 
   it("[AC-6] saves on Mod+S with the focus in a field outside the editor", () => {

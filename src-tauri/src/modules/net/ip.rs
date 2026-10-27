@@ -171,6 +171,47 @@ mod tests {
     }
 
     #[test]
+    fn metadata_ips_classified_as_blocked() {
+        assert_eq!(kind("169.254.169.254"), IpKind::BlockedMetadata);
+        assert_eq!(kind("169.254.1.1"), IpKind::BlockedMetadata);
+    }
+
+    #[test]
+    fn private_ips_classified_correctly() {
+        for addr in ["10.0.0.1", "172.16.0.1", "192.168.1.1", "100.64.0.1"] {
+            assert_eq!(kind(addr), IpKind::Private, "{addr}");
+        }
+    }
+
+    #[test]
+    fn loopback_classified_as_loopback() {
+        for addr in ["127.0.0.1", "0.0.0.0", "255.255.255.255", "224.0.0.1"] {
+            assert_eq!(kind(addr), IpKind::Loopback, "{addr}");
+        }
+    }
+
+    #[test]
+    fn public_ips_classified_as_public() {
+        assert_eq!(kind("8.8.8.8"), IpKind::Public);
+        assert_eq!(kind("1.1.1.1"), IpKind::Public);
+    }
+
+    #[test]
+    fn private_range_boundaries_hold_on_ipv4() {
+        for (addr, expected) in [
+            ("172.31.255.255", IpKind::Private),
+            ("172.32.0.1", IpKind::Public),
+            ("100.127.255.255", IpKind::Private),
+            ("100.128.0.1", IpKind::Public),
+            ("198.18.0.1", IpKind::Private),
+            ("198.19.255.255", IpKind::Private),
+            ("198.20.0.1", IpKind::Public),
+        ] {
+            assert_eq!(kind(addr), expected, "{addr}");
+        }
+    }
+
+    #[test]
     fn ipv4_mapped_addresses_take_the_class_of_the_embedded_ipv4() {
         assert_eq!(kind("::ffff:127.0.0.1"), IpKind::Loopback);
         assert_eq!(kind("::ffff:7f00:1"), IpKind::Loopback);

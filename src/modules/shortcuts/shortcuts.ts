@@ -1,4 +1,5 @@
 import { IS_MAC, MOD_PROP } from "@/lib/platform";
+import type { Tab } from "@/modules/tabs";
 
 /**
  * Single source of truth for keyboard shortcuts.
@@ -336,8 +337,8 @@ export const SHORTCUTS: Shortcut[] = [
       { [MOD_PROP]: true, shift: true, key: "z" },
     ],
   },
-  // Mod+S at the app layer so WKWebView cannot steal "Save Page".
-  // CodeMirror also binds Mod-s; the global handler preventDefaults first.
+  // Claimed in the capture phase (preventDefault + stopImmediatePropagation) so
+  // WKWebView cannot Save Page; CM's Mod-s only fires if editor.save is rebound.
   {
     id: "editor.save",
     label: "Save file",
@@ -354,7 +355,7 @@ const EDITOR_SHORTCUTS: ReadonlySet<ShortcutId> = new Set<ShortcutId>([
 
 export function isEditorShortcutDisabled(
   id: ShortcutId,
-  activeTabKind: string | undefined,
+  activeTabKind: Tab["kind"] | undefined,
 ): boolean {
   return EDITOR_SHORTCUTS.has(id) && activeTabKind !== "editor";
 }

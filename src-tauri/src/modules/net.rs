@@ -360,7 +360,7 @@ async fn stream_events(
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::net::Ipv6Addr;
     use std::sync::{Arc, Mutex};
     use tauri::ipc::InvokeResponseBody;
 
@@ -390,74 +390,6 @@ mod tests {
             Ok(())
         });
         (channel, events)
-    }
-
-    #[test]
-    fn metadata_ips_classified_as_blocked() {
-        // AWS / Google / Azure all share the IPv4 169.254.169.254 link-local.
-        assert_eq!(
-            ip_kind(IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254))),
-            IpKind::BlockedMetadata
-        );
-        // AWS IPv6 metadata
-        assert_eq!(
-            ip_kind("fd00:ec2::254".parse().unwrap()),
-            IpKind::BlockedMetadata
-        );
-        // Any link-local IPv4 (169.254/16) — same network range, still blocked.
-        assert_eq!(
-            ip_kind(IpAddr::V4(Ipv4Addr::new(169, 254, 1, 1))),
-            IpKind::BlockedMetadata
-        );
-        // IPv6 link-local fe80::/10
-        assert_eq!(ip_kind("fe80::1".parse().unwrap()), IpKind::BlockedMetadata);
-    }
-
-    #[test]
-    fn private_ips_classified_correctly() {
-        assert_eq!(
-            ip_kind(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
-            IpKind::Private
-        );
-        assert_eq!(
-            ip_kind(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))),
-            IpKind::Private
-        );
-        assert_eq!(
-            ip_kind(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))),
-            IpKind::Private
-        );
-        // CGNAT 100.64/10
-        assert_eq!(
-            ip_kind(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))),
-            IpKind::Private
-        );
-        assert_eq!(ip_kind("fc00::1".parse().unwrap()), IpKind::Private);
-    }
-
-    #[test]
-    fn loopback_classified_as_loopback() {
-        assert_eq!(
-            ip_kind(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
-            IpKind::Loopback
-        );
-        assert_eq!(ip_kind("::1".parse().unwrap()), IpKind::Loopback);
-        assert_eq!(
-            ip_kind(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))),
-            IpKind::Loopback
-        );
-    }
-
-    #[test]
-    fn public_ips_classified_as_public() {
-        assert_eq!(
-            ip_kind(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
-            IpKind::Public
-        );
-        assert_eq!(
-            ip_kind(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
-            IpKind::Public
-        );
     }
 
     #[test]
@@ -520,57 +452,6 @@ mod tests {
                 "expected {hop} to be rejected"
             );
         }
-    }
-
-    #[test]
-    fn special_ipv4_ranges_do_not_classify_as_public() {
-        assert_eq!(ip_kind(IpAddr::V4(Ipv4Addr::UNSPECIFIED)), IpKind::Loopback);
-        assert_eq!(ip_kind(IpAddr::V4(Ipv4Addr::BROADCAST)), IpKind::Loopback);
-        assert_eq!(
-            ip_kind(IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1))),
-            IpKind::Loopback
-        );
-    }
-
-    #[test]
-    fn private_range_boundaries_hold_on_ipv4() {
-        assert_eq!(
-            ip_kind(IpAddr::V4(Ipv4Addr::new(172, 31, 255, 255))),
-            IpKind::Private
-        );
-        assert_eq!(
-            ip_kind(IpAddr::V4(Ipv4Addr::new(172, 32, 0, 1))),
-            IpKind::Public
-        );
-        assert_eq!(
-            ip_kind(IpAddr::V4(Ipv4Addr::new(100, 127, 255, 255))),
-            IpKind::Private
-        );
-        assert_eq!(
-            ip_kind(IpAddr::V4(Ipv4Addr::new(100, 128, 0, 1))),
-            IpKind::Public
-        );
-        assert_eq!(
-            ip_kind(IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1))),
-            IpKind::Private
-        );
-        assert_eq!(
-            ip_kind(IpAddr::V4(Ipv4Addr::new(198, 19, 255, 255))),
-            IpKind::Private
-        );
-        assert_eq!(
-            ip_kind(IpAddr::V4(Ipv4Addr::new(198, 20, 0, 1))),
-            IpKind::Public
-        );
-    }
-
-    #[test]
-    fn ipv6_unique_local_and_multicast_are_not_public() {
-        assert_eq!(ip_kind("fd12:3456::1".parse().unwrap()), IpKind::Private);
-        assert_eq!(ip_kind("fc00::1".parse().unwrap()), IpKind::Private);
-        assert_eq!(ip_kind("ff02::1".parse().unwrap()), IpKind::Loopback);
-        assert_eq!(ip_kind("::".parse().unwrap()), IpKind::Loopback);
-        assert_eq!(ip_kind("2606:4700::1111".parse().unwrap()), IpKind::Public);
     }
 
     #[test]

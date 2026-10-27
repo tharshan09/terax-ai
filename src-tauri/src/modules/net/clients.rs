@@ -62,19 +62,19 @@ impl<C: Clone> Default for ClientCache<C> {
 }
 
 impl<C: Clone> ClientCache<C> {
-    pub fn get_or_insert_with(
-        &mut self,
-        key: ClientKey,
-        now: Instant,
-        make: impl FnOnce() -> Result<C, String>,
-    ) -> Result<C, String> {
+    pub fn get(&mut self, key: &ClientKey, now: Instant) -> Option<C> {
         self.entries
             .retain(|entry| now.saturating_duration_since(entry.last_used) < IDLE_TTL);
-        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.key == key) {
-            entry.last_used = now;
-            return Ok(entry.client.clone());
+        let entry = self.entries.iter_mut().find(|entry| &entry.key == key)?;
+        entry.last_used = now;
+        Some(entry.client.clone())
+    }
+
+    /// Stores `client` unless a concurrent caller cached one for `key` first; returns the kept one.
+    pub fn insert(&mut self, key: ClientKey, client: C, now: Instant) -> C {
+        if let Some(existing) = self.get(&key, now) {
+            return existing;
         }
-        let client = make()?;
         while self.entries.len() >= MAX_CLIENTS {
             let oldest = self
                 .entries
@@ -90,7 +90,7 @@ impl<C: Clone> ClientCache<C> {
             client: client.clone(),
             last_used: now,
         });
-        Ok(client)
+        client
     }
 
     #[cfg(test)]
@@ -135,8 +135,13 @@ pub fn client_for(
 ) -> Result<reqwest::Client, String> {
     let key = ClientKey::new(profile, host, ips, allow_private);
     let cache = CLIENTS.get_or_init(|| Mutex::new(ClientCache::default()));
-    let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
-    cache.get_or_insert_with(key.clone(), Instant::now(), || build_client(&key))
+    let lock = || cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(client) = lock().get(&key, Instant::now()) {
+        return Ok(client);
+    }
+    // Built unlocked so assembling the TLS config does not stall other hosts' requests.
+    let client = build_client(&key)?;
+    Ok(lock().insert(key, client, Instant::now()))
 }
 
 #[cfg(test)]
@@ -153,20 +158,26 @@ mod tests {
     }
 
     #[test]
-    fn identical_destinations_share_a_client_and_count_one_build() {
+    fn identical_destinations_share_a_client() {
         let mut cache = ClientCache::<u32>::default();
         let now = Instant::now();
-        let mut builds = 0;
+        let k = key("api.example.com", &["1.1.1.1"], false);
+        assert_eq!(cache.get(&k, now), None);
+        assert_eq!(cache.insert(k.clone(), 7, now), 7);
         for _ in 0..3 {
-            let got = cache
-                .get_or_insert_with(key("api.example.com", &["1.1.1.1"], false), now, || {
-                    builds += 1;
-                    Ok(7)
-                })
-                .unwrap();
-            assert_eq!(got, 7);
+            assert_eq!(cache.get(&k, now), Some(7));
         }
-        assert_eq!(builds, 1);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn a_client_cached_while_another_was_built_wins() {
+        let mut cache = ClientCache::<u32>::default();
+        let now = Instant::now();
+        let k = key("api.example.com", &["1.1.1.1"], false);
+        assert_eq!(cache.insert(k.clone(), 1, now), 1);
+        assert_eq!(cache.insert(k.clone(), 2, now), 1);
+        assert_eq!(cache.get(&k, now), Some(1));
         assert_eq!(cache.len(), 1);
     }
 
@@ -177,9 +188,9 @@ mod tests {
         assert_ne!(a, rebound);
         let mut cache = ClientCache::<u32>::default();
         let now = Instant::now();
-        let first = cache.get_or_insert_with(a, now, || Ok(1)).unwrap();
-        let second = cache.get_or_insert_with(rebound, now, || Ok(2)).unwrap();
-        assert_eq!((first, second), (1, 2));
+        cache.insert(a, 1, now);
+        assert_eq!(cache.get(&rebound, now), None);
+        assert_eq!(cache.insert(rebound, 2, now), 2);
     }
 
     #[test]
@@ -208,22 +219,15 @@ mod tests {
         let mut cache = ClientCache::<u32>::default();
         let now = Instant::now();
         let k = key("a.example.com", &["1.1.1.1"], false);
-        cache.get_or_insert_with(k.clone(), now, || Ok(1)).unwrap();
-        let reused = cache
-            .get_or_insert_with(k.clone(), now + IDLE_TTL - Duration::from_secs(1), || Ok(2))
-            .unwrap();
-        assert_eq!(reused, 1);
-        let rebuilt = cache
-            .get_or_insert_with(
-                k,
-                now + IDLE_TTL - Duration::from_secs(1) + IDLE_TTL + Duration::from_secs(1),
-                || Ok(3),
-            )
-            .unwrap();
+        cache.insert(k.clone(), 1, now);
+        let touched = now + IDLE_TTL - Duration::from_secs(1);
+        assert_eq!(cache.get(&k, touched), Some(1));
         assert_eq!(
-            rebuilt, 3,
+            cache.get(&k, touched + IDLE_TTL + Duration::from_secs(1)),
+            None,
             "use refreshes the TTL; a full idle period expires it"
         );
+        assert!(cache.is_empty());
     }
 
     #[test]
@@ -232,32 +236,22 @@ mod tests {
         let now = Instant::now();
         for i in 0..(MAX_CLIENTS + 3) {
             let k = key(&format!("h{i}.example.com"), &["1.1.1.1"], false);
-            cache
-                .get_or_insert_with(k, now + Duration::from_secs(i as u64), || Ok(i))
-                .unwrap();
+            cache.insert(k, i, now + Duration::from_secs(i as u64));
         }
         assert_eq!(cache.len(), MAX_CLIENTS);
+        let later = now + Duration::from_secs(20);
         let oldest = key("h0.example.com", &["1.1.1.1"], false);
-        let mut rebuilt = false;
-        cache
-            .get_or_insert_with(oldest, now + Duration::from_secs(20), || {
-                rebuilt = true;
-                Ok(0)
-            })
-            .unwrap();
-        assert!(rebuilt, "the oldest entry was evicted");
-    }
-
-    #[test]
-    fn a_failed_build_is_not_cached() {
-        let mut cache = ClientCache::<u32>::default();
-        let now = Instant::now();
-        let k = key("a.example.com", &["1.1.1.1"], false);
-        assert!(cache
-            .get_or_insert_with(k.clone(), now, || Err("boom".into()))
-            .is_err());
-        assert!(cache.is_empty());
-        assert_eq!(cache.get_or_insert_with(k, now, || Ok(5)).unwrap(), 5);
+        assert_eq!(
+            cache.get(&oldest, later),
+            None,
+            "the oldest entry was evicted"
+        );
+        let newest = key(
+            &format!("h{}.example.com", MAX_CLIENTS + 2),
+            &["1.1.1.1"],
+            false,
+        );
+        assert_eq!(cache.get(&newest, later), Some(MAX_CLIENTS + 2));
     }
 
     #[test]
