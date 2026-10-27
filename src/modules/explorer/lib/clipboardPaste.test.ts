@@ -3,6 +3,7 @@ import {
   isPasteShortcut,
   pasteClipboardFiles,
   pasteTargetDir,
+  pendingPasteAction,
 } from "@/modules/explorer/lib/clipboardPaste";
 
 const { invoke, toast } = vi.hoisted(() => ({
@@ -38,6 +39,49 @@ describe("pasteTargetDir", () => {
     ["//server/share/a.txt", "//server/share"],
   ])("keeps absolute roots beside a selected file %s", (path, parent) => {
     expect(pasteTargetDir(path, () => false, "/ws")).toBe(parent);
+  });
+});
+
+describe("pendingPasteAction", () => {
+  const before = { status: "loaded" };
+
+  it("selects the pasted row as soon as it is in the tree", () => {
+    expect(pendingPasteAction("/ws/a.txt", true, before, before, false)).toBe(
+      "select",
+    );
+  });
+
+  it("waits while the folder has not been re-read yet", () => {
+    expect(pendingPasteAction("/ws/a.txt", false, before, before, false)).toBe(
+      "wait",
+    );
+    const loading = { status: "loading" };
+    expect(
+      pendingPasteAction("/ws/a.txt", false, loading, undefined, false),
+    ).toBe("wait");
+  });
+
+  it("drops once the re-read is done and the row is still missing", () => {
+    const reread = { status: "loaded" };
+    expect(pendingPasteAction("/ws/a.txt", false, reread, before, false)).toBe(
+      "drop",
+    );
+    const failed = { status: "error" };
+    expect(
+      pendingPasteAction("/ws/a.txt", false, failed, undefined, false),
+    ).toBe("drop");
+  });
+
+  it("drops a hidden item at once while hidden files are not shown", () => {
+    expect(
+      pendingPasteAction("/ws/.gitignore", false, before, before, false),
+    ).toBe("drop");
+    expect(
+      pendingPasteAction("/ws/.gitignore", false, before, before, true),
+    ).toBe("wait");
+    expect(
+      pendingPasteAction("/ws/.gitignore", true, before, before, false),
+    ).toBe("select");
   });
 });
 

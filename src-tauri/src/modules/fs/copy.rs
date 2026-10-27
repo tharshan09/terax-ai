@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use tauri::Manager;
 
+use super::guard;
 use super::mutate::authorize_mutation_dir;
 use super::to_canon;
 use crate::modules::workspace::{resolve_path, WorkspaceEnv, WorkspaceRegistry};
@@ -40,9 +41,8 @@ pub struct CopyFailure {
     pub message: String,
 }
 
-/// Copies each source into `dest_dir` on its own; per-item failures land in
-/// `failed`, whole-call failures (jail, destination, batch size, SSH transport
-/// on the first item) reject. Sources stay unconstrained: the user picked them in the OS.
+/// Failures stay per item so one bad source never sinks the batch. Sources skip
+/// the workspace jail (the user picked them in the OS) but not the deny-list.
 #[tauri::command]
 pub async fn fs_copy(
     app: tauri::AppHandle,
@@ -109,8 +109,7 @@ fn copy_destination(
     std::fs::canonicalize(&dest).map_err(|e| e.to_string())
 }
 
-/// Validates a top-level copy source and returns its name and own (unfollowed)
-/// metadata. Shared by the local and the SSH branch.
+/// The metadata is unfollowed, so each branch decides what a symlink source means.
 pub(crate) fn check_source(src: &Path) -> io::Result<(&OsStr, std::fs::Metadata)> {
     if !src.is_absolute() {
         return Err(invalid("copy source must be absolute"));
@@ -118,12 +117,31 @@ pub(crate) fn check_source(src: &Path) -> io::Result<(&OsStr, std::fs::Metadata)
     let name = src
         .file_name()
         .ok_or_else(|| invalid("copy source has no filename"))?;
+    guard_read(src)?;
+    // A symlinked parent folder must not smuggle a protected location past the check.
+    if let Some(real_parent) = src.parent().and_then(|p| std::fs::canonicalize(p).ok()) {
+        guard_read(&real_parent.join(name))?;
+    }
     let metadata = std::fs::symlink_metadata(src)?;
     let kind = metadata.file_type();
     if !(kind.is_file() || kind.is_dir() || kind.is_symlink()) {
         return Err(unsupported_kind());
     }
     Ok((name, metadata))
+}
+
+// SECURITY: copies read and write through the same secret-path deny-list as
+// fs_read_file and fs_write_file; a refusal fails only that item.
+pub(crate) fn guard_read(path: &Path) -> io::Result<()> {
+    guard::check_read_str(&path.to_string_lossy()).map_err(refused)
+}
+
+pub(crate) fn guard_write(path: &str) -> io::Result<()> {
+    guard::check_write_str(path).map_err(refused)
+}
+
+fn refused(message: String) -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, message)
 }
 
 pub(crate) fn check_depth(depth: usize) -> io::Result<()> {
@@ -161,11 +179,10 @@ pub(crate) fn copy_candidates(name: &OsStr, is_dir: bool) -> impl Iterator<Item 
 fn copy_item(src: &Path, dest: &Path, rename_on_conflict: bool) -> io::Result<OsString> {
     let (name, metadata) = check_source(src)?;
     let is_dir = metadata.is_dir();
-    if !rename_on_conflict {
-        let target = dest.join(name);
-        if std::fs::symlink_metadata(&target).is_ok() {
-            return Err(already_exists(target.display()));
-        }
+    let target = dest.join(name);
+    guard_write(&target.to_string_lossy())?;
+    if !rename_on_conflict && std::fs::symlink_metadata(&target).is_ok() {
+        return Err(already_exists(target.display()));
     }
     if is_dir && dest.starts_with(std::fs::canonicalize(src)?) {
         return Err(invalid("cannot copy a folder into itself"));
@@ -205,6 +222,7 @@ fn publish(
 ) -> io::Result<OsString> {
     for candidate in copy_candidates(name, is_dir) {
         let target = dest.join(&candidate);
+        guard_write(&target.to_string_lossy())?;
         match place(staged, &target, is_dir, &rename) {
             Ok(()) => return Ok(candidate),
             Err(error) if is_taken(&error, &target) => {
@@ -337,6 +355,7 @@ fn copy_recursive(src: &Path, dst: &Path, depth: usize) -> io::Result<()> {
         std::fs::create_dir(dst)?;
         for entry in std::fs::read_dir(src)? {
             let entry = entry?;
+            guard_read(&entry.path())?;
             copy_recursive(&entry.path(), &dst.join(entry.file_name()), depth + 1)?;
         }
         Ok(())
@@ -518,11 +537,17 @@ mod tests {
     fn conflicts_get_finder_names_and_never_touch_existing_items() {
         let src = tempfile::tempdir().unwrap();
         let dest = tempfile::tempdir().unwrap();
-        for file in ["a.txt", "archive.tar.gz", "Makefile", ".env", "report"] {
+        for file in [
+            "a.txt",
+            "archive.tar.gz",
+            "Makefile",
+            ".gitignore",
+            "report",
+        ] {
             std::fs::write(src.path().join(file), b"new").unwrap();
         }
         std::fs::create_dir(src.path().join("v1.2")).unwrap();
-        for file in ["a.txt", "archive.tar.gz", "Makefile", ".env"] {
+        for file in ["a.txt", "archive.tar.gz", "Makefile", ".gitignore"] {
             std::fs::write(dest.path().join(file), b"old").unwrap();
         }
         std::fs::create_dir(dest.path().join("v1.2")).unwrap();
@@ -532,7 +557,7 @@ mod tests {
             "a.txt",
             "archive.tar.gz",
             "Makefile",
-            ".env",
+            ".gitignore",
             "v1.2",
             "report",
         ]
@@ -545,7 +570,7 @@ mod tests {
             "a copy.txt",
             "archive.tar copy.gz",
             "Makefile copy",
-            ".env copy",
+            ".gitignore copy",
             "v1.2 copy",
             "report copy",
         ]
@@ -556,7 +581,7 @@ mod tests {
 
         let again = copy(&[src.path().join("a.txt")], dest.path(), true);
         assert_eq!(again.created, [s(dest.path().join("a copy 2.txt"))]);
-        for file in ["a.txt", "archive.tar.gz", "Makefile", ".env"] {
+        for file in ["a.txt", "archive.tar.gz", "Makefile", ".gitignore"] {
             assert_eq!(std::fs::read(dest.path().join(file)).unwrap(), b"old");
         }
         assert!(dest.path().join("report").is_dir());
@@ -798,6 +823,69 @@ mod tests {
         assert!(refused.created.is_empty());
         assert!(refused.failed[0].message.contains("already exists"));
         assert!(!victim.exists(), "must not write through the symlink");
+    }
+
+    #[test]
+    fn the_deny_list_fails_secret_sources_and_destinations_per_item() {
+        let src = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let write = |rel: &str| {
+            let path = src.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"PRIVATE").unwrap();
+            path
+        };
+        let key = write("id_ed25519");
+        let ssh_config = write(".ssh/config");
+        write("pkg/readme.md");
+        write("pkg/deploy/id_ed25519");
+        let ok = write("ok.txt");
+
+        let result = copy(
+            &[key, ssh_config, src.path().join("pkg"), ok.clone()],
+            ws.path(),
+            true,
+        );
+        assert_eq!(result.created, [s(ws.path().join("ok.txt"))]);
+        let messages: Vec<&str> = result.failed.iter().map(|f| f.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            [
+                "refused: \"id_ed25519\" matches a sensitive-file pattern",
+                "refused: path is inside a protected directory (.ssh)",
+                "refused: \"id_ed25519\" matches a sensitive-file pattern",
+            ]
+        );
+        assert_eq!(names(ws.path()), ["ok.txt"]);
+
+        let protected = ws.path().join(".ssh");
+        std::fs::create_dir(&protected).unwrap();
+        let result = copy(&[ok], &protected, true);
+        assert!(result.created.is_empty());
+        assert_eq!(
+            result.failed[0].message,
+            "refused: path is inside a protected directory (.ssh)"
+        );
+        assert!(names(&protected).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_parent_cannot_hide_a_protected_source() {
+        let outside = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::create_dir(outside.path().join(".ssh")).unwrap();
+        std::fs::write(outside.path().join(".ssh/config"), b"Host real").unwrap();
+        std::os::unix::fs::symlink(outside.path().join(".ssh"), src.path().join("assets")).unwrap();
+        let result = copy(&[src.path().join("assets/config")], dest.path(), true);
+        assert!(result.created.is_empty());
+        assert!(
+            result.failed[0].message.contains("protected directory"),
+            "{:?}",
+            result.failed
+        );
+        assert!(names(dest.path()).is_empty());
     }
 
     #[test]

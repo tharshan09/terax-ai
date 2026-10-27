@@ -1,5 +1,6 @@
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { parentDir } from "@/lib/utils";
 
 type Options = {
   rootPath: string;
@@ -8,11 +9,6 @@ type Options = {
 };
 
 const THRESHOLD = 5;
-
-function parentDir(path: string): string {
-  const i = path.lastIndexOf("/");
-  return i > 0 ? path.slice(0, i) : path;
-}
 
 // Pointer-based, delegated on the container (no per-row handlers); sidesteps
 // native HTML5 DnD which Tauri intercepts when dragDropEnabled is on. The ghost

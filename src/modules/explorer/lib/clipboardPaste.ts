@@ -1,14 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import { parentDir } from "@/lib/utils";
+import { basename, parentDir } from "@/lib/utils";
 import {
   isTerminalPasteChord,
   type TerminalKeyEvent,
 } from "@/modules/terminal/lib/keymap";
 import type { WorkspaceEnv } from "@/modules/workspace";
 
-// Paste lands inside the selected folder, beside the selected file, or at the
-// root when nothing is selected.
 export function pasteTargetDir(
   selected: string | null,
   isDir: (path: string) => boolean | undefined,
@@ -21,6 +19,27 @@ export function pasteTargetDir(
 // Files come from the macOS pasteboard only, so other platforms get no shortcut.
 export function isPasteShortcut(e: TerminalKeyEvent, isMac: boolean): boolean {
   return isMac && isTerminalPasteChord(e, { isMac });
+}
+
+type FolderState = { status: string } | undefined;
+
+export type PendingPaste = "select" | "wait" | "drop";
+
+// A re-read that leaves the folder listing unchanged causes no tree update, so
+// a name the listing filters out (hidden while show-hidden is off) drops at once.
+export function pendingPasteAction(
+  path: string,
+  inTree: boolean,
+  folder: FolderState,
+  folderAtPaste: FolderState,
+  showHidden: boolean,
+): PendingPaste {
+  if (inTree) return "select";
+  if (!showHidden && basename(path).startsWith(".")) return "drop";
+  const reread =
+    folder !== folderAtPaste &&
+    (folder?.status === "loaded" || folder?.status === "error");
+  return reread ? "drop" : "wait";
 }
 
 export type CopyResult = {

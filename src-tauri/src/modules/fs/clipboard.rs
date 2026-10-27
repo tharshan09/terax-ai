@@ -140,10 +140,8 @@ mod tests {
             .collect();
         let got = read_file_paths(&pasteboard);
         assert_eq!(got.len(), expected.len(), "{got:?}");
-        // A plain path URL from fileURLWithPath carries the decomposed (NFD)
-        // spelling, which APFS resolves to the same entry. Compare it by
-        // identity; every other item, including the Finder-style reference
-        // to the same folder, must match the on-disk name exactly.
+        // fileURLWithPath spells the folder decomposed (NFD), so that item is
+        // compared by file identity; every other item must match exactly.
         use std::os::unix::fs::MetadataExt;
         let id = |p: &str| {
             let m = std::fs::metadata(p).unwrap();

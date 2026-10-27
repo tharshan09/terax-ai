@@ -42,6 +42,7 @@ import {
   isPasteShortcut,
   pasteClipboardFiles,
   pasteTargetDir,
+  pendingPasteAction,
 } from "@/modules/explorer/lib/clipboardPaste";
 import { fileIconUrl, folderIconUrl } from "./lib/iconResolver";
 import { COMPACT_CONTENT, COMPACT_ITEM } from "./lib/menuItemClass";
@@ -198,6 +199,7 @@ export const FileExplorer = memo(
   ) {
     const tree = useFileTree(rootPath, { onPathRenamed, onPathDeleted });
     const gitDecorations = usePreferencesStore((s) => s.explorerGitDecorations);
+    const showHidden = usePreferencesStore((s) => s.showHidden);
     const { lookup: lookupGitStatus } = useGitStatus(
       rootPath,
       gitDecorations ? gitStatus : null,
@@ -213,12 +215,15 @@ export const FileExplorer = memo(
     const pasteBusyRef = useRef(false);
     const pasteScopeRef = useRef<PasteScope>({ rootPath, workspace });
     const expandedRef = useRef(tree.expanded);
+    const nodesRef = useRef(tree.nodes);
     // `selection` is the selection the paste started from; once the user picks
     // something else, the pasted item must not take it over.
     const [pastedSelection, setPastedSelection] = useState<{
       scope: PasteScope;
       path: string;
       selection: string | null;
+      dir: string;
+      folderAtPaste: (typeof tree.nodes)[string] | undefined;
     } | null>(null);
     useLayoutEffect(() => {
       pasteScopeRef.current = { rootPath, workspace };
@@ -228,7 +233,8 @@ export const FileExplorer = memo(
     }, [rootPath, workspace]);
     useLayoutEffect(() => {
       expandedRef.current = tree.expanded;
-    }, [tree.expanded]);
+      nodesRef.current = tree.nodes;
+    }, [tree.expanded, tree.nodes]);
 
     // biome-ignore lint/correctness/useExhaustiveDependencies: `tree` is intentionally omitted (its identity changes every render); the listed fields are the only inputs buildRows actually reads.
     const { rows, entryIndexByPath } = useMemo(() => {
@@ -328,19 +334,31 @@ export const FileExplorer = memo(
     // selection that is not in the tree yet.
     useEffect(() => {
       if (!pastedSelection) return;
-      if (
-        pastedSelection.scope !== pasteScopeRef.current ||
-        pastedSelection.selection !== selectedPath
-      ) {
+      const { scope, path, selection, dir, folderAtPaste } = pastedSelection;
+      if (scope !== pasteScopeRef.current || selection !== selectedPath) {
         setPastedSelection(null);
         return;
       }
-      const { path } = pastedSelection;
-      if (!entryIndexByPath.has(path)) return;
+      const action = pendingPasteAction(
+        path,
+        entryIndexByPath.has(path),
+        tree.nodes[dir],
+        folderAtPaste,
+        showHidden,
+      );
+      if (action === "wait") return;
       setPastedSelection(null);
+      if (action === "drop") return;
       setSelectedPath(path);
       requestAnimationFrame(() => scrollEntryIntoView(path));
-    }, [pastedSelection, selectedPath, entryIndexByPath, scrollEntryIntoView]);
+    }, [
+      pastedSelection,
+      selectedPath,
+      entryIndexByPath,
+      tree.nodes,
+      showHidden,
+      scrollEntryIntoView,
+    ]);
 
     const pasteInto = useCallback(
       async (destDir: string) => {
@@ -359,7 +377,13 @@ export const FileExplorer = memo(
           });
           const first = created[0];
           if (!first || !isCurrent()) return;
-          setPastedSelection({ scope, path: first, selection: selectedPath });
+          setPastedSelection({
+            scope,
+            path: first,
+            selection: selectedPath,
+            dir: destDir,
+            folderAtPaste: nodesRef.current[destDir],
+          });
         } finally {
           pasteBusyRef.current = false;
         }

@@ -471,34 +471,43 @@ def write_bytes(req):
     return True
 
 
-def _place(src, dst):
-    # Moves a finished staging item to `dst` without ever replacing what is
-    # there: folders swap with an exclusive empty reservation, files hardlink.
-    if S_ISDIR(os.lstat(src).st_mode):
-        try:
+NO_HARDLINKS = (errno.ENOTSUP, errno.EOPNOTSUPP, errno.EPERM, errno.ENOSYS)
+
+
+def _reserve_and_swap(src, dst, is_dir):
+    # The exclusive placeholder makes the rename replace only our own empty
+    # entry, never something another writer put at `dst` meanwhile.
+    try:
+        if is_dir:
             os.mkdir(dst)
-        except FileExistsError:
-            raise FileExistsError("already exists: " + dst)
+        else:
+            os.close(os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    except FileExistsError:
+        raise FileExistsError("already exists: " + dst)
+    try:
+        os.rename(src, dst)
+    except BaseException:
         try:
-            os.rename(src, dst)
-        except BaseException:
-            try:
-                os.rmdir(dst)
-            except OSError:
-                pass
-            raise
+            (os.rmdir if is_dir else os.unlink)(dst)
+        except OSError:
+            pass
+        raise
+
+
+def _place(src, dst):
+    # A hardlink publishes a file without any replace window; folders and
+    # hosts without hardlinks fall back to the reservation.
+    if S_ISDIR(os.lstat(src).st_mode):
+        _reserve_and_swap(src, dst, True)
         return
     try:
         os.link(src, dst)
     except FileExistsError:
         raise FileExistsError("already exists: " + dst)
     except OSError as ex:
-        if ex.errno not in (errno.ENOTSUP, errno.EOPNOTSUPP, errno.EPERM):
+        if ex.errno not in NO_HARDLINKS:
             raise
-        # No hardlinks here: check-then-rename leaves a small race window.
-        if os.path.lexists(dst):
-            raise FileExistsError("already exists: " + dst)
-        os.rename(src, dst)
+        _reserve_and_swap(src, dst, False)
         return
     try:
         os.unlink(src)
@@ -813,9 +822,8 @@ fn timed_out_msg(host: &str, what: &str, budget_secs: u64) -> String {
     )
 }
 
-/// Why a remote FS op failed: the connection or helper run (`Transport`), or
-/// the op itself on a healthy host (`Failed`). Callers returning `String` keep
-/// using `?` through the `From` impl.
+/// A copy batch stops on `Transport` (ssh itself or the connection failed) and
+/// goes on after `Failed` (only this op failed on a reachable host).
 #[derive(Debug)]
 enum RemoteError {
     Transport(String),
@@ -841,7 +849,7 @@ fn run_remote_json(
     request: &serde_json::Value,
     timeout: Option<std::time::Duration>,
 ) -> Result<serde_json::Value, RemoteError> {
-    let parsed = remote_envelope(host, request, timeout).map_err(RemoteError::Transport)?;
+    let parsed = remote_envelope(host, request, timeout)?;
     if parsed.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
         Ok(parsed
             .get("data")
@@ -858,18 +866,40 @@ fn run_remote_json(
     }
 }
 
-/// Run the helper for one request and return its parsed response envelope.
+/// ssh reports its own failures (connect, auth, a dropped master) as 255; every
+/// other status is the remote command's.
+const SSH_OWN_FAILURE_EXIT: i32 = 255;
+
+fn exit_error(code: Option<i32>, stderr: &str) -> RemoteError {
+    if let Some(message) = classify_ssh_error(stderr) {
+        return RemoteError::Transport(message);
+    }
+    match code {
+        Some(code) if code != SSH_OWN_FAILURE_EXIT => RemoteError::Failed(if stderr.is_empty() {
+            format!("remote helper exited with status {code}")
+        } else {
+            format!("ssh: {stderr}")
+        }),
+        _ => RemoteError::Transport(if stderr.is_empty() {
+            "ssh command failed".to_string()
+        } else {
+            format!("ssh: {stderr}")
+        }),
+    }
+}
+
 fn remote_envelope(
     host: &str,
     request: &serde_json::Value,
     timeout: Option<std::time::Duration>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, RemoteError> {
     use std::io::Write;
     use std::process::{Command, Stdio};
+    use RemoteError::Transport;
 
-    validate_ssh_host(host)?;
+    validate_ssh_host(host).map_err(Transport)?;
     note_connected_host(host);
-    let request_json = serde_json::to_string(request).map_err(|e| e.to_string())?;
+    let request_json = serde_json::to_string(request).map_err(|e| Transport(e.to_string()))?;
     let b64 = b64encode(REMOTE_PYTHON.as_bytes());
     let remote_cmd = format!("python3 -c \"$(printf %s {b64} | base64 -d)\"");
 
@@ -889,11 +919,13 @@ fn remote_envelope(
         .stderr(Stdio::piped());
 
     let child = std::sync::Arc::new(
-        shared_child::SharedChild::spawn(&mut cmd).map_err(|e| format!("ssh spawn failed: {e}"))?,
+        shared_child::SharedChild::spawn(&mut cmd)
+            .map_err(|e| Transport(format!("ssh spawn failed: {e}")))?,
     );
-    let mut stdin = child.take_stdin().ok_or("no ssh stdin")?;
-    let mut stdout = child.take_stdout().ok_or("no ssh stdout")?;
-    let mut stderr = child.take_stderr().ok_or("no ssh stderr")?;
+    let missing = |pipe: &str| Transport(format!("no ssh {pipe}"));
+    let mut stdin = child.take_stdin().ok_or_else(|| missing("stdin"))?;
+    let mut stdout = child.take_stdout().ok_or_else(|| missing("stdout"))?;
+    let mut stderr = child.take_stderr().ok_or_else(|| missing("stderr"))?;
 
     // Write the request and drain both pipes on separate threads. The helper
     // reads all of stdin before emitting anything, but doing the I/O
@@ -906,7 +938,7 @@ fn remote_envelope(
     let out_reader = std::thread::spawn(move || read_capped(&mut stdout, MAX_REMOTE_STDOUT));
     let err_reader = std::thread::spawn(move || read_capped(&mut stderr, 64 * 1024));
 
-    let status = match wait_child(&child, timeout)? {
+    let status = match wait_child(&child, timeout).map_err(Transport)? {
         Some(status) => status,
         None => {
             // wait_child already killed + reaped the wedged process; the reader
@@ -917,7 +949,7 @@ fn remote_envelope(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("?");
             log::warn!("run_remote_json: remote fs op '{op}' on '{host}' exceeded {budget}s budget; killed");
-            return Err(timed_out_msg(host, op, budget));
+            return Err(Transport(timed_out_msg(host, op, budget)));
         }
     };
     let _ = writer.join();
@@ -926,18 +958,12 @@ fn remote_envelope(
 
     if !status.success() {
         let err = String::from_utf8_lossy(&stderr_bytes);
-        let err = err.trim();
-        if let Some(msg) = classify_ssh_error(err) {
-            return Err(msg);
-        }
-        return Err(if err.is_empty() {
-            "ssh command failed".to_string()
-        } else {
-            format!("ssh: {err}")
-        });
+        return Err(exit_error(status.code(), err.trim()));
     }
     if overflow {
-        return Err("remote response exceeded the 16 MiB limit".to_string());
+        return Err(Transport(
+            "remote response exceeded the 16 MiB limit".to_string(),
+        ));
     }
     // The embedded helper always prefixes its envelope with the sentinel, after
     // any login-shell banner/MOTD. Its absence means the helper never emitted a
@@ -947,16 +973,16 @@ fn remote_envelope(
         Some(i) => &stdout_bytes[i + TERAX_SENTINEL.len()..],
         None => {
             if stdout_bytes.is_empty() {
-                return Err("no response from the remote helper".to_string());
+                return Err(Transport("no response from the remote helper".to_string()));
             }
             let preview = String::from_utf8_lossy(&stdout_bytes[..stdout_bytes.len().min(200)]);
-            return Err(format!(
+            return Err(Transport(format!(
                 "unexpected remote output (no response marker): {}",
                 preview.trim()
-            ));
+            )));
         }
     };
-    serde_json::from_slice(json_bytes).map_err(|e| format!("bad remote response: {e}"))
+    serde_json::from_slice(json_bytes).map_err(|e| Transport(format!("bad remote response: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -1245,6 +1271,7 @@ fn plan_upload(
 ) -> std::io::Result<()> {
     use crate::modules::fs::copy;
     copy::check_depth(depth)?;
+    copy::guard_read(src)?;
     let meta = std::fs::symlink_metadata(src)?;
     if meta.is_dir() {
         plan.push(Upload::Dir(rel.clone()));
@@ -1263,6 +1290,7 @@ fn plan_upload(
     }
     // The helper writes plain files only: a symlink uploads its target's bytes.
     let target = if meta.file_type().is_symlink() {
+        copy::guard_read(&std::fs::canonicalize(src)?)?;
         std::fs::metadata(src)?
     } else {
         meta
@@ -1322,10 +1350,8 @@ fn staging_suffix() -> String {
     format!("{:016x}", hasher.finish())
 }
 
-/// Remote `fs_copy`: each source is uploaded into a hidden staging dir inside
-/// `dest_dir`, then published under the first free name. Item failures land in
-/// `failed`. A transport failure on the first item rejects the batch; later on,
-/// what already landed stays in `created` and the rest fails with that reason.
+/// A lost connection rejects the batch only on the first item, before its
+/// publish; later the result stays Ok so the explorer re-reads the destination.
 pub fn copy(
     host: &str,
     sources: &[String],
@@ -1341,6 +1367,22 @@ pub fn copy(
     )
 }
 
+const PUBLISH_LOST: &str = "connection lost while publishing; the item may already be in place";
+
+/// How an SSH copy item failed. A connection lost during its publish leaves the
+/// item's fate unknown, so it neither rejects the batch nor counts as created.
+#[derive(Debug)]
+enum ItemError {
+    Remote(RemoteError),
+    PublishLost(String),
+}
+
+impl From<RemoteError> for ItemError {
+    fn from(error: RemoteError) -> Self {
+        ItemError::Remote(error)
+    }
+}
+
 fn copy_with(
     run: &mut RemoteRun,
     host: &str,
@@ -1352,6 +1394,10 @@ fn copy_with(
     let dest = dest_dir.trim_end_matches('/');
     let mut taken = listed_names(run, host, dest_dir);
     let mut result = CopyResult::default();
+    let failure = |source: &String, message: &str| CopyFailure {
+        source: source.clone(),
+        message: message.to_string(),
+    };
     for (index, source) in sources.iter().enumerate() {
         match copy_one(
             run,
@@ -1361,24 +1407,28 @@ fn copy_with(
             &mut taken,
         ) {
             Ok(name) => result.created.push(format!("{dest}/{name}")),
-            Err(RemoteError::Failed(message)) => {
+            Err(ItemError::Remote(RemoteError::Failed(message))) => {
                 log::warn!("ssh copy({source} -> {host}:{dest}) failed: {message}");
-                result.failed.push(CopyFailure {
-                    source: source.clone(),
-                    message,
-                });
+                result.failed.push(failure(source, &message));
             }
-            Err(RemoteError::Transport(message)) => {
+            Err(ItemError::Remote(RemoteError::Transport(message))) => {
                 log::warn!("ssh copy({source} -> {host}:{dest}) aborted: {message}");
                 if index == 0 {
                     return Err(message);
                 }
+                let rest = sources[index..].iter();
                 result
                     .failed
-                    .extend(sources[index..].iter().map(|source| CopyFailure {
-                        source: source.clone(),
-                        message: message.clone(),
-                    }));
+                    .extend(rest.map(|source| failure(source, &message)));
+                break;
+            }
+            Err(ItemError::PublishLost(message)) => {
+                log::warn!("ssh copy({source} -> {host}:{dest}) lost while publishing: {message}");
+                result.failed.push(failure(source, PUBLISH_LOST));
+                let rest = sources[index + 1..].iter();
+                result
+                    .failed
+                    .extend(rest.map(|source| failure(source, &message)));
                 break;
             }
         }
@@ -1386,14 +1436,8 @@ fn copy_with(
     Ok(result)
 }
 
-// Case-insensitive like APFS and the Finder, so a case-insensitive host costs
-// no extra publish runs.
-fn fold_name(name: &str) -> String {
-    name.to_lowercase()
-}
-
-/// Folded names already in `dest_dir`. Without a listing (time limit, size,
-/// error) every candidate is tried: the no-replace publish stays the real check.
+/// Names already in `dest_dir`, only to skip doomed publish runs. Without a
+/// listing every candidate is tried: the no-replace publish is the real check.
 fn listed_names(
     run: &mut RemoteRun,
     host: &str,
@@ -1407,7 +1451,7 @@ fn listed_names(
                 .map_err(|e| format!("bad read_dir response: {e}"))
         });
     match listing {
-        Ok(entries) => entries.iter().map(|entry| fold_name(&entry.name)).collect(),
+        Ok(entries) => entries.into_iter().map(|entry| entry.name).collect(),
         Err(error) => {
             log::warn!("ssh copy: could not list {host}:{dest_dir}, trying every name: {error}");
             std::collections::HashSet::new()
@@ -1421,15 +1465,17 @@ fn copy_one(
     dest: &str,
     rename_on_conflict: bool,
     taken: &mut std::collections::HashSet<String>,
-) -> Result<String, RemoteError> {
+) -> Result<String, ItemError> {
     use crate::modules::fs::copy;
     let failed = |error: std::io::Error| RemoteError::Failed(error.to_string());
     let (name, metadata) = copy::check_source(src).map_err(failed)?;
     let name = name
         .to_str()
         .ok_or_else(|| RemoteError::Failed(format!("non-UTF-8 filename: {}", src.display())))?;
-    if !rename_on_conflict && taken.contains(&fold_name(name)) {
-        return Err(failed(copy::already_exists(format!("{dest}/{name}"))));
+    let target = format!("{dest}/{name}");
+    copy::guard_write(&target).map_err(failed)?;
+    if !rename_on_conflict && taken.contains(name) {
+        return Err(failed(copy::already_exists(target)).into());
     }
     let mut plan = Vec::new();
     plan_upload(src, String::new(), 0, &mut plan).map_err(failed)?;
@@ -1449,11 +1495,11 @@ fn copy_one(
             rename_on_conflict,
             taken,
         ),
-        Err(error) => Err(error),
+        Err(error) => Err(error.into()),
     };
     // A successful publish already removed the staging dir; without a
     // connection the cleanup cannot run either, the rest stays hidden.
-    if matches!(outcome, Err(RemoteError::Failed(_))) {
+    if matches!(outcome, Err(ItemError::Remote(RemoteError::Failed(_)))) {
         if let Err(error) = run(
             &serde_json::json!({ "op": "delete", "path": staging }),
             None,
@@ -1467,8 +1513,8 @@ fn copy_one(
     outcome
 }
 
-/// Tries the Finder-style candidates, skipping names the one listing of the
-/// destination already showed; the helper's no-replace publish is the guard.
+/// The listing only saves runs; a case-insensitive host refuses a case variant
+/// in the no-replace publish itself, which moves on to the next candidate.
 fn publish_staged(
     run: &mut RemoteRun,
     staging: &str,
@@ -1477,34 +1523,35 @@ fn publish_staged(
     is_dir: bool,
     rename_on_conflict: bool,
     taken: &mut std::collections::HashSet<String>,
-) -> Result<String, RemoteError> {
+) -> Result<String, ItemError> {
     use crate::modules::fs::copy;
     let staged = format!("{staging}/{}", copy::STAGED_ITEM);
     for candidate in copy::copy_candidates(std::ffi::OsStr::new(name), is_dir) {
         let candidate = candidate.to_string_lossy().into_owned();
-        let folded = fold_name(&candidate);
-        if rename_on_conflict && taken.contains(&folded) {
+        if rename_on_conflict && taken.contains(&candidate) {
             continue;
         }
+        let target = format!("{dest}/{candidate}");
+        copy::guard_write(&target).map_err(|e| RemoteError::Failed(e.to_string()))?;
         let request = serde_json::json!({
-            "op": "publish", "from": staged, "to": format!("{dest}/{candidate}"),
-            "staging": staging,
+            "op": "publish", "from": staged, "to": target, "staging": staging,
         });
         match run(&request, None) {
             Ok(_) => {
-                taken.insert(folded);
+                taken.insert(candidate.clone());
                 return Ok(candidate);
             }
             Err(RemoteError::Failed(message)) if message.starts_with("already exists: ") => {
                 if !rename_on_conflict {
-                    return Err(RemoteError::Failed(message));
+                    return Err(RemoteError::Failed(message).into());
                 }
-                taken.insert(folded);
+                taken.insert(candidate);
             }
-            Err(error) => return Err(error),
+            Err(RemoteError::Transport(message)) => return Err(ItemError::PublishLost(message)),
+            Err(error) => return Err(error.into()),
         }
     }
-    Err(RemoteError::Failed(copy::no_free_copy_name().to_string()))
+    Err(RemoteError::Failed(copy::no_free_copy_name().to_string()).into())
 }
 
 #[cfg(test)]
@@ -1824,9 +1871,6 @@ Host !secret prod
     #[cfg(unix)]
     #[test]
     fn embedded_helper_publish_never_replaces() {
-        const NO_HARDLINKS: &str = "import os, errno\n\
-            def _no_link(*a, **k):\n    raise OSError(errno.EPERM, 'no hardlinks')\n\
-            os.link = _no_link\n";
         let dir = tempfile::tempdir().unwrap();
         let p = |rel: &str| dir.path().join(rel).to_string_lossy().into_owned();
         let stage = |rel: &str, body: &[u8]| {
@@ -1872,17 +1916,87 @@ Host !secret prod
         assert_eq!(publish("", &item.to_string_lossy(), &p("folder")).unwrap(), ok);
         assert!(dir.path().join("folder").is_dir());
         assert!(!item.exists());
+    }
 
-        // Without hardlinks the fallback still refuses an existing name.
-        let staged = stage("f3", b"fallback");
-        assert_eq!(publish(NO_HARDLINKS, &staged, &p("fb.txt")).unwrap(), ok);
-        assert_eq!(std::fs::read(p("fb.txt")).unwrap(), b"fallback");
-        let staged = stage("f4", b"new");
-        assert_eq!(
-            publish(NO_HARDLINKS, &staged, &p("taken.txt")).unwrap(),
-            refused(&p("taken.txt"))
-        );
+    #[cfg(unix)]
+    #[test]
+    fn embedded_helper_publish_without_hardlinks_reserves_the_name_first() {
+        // The rename stub refuses any target that is not an empty placeholder,
+        // so a plain check-then-rename fallback fails this test.
+        let without_links = |code: &str, rename_fails: bool| {
+            let fail = if rename_fails { "True" } else { "False" };
+            [
+                "import os, errno".to_string(),
+                format!("def _no_link(*a, **k): raise OSError(errno.{code}, 'no hardlinks')"),
+                "os.link = _no_link".into(),
+                "_rename = os.rename".into(),
+                "def _onto_reservation(a, b):".into(),
+                "    if os.path.islink(b) or not os.path.isfile(b) or os.path.getsize(b):".into(),
+                "        raise OSError(errno.EIO, 'no reservation at ' + b)".into(),
+                format!("    if {fail}: raise OSError(errno.EXDEV, 'swap failed')"),
+                "    _rename(a, b)".into(),
+                "os.rename = _onto_reservation".into(),
+                String::new(),
+            ]
+            .join("\n")
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let p = |rel: &str| dir.path().join(rel).to_string_lossy().into_owned();
+        let stage = |rel: &str, body: &[u8]| {
+            let path = dir.path().join(".terax-copy-s").join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, body).unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        let publish = |prelude: &str, from: &str, to: &str| {
+            run_helper(
+                prelude,
+                &serde_json::json!({ "op": "publish", "from": from, "to": to }),
+            )
+        };
+        std::fs::write(p("taken.txt"), b"old").unwrap();
+        std::os::unix::fs::symlink(p("victim"), p("dangling.txt")).unwrap();
+
+        for code in ["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS"] {
+            let prelude = without_links(code, false);
+            let staged = stage(code, b"fallback");
+            let to = p(&format!("{code}.txt"));
+            let Some(env) = publish(&prelude, &staged, &to) else {
+                return;
+            };
+            assert_eq!(
+                env,
+                serde_json::json!({ "ok": true, "data": true }),
+                "{code}"
+            );
+            assert_eq!(std::fs::read(&to).unwrap(), b"fallback");
+            assert!(!std::path::Path::new(&staged).exists());
+
+            for taken in ["taken.txt", "dangling.txt"] {
+                let staged = stage(code, b"new");
+                let env = publish(&prelude, &staged, &p(taken)).unwrap();
+                assert_eq!(
+                    env["error"],
+                    format!("already exists: {}", p(taken)),
+                    "{code}"
+                );
+                assert!(std::path::Path::new(&staged).exists());
+            }
+        }
         assert_eq!(std::fs::read(p("taken.txt")).unwrap(), b"old");
+        assert!(
+            !dir.path().join("victim").exists(),
+            "must not write through the link"
+        );
+
+        let staged = stage("swap", b"new");
+        let env = publish(&without_links("ENOSYS", true), &staged, &p("swap.txt")).unwrap();
+        assert_eq!(env["ok"], false, "{env}");
+        assert!(
+            !dir.path().join("swap.txt").exists(),
+            "reservation must be removed"
+        );
+        assert!(std::path::Path::new(&staged).exists());
     }
 
     #[cfg(unix)]
@@ -2094,23 +2208,67 @@ Host !secret prod
         }
     }
 
+    fn listing(names: &[&str]) -> RemoteReply {
+        Ok(names
+            .iter()
+            .map(|name| {
+                serde_json::json!({
+                    "name": name, "kind": "file", "size": 3, "mtime": 0, "gitignored": false,
+                })
+            })
+            .collect())
+    }
+
+    fn publish_targets(requests: &[serde_json::Value]) -> Vec<&serde_json::Value> {
+        requests
+            .iter()
+            .filter(|r| r["op"] == "publish")
+            .map(|r| &r["to"])
+            .collect()
+    }
+
     #[test]
-    fn copy_skips_case_variants_and_cleans_up_within_the_publish_run() {
+    fn copy_skips_listed_names_exactly_and_cleans_up_within_the_publish_run() {
         let src = tempfile::tempdir().unwrap();
-        let sources = local_sources(src.path(), &["a.txt"]);
+        let sources = local_sources(src.path(), &["readme.md"]);
         let (result, requests) = stub_copy(&sources, |request| {
             if request["op"] == "read_dir" {
-                return Ok(serde_json::json!([{
-                    "name": "A.txt", "kind": "file", "size": 3, "mtime": 0, "gitignored": false,
-                }]));
+                return listing(&["README.md"]);
             }
             healthy(request)
         });
-        assert_eq!(result.unwrap().created, ["/remote/a copy.txt"]);
+        assert_eq!(result.unwrap().created, ["/remote/readme.md"]);
+        assert_eq!(publish_targets(&requests), ["/remote/readme.md"]);
+
+        // A case-insensitive host refuses the variant in the publish itself.
+        let (result, requests) = stub_copy(&sources, |request| {
+            if request["op"] == "read_dir" {
+                return listing(&["README.md"]);
+            }
+            if request["op"] == "publish" && request["to"] == "/remote/readme.md" {
+                return Err(RemoteError::Failed(
+                    "already exists: /remote/readme.md".into(),
+                ));
+            }
+            healthy(request)
+        });
+        assert_eq!(result.unwrap().created, ["/remote/readme copy.md"]);
+        assert_eq!(
+            publish_targets(&requests),
+            ["/remote/readme.md", "/remote/readme copy.md"]
+        );
+
+        let (result, requests) = stub_copy(&sources, |request| {
+            if request["op"] == "read_dir" {
+                return listing(&["readme.md"]);
+            }
+            healthy(request)
+        });
+        assert_eq!(result.unwrap().created, ["/remote/readme copy.md"]);
         let publishes: Vec<&serde_json::Value> =
             requests.iter().filter(|r| r["op"] == "publish").collect();
         assert_eq!(publishes.len(), 1);
-        assert_eq!(publishes[0]["to"], "/remote/a copy.txt");
+        assert_eq!(publishes[0]["to"], "/remote/readme copy.md");
         let staging = publishes[0]["staging"].as_str().unwrap();
         assert!(staging.starts_with("/remote/.terax-copy-"), "{staging}");
         assert_eq!(publishes[0]["from"], format!("{staging}/item"));
@@ -2134,6 +2292,125 @@ Host !secret prod
             .map(|r| &r["path"])
             .collect();
         assert_eq!(deletes, [&staging]);
+    }
+
+    #[test]
+    fn only_ssh_failures_count_as_transport() {
+        let transport =
+            |code, stderr| matches!(exit_error(code, stderr), RemoteError::Transport(_));
+        assert!(transport(Some(255), ""));
+        assert!(transport(None, ""));
+        assert!(transport(Some(127), "bash: python3: command not found"));
+        assert!(transport(Some(1), "Permission denied (publickey)."));
+        match exit_error(Some(137), "") {
+            RemoteError::Failed(message) => {
+                assert_eq!(message, "remote helper exited with status 137")
+            }
+            other => panic!("137 must fail only the item: {other:?}"),
+        }
+        assert!(matches!(
+            exit_error(Some(1), "Traceback: MemoryError"),
+            RemoteError::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn a_helper_killed_on_one_item_does_not_stop_the_batch() {
+        let src = tempfile::tempdir().unwrap();
+        let sources = local_sources(src.path(), &["big.bin", "b.txt"]);
+        let (result, requests) = stub_copy(&sources, |request| {
+            if request["op"] == "write_bytes" && request["b64"] == b64encode(b"big.bin") {
+                return Err(exit_error(Some(137), ""));
+            }
+            healthy(request)
+        });
+        let result = result.unwrap();
+        assert_eq!(result.created, ["/remote/b.txt"]);
+        assert_eq!(
+            failures(&result),
+            [(
+                sources[0].clone(),
+                "remote helper exited with status 137".to_string()
+            )]
+        );
+        assert_eq!(requests.iter().filter(|r| r["op"] == "delete").count(), 1);
+    }
+
+    #[test]
+    fn a_connection_lost_while_publishing_keeps_the_batch_ok() {
+        const LOST: &str = "ssh: connection closed";
+        let src = tempfile::tempdir().unwrap();
+        let sources = local_sources(src.path(), &["a.txt", "b.txt", "c.txt"]);
+        for nth in [1, 2] {
+            let mut publishes = 0;
+            let (result, requests) = stub_copy(&sources, |request| {
+                if request["op"] == "publish" {
+                    publishes += 1;
+                    if publishes == nth {
+                        return Err(RemoteError::Transport(LOST.into()));
+                    }
+                }
+                healthy(request)
+            });
+            let result = result.expect("a lost publish must not reject the batch");
+            let landed: Vec<String> = ["a.txt", "b.txt"][..nth - 1]
+                .iter()
+                .map(|name| format!("/remote/{name}"))
+                .collect();
+            assert_eq!(result.created, landed);
+            let mut expected = vec![(sources[nth - 1].clone(), PUBLISH_LOST.to_string())];
+            expected.extend(sources[nth..].iter().map(|s| (s.clone(), LOST.to_string())));
+            assert_eq!(failures(&result), expected);
+            assert_eq!(requests.last().unwrap()["op"], "publish");
+            assert!(!requests.iter().any(|r| r["op"] == "delete"));
+        }
+    }
+
+    #[test]
+    fn the_deny_list_fails_secret_sources_and_destinations_before_any_upload() {
+        let src = tempfile::tempdir().unwrap();
+        let sources = local_sources(src.path(), &["id_ed25519", "ok.txt"]);
+        std::fs::create_dir_all(src.path().join("pkg/deploy")).unwrap();
+        std::fs::write(src.path().join("pkg/readme.md"), b"r").unwrap();
+        std::fs::write(src.path().join("pkg/deploy/id_ed25519"), b"PRIVATE").unwrap();
+        let pkg = src.path().join("pkg").to_string_lossy().into_owned();
+        let mixed = [sources[0].clone(), pkg.clone(), sources[1].clone()];
+
+        let (result, requests) = stub_copy(&mixed, healthy);
+        let result = result.unwrap();
+        assert_eq!(result.created, ["/remote/ok.txt"]);
+        let secret = "refused: \"id_ed25519\" matches a sensitive-file pattern".to_string();
+        assert_eq!(
+            failures(&result),
+            [(sources[0].clone(), secret.clone()), (pkg, secret)]
+        );
+        let stagings = requests
+            .iter()
+            .filter(|r| r["op"] == "create_dir" && r["parents"] == false)
+            .count();
+        assert_eq!(stagings, 1, "only ok.txt may reach the host");
+
+        let mut requests = Vec::new();
+        let result = copy_with(
+            &mut |request, _| {
+                requests.push(request.clone());
+                healthy(request)
+            },
+            "stub",
+            &sources[1..],
+            "~/.ssh",
+            true,
+        )
+        .unwrap();
+        assert!(result.created.is_empty());
+        assert_eq!(
+            result.failed[0].message,
+            "refused: path is inside a protected directory (.ssh)"
+        );
+        assert!(
+            requests.iter().all(|r| r["op"] == "read_dir"),
+            "{requests:?}"
+        );
     }
 
     #[test]
