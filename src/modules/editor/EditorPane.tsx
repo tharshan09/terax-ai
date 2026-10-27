@@ -12,7 +12,7 @@ import {
   setSearchQuery,
 } from "@codemirror/search";
 import { Prec } from "@codemirror/state";
-import { EditorView, keymap } from "@codemirror/view";
+import { EditorView } from "@codemirror/view";
 import { vim } from "@replit/codemirror-vim";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import {
@@ -60,7 +60,7 @@ export type EditorPaneHandle = {
   /** Apply CodeMirror's undo/redo commands. */
   undo: () => void;
   redo: () => void;
-  /** Same save as Mod-s / :w; rejects when the write fails. */
+  /** The save behind Mod+S and :w; rejects when the write fails. */
   save: () => Promise<void>;
 };
 
@@ -237,16 +237,6 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
           getPath: () => pathRef.current,
           getLanguage: () => languageRef.current,
         }),
-        keymap.of([
-          {
-            key: "Mod-s",
-            preventDefault: true,
-            run: () => {
-              void saveAndNotify().catch(() => {});
-              return true;
-            },
-          },
-        ]),
       ],
       [saveAndNotify],
     );

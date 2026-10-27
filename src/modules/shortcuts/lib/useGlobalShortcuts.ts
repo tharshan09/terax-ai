@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
+  EDITOR_SHORTCUTS,
   SHORTCUTS,
   matchBinding,
   type ShortcutId,
@@ -12,12 +13,6 @@ export type ShortcutHandlers = Partial<Record<ShortcutId, ShortcutHandler>>;
 export type UseGlobalShortcutsOptions = {
   isDisabled?: (id: ShortcutId, e: KeyboardEvent) => boolean;
 };
-
-const EDITOR_FIELD_GUARDED: ReadonlySet<ShortcutId> = new Set([
-  "editor.undo",
-  "editor.redo",
-  "editor.save",
-]);
 
 /** A focused input, textarea or contenteditable outside the CodeMirror
  *  editor owns its own undo/redo history; Cmd+Z / Cmd+Shift+Z there must not
@@ -48,13 +43,12 @@ export function useGlobalShortcuts(
     const onKey = (e: KeyboardEvent) => {
       const { handlers, options } = latest.current;
       for (const s of SHORTCUTS) {
+        if (e.repeat && !s.allowRepeat) continue;
         const bindings = userShortcuts[s.id] || s.defaultBindings;
         const isMatch = bindings.some((b) => matchBinding(e, b, s.id));
         if (!isMatch) continue;
-        if (s.claimDefault) e.preventDefault();
-        if (e.repeat && !s.allowRepeat) continue;
         if (options?.isDisabled?.(s.id, e)) return;
-        if (EDITOR_FIELD_GUARDED.has(s.id) && editableOutsideEditor(e)) return;
+        if (EDITOR_SHORTCUTS.has(s.id) && editableOutsideEditor(e)) return;
         const h = handlers[s.id];
         if (!h) return;
         e.preventDefault();

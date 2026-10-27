@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -30,20 +30,18 @@ const HEADER_BLOCKLIST: &[&str] = &[
 
 const MAX_REDIRECTS: usize = 10;
 const CLIENT_CACHE_SIZE: usize = 8;
+const DRAIN_LIMIT: usize = 64 * 1024;
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
-const PAYLOAD_HEADERS: [&str; 4] = [
+const PAYLOAD_HEADERS: [&str; 2] = ["content-type", "content-encoding"];
+
+// Any other caller header may carry a key (x-api-key, x-goog-api-key, ...).
+const CROSS_ORIGIN_HEADERS: [&str; 5] = [
+    "accept",
+    "accept-encoding",
+    "accept-language",
     "content-type",
-    "content-length",
-    "content-encoding",
-    "transfer-encoding",
-];
-
-const CREDENTIAL_HEADERS: [&str; 5] = [
-    "authorization",
-    "cookie",
-    "cookie2",
-    "proxy-authorization",
-    "www-authenticate",
+    "user-agent",
 ];
 
 fn is_blocked_host_name(host: &str) -> bool {
@@ -178,7 +176,10 @@ async fn admit_url(
     dns: &impl Dns,
 ) -> Result<ClientKey, String> {
     let host = check_url_shape(url)?.to_owned();
-    let (kind, ips) = resolve_and_admit(&host, allow_private, dns).await?;
+    let (kind, mut ips) = resolve_and_admit(&host, allow_private, dns).await?;
+    // DNS record order and repeats must not split the client cache.
+    ips.sort_unstable();
+    ips.dedup();
     Ok(ClientKey {
         host,
         ips,
@@ -214,34 +215,41 @@ impl<K: PartialEq, V: Clone> Lru<K, V> {
         }
     }
 
-    fn get_or_try_insert<E>(
-        &mut self,
-        key: K,
-        make: impl FnOnce(&K) -> Result<V, E>,
-    ) -> Result<V, E> {
-        let entry = match self.entries.iter().position(|(k, _)| *k == key) {
-            Some(i) => self.entries.remove(i),
-            None => {
-                let value = make(&key)?;
-                if self.entries.len() >= self.capacity {
-                    self.entries.remove(0);
-                }
-                (key, value)
-            }
-        };
+    fn get(&mut self, key: &K) -> Option<V> {
+        let i = self.entries.iter().position(|(k, _)| k == key)?;
+        let entry = self.entries.remove(i);
         let value = entry.1.clone();
         self.entries.push(entry);
-        Ok(value)
+        Some(value)
+    }
+
+    /// An entry cached in the meantime wins over `value`.
+    fn insert(&mut self, key: K, value: V) -> V {
+        if let Some(cached) = self.get(&key) {
+            return cached;
+        }
+        if self.entries.len() >= self.capacity {
+            self.entries.remove(0);
+        }
+        self.entries.push((key, value.clone()));
+        value
     }
 }
 
 static CLIENTS: Mutex<Lru<ClientKey, reqwest::Client>> = Mutex::new(Lru::new(CLIENT_CACHE_SIZE));
 
+fn clients() -> MutexGuard<'static, Lru<ClientKey, reqwest::Client>> {
+    CLIENTS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+// Building loads the TLS roots, so it runs outside the lock.
 fn client_for(key: ClientKey) -> Result<reqwest::Client, String> {
-    CLIENTS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get_or_try_insert(key, build_client)
+    let cached = clients().get(&key);
+    if let Some(client) = cached {
+        return Ok(client);
+    }
+    let client = build_client(&key)?;
+    Ok(clients().insert(key, client))
 }
 
 fn sanitize_headers(headers: Option<HashMap<String, String>>) -> Result<HeaderMap, String> {
@@ -314,8 +322,16 @@ impl Hop {
     }
 }
 
-// reqwest 0.12's rules, but a credential strip sticks and also fires on a scheme
-// change; no Referer, since the previous URL may carry an API key in its query.
+fn keep_only(headers: &HeaderMap, allowed: &[&str]) -> HeaderMap {
+    headers
+        .iter()
+        .filter(|(name, _)| allowed.contains(&name.as_str()))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
+// reqwest 0.12's method and body rules; an origin change strips the caller's
+// headers for the rest of the chain. No Referer: a URL may carry an API key.
 fn next_hop(
     current: &Hop,
     status: StatusCode,
@@ -328,14 +344,19 @@ fn next_hop(
         StatusCode::SEE_OTHER => false,
         _ => return Ok(None),
     };
+    // An unfollowable Location hands the 3xx back to the caller, like reqwest.
     let Some(url) = location
         .and_then(|value| std::str::from_utf8(value.as_bytes()).ok())
         .and_then(|value| current.url.join(value).ok())
+        .filter(|url| check_url_shape(url).is_ok())
     else {
         return Ok(None);
     };
     if followed >= MAX_REDIRECTS {
         return Err("too many redirects".into());
+    }
+    if current.url.scheme() == "https" && url.scheme() == "http" {
+        return Err("redirect from https to http refused".into());
     }
     let mut next = Hop {
         url,
@@ -353,11 +374,30 @@ fn next_hop(
         }
     }
     if next.url.origin() != current.url.origin() {
-        for name in CREDENTIAL_HEADERS {
-            next.headers.remove(name);
-        }
+        next.headers = keep_only(&next.headers, &CROSS_ORIGIN_HEADERS);
     }
     Ok(Some(next))
+}
+
+// A body read to its end hands the connection back to the pool for the next
+// hop; a large or slow one is dropped together with its connection.
+async fn drain(mut response: reqwest::Response) {
+    if response
+        .content_length()
+        .is_some_and(|len| len > DRAIN_LIMIT as u64)
+    {
+        return;
+    }
+    let _ = tokio::time::timeout(DRAIN_TIMEOUT, async {
+        let mut read = 0;
+        while let Ok(Some(chunk)) = response.chunk().await {
+            read += chunk.len();
+            if read > DRAIN_LIMIT {
+                return;
+            }
+        }
+    })
+    .await;
 }
 
 // reqwest would resolve a redirect target itself, unclassified and unpinned, so
@@ -377,15 +417,17 @@ async fn send_guarded(
             request = request.body(body.clone());
         }
         let response = request.send().await.map_err(|e| e.to_string())?;
-        match next_hop(
+        let Some(next) = next_hop(
             &hop,
             response.status(),
             response.headers().get(LOCATION),
             followed,
-        )? {
-            Some(next) => hop = next,
-            None => return Ok(response),
-        }
+        )?
+        else {
+            return Ok(response);
+        };
+        drain(response).await;
+        hop = next;
         followed += 1;
     }
 }
@@ -533,6 +575,7 @@ mod tests {
     const ALIASES: FakeDns = FakeDns(&[
         ("loopback-alias.test", "127.0.0.1"),
         ("metadata-alias.test", "169.254.169.254"),
+        ("keep-alive.test", "127.0.0.1"),
     ]);
 
     fn hop(method: &str, target: &str, headers: &[(&str, &str)], body: Option<&str>) -> Hop {
@@ -947,33 +990,155 @@ mod tests {
     }
 
     #[test]
-    fn credentials_are_dropped_once_the_origin_changes() {
+    fn caller_headers_outside_the_allowlist_are_dropped_once_the_origin_changes() {
+        const SECRETS: [&str; 6] = [
+            "authorization",
+            "x-api-key",
+            "api-key",
+            "x-goog-api-key",
+            "cookie",
+            "x-terax-custom",
+        ];
         let headers = [
             ("Authorization", "Bearer k"),
+            ("X-Api-Key", "k1"),
+            ("Api-Key", "k2"),
+            ("X-Goog-Api-Key", "k3"),
             ("Cookie", "s=1"),
-            ("X-Trace", "t"),
+            ("X-Terax-Custom", "c"),
+            ("Accept", "application/json"),
+            ("Accept-Language", "de"),
+            ("User-Agent", "terax"),
         ];
         let start = hop("GET", "https://api.example.com/v1", &headers, None);
-        assert_eq!(
-            follow(&start, 302, "/v2").headers["authorization"],
-            "Bearer k"
-        );
+        for target in ["/v2", "https://api.example.com:443/v2"] {
+            let next = follow(&start, 302, target);
+            for name in SECRETS {
+                assert!(next.headers.contains_key(name), "{target}: {name}");
+            }
+        }
         for target in [
             "https://cdn.example.com/v1",
             "https://api.example.com:8443/v1",
-            "http://api.example.com/v1",
         ] {
             let next = follow(&start, 302, target);
-            assert!(next.headers.get("authorization").is_none(), "{target}");
-            assert!(next.headers.get("cookie").is_none(), "{target}");
-            assert_eq!(next.headers["x-trace"], "t", "{target}");
+            for name in SECRETS {
+                assert!(!next.headers.contains_key(name), "{target}: {name}");
+            }
+            assert_eq!(next.headers["accept"], "application/json", "{target}");
+            assert_eq!(next.headers["accept-language"], "de", "{target}");
+            assert_eq!(next.headers["user-agent"], "terax", "{target}");
         }
-        let same_port = hop("GET", "http://h.test:8080/", &headers, None);
-        let upgraded = follow(&same_port, 307, "https://h.test:8080/");
-        assert!(upgraded.headers.get("authorization").is_none());
+        let plain = hop("GET", "http://h.test:8080/", &headers, None);
+        let upgraded = follow(&plain, 307, "https://h.test:8080/");
+        assert!(!upgraded.headers.contains_key("x-api-key"));
         let away = follow(&start, 302, "https://cdn.example.com/a");
-        let onward = follow(&away, 302, "/b");
-        assert!(onward.headers.get("authorization").is_none());
+        let back = follow(&away, 302, "https://api.example.com/b");
+        for name in SECRETS {
+            assert!(!back.headers.contains_key(name), "{name} stays dropped");
+        }
+    }
+
+    #[test]
+    fn a_redirect_from_https_to_http_is_refused() {
+        let start = hop("GET", "https://api.example.com/v1", &[], None);
+        for location in ["http://api.example.com/v1", "http://127.0.0.1:1234/"] {
+            let location = HeaderValue::from_str(location).unwrap();
+            assert_eq!(
+                next_hop(&start, StatusCode::FOUND, Some(&location), 0).unwrap_err(),
+                "redirect from https to http refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_location_failing_the_url_shape_check_is_not_followed() {
+        let start = hop("GET", "http://127.0.0.1:1234/", &[], None);
+        for location in [
+            "ftp://127.0.0.1/",
+            "file:///etc/passwd",
+            "http://user:pw@127.0.0.1:1234/",
+            "http://metadata.google.internal/computeMetadata/v1/",
+            "//metadata./",
+        ] {
+            let value = HeaderValue::from_str(location).unwrap();
+            let next = next_hop(&start, StatusCode::FOUND, Some(&value), 0);
+            assert!(next.unwrap().is_none(), "{location}");
+        }
+        let metadata_ip = HeaderValue::from_static("http://169.254.169.254/");
+        let next = next_hop(&start, StatusCode::FOUND, Some(&metadata_ip), 0);
+        assert!(
+            next.unwrap().is_some(),
+            "addresses are refused by admit_url, not here"
+        );
+    }
+
+    #[test]
+    fn an_unfollowable_redirect_reaches_the_caller_unchanged() {
+        let (port, server) = serve(|_| {
+            vec!["HTTP/1.1 302 Found\r\nLocation: http://metadata.google.internal/\r\nContent-Length: 5\r\nConnection: close\r\n\r\nmoved".to_string()]
+        });
+        let rt = runtime();
+        let start = hop("GET", &format!("http://127.0.0.1:{port}/"), &[], None);
+        let resp = fetch(&rt, true, start).unwrap();
+        assert_eq!(resp.status, 302);
+        assert_eq!(resp.headers["location"], "http://metadata.google.internal/");
+        assert_eq!(resp.body, b"moved");
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_small_redirect_body_is_read_so_the_next_hop_reuses_the_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_request(&mut stream);
+            stream
+                .write_all(b"HTTP/1.1 302 Found\r\nLocation: /landed\r\nContent-Length: 5\r\n\r\n")
+                .unwrap();
+            // hyper itself drains a body that is already buffered.
+            std::thread::sleep(Duration::from_millis(50));
+            stream.write_all(b"moved").unwrap();
+            let reused = read_request(&mut stream).starts_with("GET /landed ");
+            if !reused {
+                (stream, _) = listener.accept().unwrap();
+                read_request(&mut stream);
+            }
+            stream.write_all(LANDED.as_bytes()).unwrap();
+            reused
+        });
+        let rt = runtime();
+        let start = hop("GET", &format!("http://keep-alive.test:{port}/"), &[], None);
+        assert_eq!(fetch(&rt, true, start).unwrap().body, b"landed");
+        assert!(
+            server.join().unwrap(),
+            "the second hop opened a new connection"
+        );
+    }
+
+    #[test]
+    fn the_client_key_ignores_the_order_and_repeats_of_dns_records() {
+        const SHUFFLED: FakeDns = FakeDns(&[
+            ("pool.test", "10.0.0.2"),
+            ("pool.test", "10.0.0.1"),
+            ("pool.test", "10.0.0.2"),
+        ]);
+        const SORTED: FakeDns = FakeDns(&[("pool.test", "10.0.0.1"), ("pool.test", "10.0.0.2")]);
+        let rt = runtime();
+        let key = |dns: &FakeDns| {
+            rt.block_on(admit_url(
+                &url("http://pool.test/"),
+                true,
+                Timeouts::Ai,
+                dns,
+            ))
+            .unwrap()
+        };
+        let shuffled = key(&SHUFFLED);
+        let expected: [IpAddr; 2] = ["10.0.0.1".parse().unwrap(), "10.0.0.2".parse().unwrap()];
+        assert_eq!(shuffled.ips, expected);
+        assert_eq!(shuffled, key(&SORTED));
     }
 
     #[test]
@@ -1033,18 +1198,21 @@ mod tests {
     #[test]
     fn the_client_cache_reuses_a_key_and_keeps_its_bound() {
         fn get(cache: &mut Lru<u32, u32>, builds: &mut u32, key: u32) -> u32 {
-            cache
-                .get_or_try_insert(key, |k| {
-                    *builds += 1;
-                    Ok::<_, String>(*builds * 100 + k)
-                })
-                .unwrap()
+            cache.get(&key).unwrap_or_else(|| {
+                *builds += 1;
+                cache.insert(key, *builds * 100 + key)
+            })
         }
         let mut cache = Lru::new(CLIENT_CACHE_SIZE);
         let mut builds = 0;
         let first = get(&mut cache, &mut builds, 0);
         assert_eq!(get(&mut cache, &mut builds, 0), first);
         assert_eq!(builds, 1);
+        assert_eq!(
+            cache.insert(0, 999),
+            first,
+            "a racing build keeps the cached one"
+        );
         for key in 1..CLIENT_CACHE_SIZE as u32 {
             get(&mut cache, &mut builds, key);
         }

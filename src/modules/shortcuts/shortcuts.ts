@@ -71,8 +71,6 @@ export type Shortcut = {
   group: ShortcutGroup;
   defaultBindings: KeyBinding[];
   allowRepeat?: boolean;
-  /** A match always blocks the WebView default, even when the handler is skipped. */
-  claimDefault?: boolean;
 };
 
 export const SHORTCUTS: Shortcut[] = [
@@ -338,16 +336,27 @@ export const SHORTCUTS: Shortcut[] = [
       { [MOD_PROP]: true, shift: true, key: "z" },
     ],
   },
-  // Mod+S at the app layer so WKWebView cannot open "Save Page"
-  // (crynta/terax-ai#969).
   {
     id: "editor.save",
     label: "Save file",
     group: "Editor",
     defaultBindings: [{ [MOD_PROP]: true, key: "s" }],
-    claimDefault: true,
   },
 ];
+
+/** Shortcuts that act on the document of the active editor tab. */
+export const EDITOR_SHORTCUTS: ReadonlySet<ShortcutId> = new Set<ShortcutId>([
+  "editor.undo",
+  "editor.redo",
+  "editor.save",
+]);
+
+export function isEditorShortcutDisabled(
+  id: ShortcutId,
+  activeTabKind: string | undefined,
+): boolean {
+  return EDITOR_SHORTCUTS.has(id) && activeTabKind !== "editor";
+}
 
 export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   "General",
