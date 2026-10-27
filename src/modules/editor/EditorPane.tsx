@@ -145,6 +145,12 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
     saveRef.current = save;
     const onSavedRef = useRef(onSaved);
     onSavedRef.current = onSaved;
+    // onSaved must only fire on a real write: saveRef rejects on failure
+    // (surfaced via a toast in useDocument) and resolves false when the write
+    // was withheld on a disk-conflict.
+    const saveAndNotify = useCallback(async () => {
+      if (await saveRef.current()) onSavedRef.current?.();
+    }, []);
     const onCloseRef = useRef(onClose);
     onCloseRef.current = onClose;
 
@@ -187,13 +193,8 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
         ),
         vimHandlersExtension(() => ({
           save: () => {
-            // onSaved must only fire on a real write: saveRef rejects on
-            // failure (surfaced via a toast in useDocument) and resolves false
-            // when the write was withheld on a disk-conflict. Swallow the
-            // rejection here to avoid an unhandled promise.
-            void (async () => {
-              if (await saveRef.current()) onSavedRef.current?.();
-            })().catch(() => {});
+            // Swallow the rejection here to avoid an unhandled promise.
+            void saveAndNotify().catch(() => {});
           },
           close: () => onCloseRef.current?.(),
         })),
@@ -243,15 +244,13 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
             key: "Mod-s",
             preventDefault: true,
             run: () => {
-              void (async () => {
-                if (await saveRef.current()) onSavedRef.current?.();
-              })().catch(() => {});
+              void saveAndNotify().catch(() => {});
               return true;
             },
           },
         ]),
       ],
-      [],
+      [saveAndNotify],
     );
 
     useEffect(() => {
@@ -352,11 +351,9 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
           const view = cmRef.current?.view;
           if (view) redo(view);
         },
-        save: async () => {
-          if (await saveRef.current()) onSavedRef.current?.();
-        },
+        save: saveAndNotify,
       }),
-      [path, applyPendingGoto],
+      [path, applyPendingGoto, saveAndNotify],
     );
 
     // Media (image/video/audio/pdf) renders through the asset protocol, whose

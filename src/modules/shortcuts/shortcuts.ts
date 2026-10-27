@@ -338,7 +338,8 @@ export const SHORTCUTS: Shortcut[] = [
       { [MOD_PROP]: true, shift: true, key: "z" },
     ],
   },
-  // Mod+S at the app layer so WKWebView cannot open "Save Page" (#969).
+  // Mod+S at the app layer so WKWebView cannot open "Save Page"
+  // (crynta/terax-ai#969).
   {
     id: "editor.save",
     label: "Save file",

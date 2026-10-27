@@ -85,6 +85,7 @@ fn prefix_kind(v: Ipv6Addr, s: &[u16; 8]) -> IpKind {
     }
     if let Some(kind) = embedded_ipv4(s)
         .into_iter()
+        .flatten()
         .map(ipv4_kind)
         .reduce(IpKind::worse)
     {
@@ -125,19 +126,20 @@ fn v4(hi: u16, lo: u16) -> Ipv4Addr {
     Ipv4Addr::new(a, b, c, d)
 }
 
-// The IPv4 destinations a translation prefix carries; empty for any other address.
-fn embedded_ipv4(s: &[u16; 8]) -> Vec<Ipv4Addr> {
+// The IPv4 destinations a translation prefix carries; all None for any other address.
+fn embedded_ipv4(s: &[u16; 8]) -> [Option<Ipv4Addr>; 2] {
     match *s {
         [0, 0, 0, 0, 0, 0xffff, hi, lo]
         | [0, 0, 0, 0, 0, 0, hi, lo]
         | [0, 0, 0, 0, 0xffff, 0, hi, lo]
         | [0x64, 0xff9b, 0, 0, 0, 0, hi, lo]
-        | [0x2002, hi, lo, ..] => vec![v4(hi, lo)],
+        | [0x2002, hi, lo, ..] => [Some(v4(hi, lo)), None],
         // Teredo stores the client IPv4 bit-inverted.
-        [0x2001, 0, server_hi, server_lo, _, _, client_hi, client_lo] => {
-            vec![v4(server_hi, server_lo), v4(!client_hi, !client_lo)]
-        }
-        _ => Vec::new(),
+        [0x2001, 0, server_hi, server_lo, _, _, client_hi, client_lo] => [
+            Some(v4(server_hi, server_lo)),
+            Some(v4(!client_hi, !client_lo)),
+        ],
+        _ => [None, None],
     }
 }
 

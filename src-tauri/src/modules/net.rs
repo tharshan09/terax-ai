@@ -90,13 +90,21 @@ fn validate_url(url: &str) -> Result<(Url, Host<String>), String> {
     Ok((parsed, host))
 }
 
+fn admits(kind: IpKind, allow_private: bool) -> bool {
+    match kind {
+        IpKind::Public => true,
+        IpKind::Private | IpKind::Loopback => allow_private,
+        IpKind::BlockedMetadata => false,
+    }
+}
+
 fn admit(host: &Host<impl AsRef<str>>, kind: IpKind, allow_private: bool) -> Result<(), String> {
     match kind {
+        _ if admits(kind, allow_private) => Ok(()),
         IpKind::BlockedMetadata => Err(format!("host not allowed: {host}")),
-        IpKind::Loopback | IpKind::Private if !allow_private => Err(format!(
+        _ => Err(format!(
             "host {host} resolves to a private/loopback address; this endpoint requires explicit opt-in",
         )),
-        _ => Ok(()),
     }
 }
 
@@ -254,7 +262,7 @@ fn redirect_decision(
         // not bypass the env proxy, a local one must not go through it.
         Some(ip) => {
             let kind = ip_kind(ip);
-            admit(&host, kind, allow_private).is_ok() && (kind == IpKind::Public) == origin_public
+            admits(kind, allow_private) && (kind == IpKind::Public) == origin_public
         }
         // Fork deviation: reqwest resolves a new name itself, unclassified and
         // unpinned, so a hop to another name is stopped even with private access.

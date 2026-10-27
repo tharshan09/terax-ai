@@ -20,7 +20,8 @@ const NATIVE_HISTORY_SHORTCUTS: ReadonlySet<ShortcutId> = new Set([
 
 /** A focused input, textarea or contenteditable outside the CodeMirror
  *  editor owns its own undo/redo history; Cmd+Z / Cmd+Shift+Z there must not
- *  mutate the editor document behind it (commit box, rename field, chat). */
+ *  mutate the editor document behind it (commit box, rename field, chat).
+ *  Cmd+S from such a field must not save the editor behind it either. */
 function editableOutsideEditor(e: KeyboardEvent): boolean {
   const target = e.target;
   if (!(target instanceof Element)) return false;
@@ -46,14 +47,15 @@ export function useGlobalShortcuts(
     const onKey = (e: KeyboardEvent) => {
       const { handlers, options } = latest.current;
       for (const s of SHORTCUTS) {
-        if (e.repeat && !s.allowRepeat && !s.claimDefault) continue;
+        const blockedRepeat = e.repeat && !s.allowRepeat;
+        if (blockedRepeat && !s.claimDefault) continue;
         const bindings = userShortcuts[s.id] || s.defaultBindings;
         const isMatch = bindings.some((b) => matchBinding(e, b, s.id));
         if (!isMatch) continue;
         if (s.claimDefault) {
           e.preventDefault();
           // A held key or a focused field must not run it on the editor behind.
-          if ((e.repeat && !s.allowRepeat) || editableOutsideEditor(e)) return;
+          if (blockedRepeat || editableOutsideEditor(e)) return;
         }
         if (options?.isDisabled?.(s.id, e)) return;
         if (NATIVE_HISTORY_SHORTCUTS.has(s.id) && editableOutsideEditor(e)) return;
