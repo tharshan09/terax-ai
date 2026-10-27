@@ -4,6 +4,7 @@ import {
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,
+  ContextMenuShortcut,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import {
@@ -21,11 +22,13 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import { openWithDefaultApp } from "@/lib/openWith";
+import { IS_MAC } from "@/lib/platform";
 import { basename, cn } from "@/lib/utils";
 import { ExplorerSearch, type ExplorerSearchHandle } from "./ExplorerSearch";
 import { EntryRow, PendingRow, StatusRow, type RowActions } from "./TreeRow";
@@ -35,6 +38,12 @@ import {
   relativePath,
   revealInFinder,
 } from "./lib/contextActions";
+import {
+  isPasteShortcut,
+  parentDir,
+  pasteClipboardFiles,
+  pasteTargetDir,
+} from "@/modules/explorer/lib/clipboardPaste";
 import { fileIconUrl, folderIconUrl } from "./lib/iconResolver";
 import { COMPACT_CONTENT, COMPACT_ITEM } from "./lib/menuItemClass";
 import { useExplorerDnd } from "./lib/useExplorerDnd";
@@ -45,6 +54,7 @@ import type { GitStatusCode } from "./lib/gitStatusUtils";
 import { useGlobalShortcuts } from "@/modules/shortcuts";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { GitStatusSnapshot } from "@/modules/ai/lib/native";
+import { useWorkspaceEnvStore, type WorkspaceEnv } from "@/modules/workspace";
 
 export type FileExplorerHandle = {
   focus: () => void;
@@ -90,12 +100,9 @@ type Row =
 
 const ROW_HEIGHT = 24;
 const OVERSCAN = 8;
+const PASTE_HINT = IS_MAC ? "⌘V" : "Ctrl+V";
 
-
-function parentOf(path: string, fallback: string): string {
-  const i = path.lastIndexOf("/");
-  return i > 0 ? path.slice(0, i) : fallback;
-}
+type PasteScope = { rootPath: string | null; workspace: WorkspaceEnv };
 
 function buildRows(
   rootPath: string,
@@ -204,6 +211,22 @@ export const FileExplorer = memo(
     const searchRef = useRef<ExplorerSearchHandle>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const scrollRef = useRef<HTMLDivElement>(null);
+    const workspace = useWorkspaceEnvStore((s) => s.env);
+    const pasteBusyRef = useRef(false);
+    const pasteScopeRef = useRef<PasteScope>({ rootPath, workspace });
+    // `selection` is the selection the paste started from; once the user picks
+    // something else, the pasted item must not take it over.
+    const [pastedSelection, setPastedSelection] = useState<{
+      scope: PasteScope;
+      path: string;
+      selection: string | null;
+    } | null>(null);
+    useLayoutEffect(() => {
+      pasteScopeRef.current = { rootPath, workspace };
+      return () => {
+        pasteScopeRef.current = { rootPath: null, workspace };
+      };
+    }, [rootPath, workspace]);
 
     // biome-ignore lint/correctness/useExhaustiveDependencies: `tree` is intentionally omitted (its identity changes every render); the listed fields are the only inputs buildRows actually reads.
     const { rows, entryIndexByPath } = useMemo(() => {
@@ -299,6 +322,47 @@ export const FileExplorer = memo(
       [entryIndexByPath, virtualizer],
     );
 
+    // Select only once the row exists: the reset effect above clears any
+    // selection that is not in the tree yet.
+    useEffect(() => {
+      if (!pastedSelection) return;
+      if (
+        pastedSelection.scope !== pasteScopeRef.current ||
+        pastedSelection.selection !== selectedPath
+      ) {
+        setPastedSelection(null);
+        return;
+      }
+      const { path } = pastedSelection;
+      if (!entryIndexByPath.has(path)) return;
+      setPastedSelection(null);
+      setSelectedPath(path);
+      requestAnimationFrame(() => scrollEntryIntoView(path));
+    }, [pastedSelection, selectedPath, entryIndexByPath, scrollEntryIntoView]);
+
+    const pasteInto = useCallback(
+      async (destDir: string) => {
+        if (!rootPath || pasteBusyRef.current) return;
+        pasteBusyRef.current = true;
+        const scope = pasteScopeRef.current;
+        const isCurrent = () => pasteScopeRef.current === scope;
+        try {
+          const created = await pasteClipboardFiles(destDir, {
+            workspace,
+            isCurrent,
+            refresh: tree.refresh,
+          });
+          const first = created[0];
+          if (!first || !isCurrent()) return;
+          if (destDir !== rootPath) tree.expand(destDir);
+          setPastedSelection({ scope, path: first, selection: selectedPath });
+        } finally {
+          pasteBusyRef.current = false;
+        }
+      },
+      [rootPath, workspace, selectedPath, tree.refresh, tree.expand],
+    );
+
     const lastSyncedActivePathRef = useRef<string | null>(null);
     useEffect(() => {
       if (!activeFilePath || activeFilePath === lastSyncedActivePathRef.current) {
@@ -375,6 +439,13 @@ export const FileExplorer = memo(
         target.isContentEditable
       )
         return;
+
+      if (isPasteShortcut(e, IS_MAC)) {
+        e.preventDefault();
+        void pasteInto(pasteTargetDir(selectedPath, isDirAt, rootPath));
+        return;
+      }
+
       if (entryPaths.length === 0) return;
 
       const currentIdx = selectedPath ? entryPaths.indexOf(selectedPath) : -1;
@@ -698,7 +769,7 @@ export const FileExplorer = memo(
                       tree.beginCreate(
                         menuTarget.isDir
                           ? menuTarget.path
-                          : parentOf(menuTarget.path, rootPath),
+                          : parentDir(menuTarget.path, rootPath),
                         "file",
                       )
                     }
@@ -711,12 +782,27 @@ export const FileExplorer = memo(
                       tree.beginCreate(
                         menuTarget.isDir
                           ? menuTarget.path
-                          : parentOf(menuTarget.path, rootPath),
+                          : parentDir(menuTarget.path, rootPath),
                         "dir",
                       )
                     }
                   >
                     New Folder
+                  </ContextMenuItem>
+                  <ContextMenuItem
+                    className={COMPACT_ITEM}
+                    onSelect={() =>
+                      void pasteInto(
+                        pasteTargetDir(
+                          menuTarget.path,
+                          () => menuTarget.isDir,
+                          rootPath,
+                        ),
+                      )
+                    }
+                  >
+                    Paste
+                    <ContextMenuShortcut>{PASTE_HINT}</ContextMenuShortcut>
                   </ContextMenuItem>
                   <ContextMenuSeparator />
                   <ContextMenuItem
@@ -786,6 +872,13 @@ export const FileExplorer = memo(
                     onSelect={() => tree.beginCreate(rootPath, "dir")}
                   >
                     New Folder
+                  </ContextMenuItem>
+                  <ContextMenuItem
+                    className={COMPACT_ITEM}
+                    onSelect={() => void pasteInto(rootPath)}
+                  >
+                    Paste
+                    <ContextMenuShortcut>{PASTE_HINT}</ContextMenuShortcut>
                   </ContextMenuItem>
                   <ContextMenuSeparator />
                   <ContextMenuItem

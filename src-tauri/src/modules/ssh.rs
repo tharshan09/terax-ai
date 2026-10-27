@@ -215,7 +215,7 @@ pub fn disconnect_all() {
 /// envelope on stdout. Mirrors the local fs semantics (symlink-follow,
 /// dirs-first sort, 10 MB read cap, atomic write) so callers are
 /// local/remote-blind.
-const REMOTE_PYTHON: &str = r#"import sys, os, json, tempfile, shutil, base64, functools
+const REMOTE_PYTHON: &str = r#"import sys, os, json, tempfile, shutil, base64, functools, errno
 
 
 def _natcmp(a, b):
@@ -264,6 +264,12 @@ SEARCH_PRUNE = {"node_modules", ".git", "target", "dist", "build", ".next",
 SEARCH_MAX_SCANNED = 500000
 SEARCH_MAX_HITS = 2000
 GREP_FILE_CAP = 5 * 1024 * 1024
+# Mirror of copy.rs STAGING_PREFIX (pinned by a test): never listed or entered.
+STAGING_PREFIX = ".terax-copy-"
+
+
+def _staging(name):
+    return name.startswith(STAGING_PREFIX)
 
 
 def _utf8_ok(name):
@@ -296,7 +302,7 @@ def read_dir(req):
     out = []
     with os.scandir(path) as it:
         for e in it:
-            if e.name.startswith(".") and not show_hidden:
+            if _staging(e.name) or (e.name.startswith(".") and not show_hidden):
                 continue
             if not _utf8_ok(e.name):
                 continue
@@ -315,7 +321,7 @@ def list_subdirs(req):
     out = []
     with os.scandir(path) as it:
         for e in it:
-            if e.name.startswith(".") and not show_hidden:
+            if _staging(e.name) or (e.name.startswith(".") and not show_hidden):
                 continue
             if not _utf8_ok(e.name):
                 continue
@@ -430,10 +436,6 @@ def delete(req):
     return True
 
 
-def exists(req):
-    return os.path.lexists(os.path.expanduser(req["path"]))
-
-
 def write_bytes(req):
     # Binary-safe write for uploads: content arrives base64-encoded so arbitrary
     # bytes survive the JSON envelope. Atomic tmp+rename like write_file; refuses
@@ -465,6 +467,43 @@ def write_bytes(req):
     return True
 
 
+def publish(req):
+    # Moves a finished staging item to `to` without ever replacing what is
+    # there: folders swap with an exclusive empty reservation, files hardlink.
+    src = os.path.expanduser(req["from"]); dst = os.path.expanduser(req["to"])
+    if S_ISDIR(os.lstat(src).st_mode):
+        try:
+            os.mkdir(dst)
+        except FileExistsError:
+            raise FileExistsError("already exists: " + dst)
+        try:
+            os.rename(src, dst)
+        except BaseException:
+            try:
+                os.rmdir(dst)
+            except OSError:
+                pass
+            raise
+        return True
+    try:
+        os.link(src, dst)
+    except FileExistsError:
+        raise FileExistsError("already exists: " + dst)
+    except OSError as ex:
+        if ex.errno not in (errno.ENOTSUP, errno.EOPNOTSUPP, errno.EPERM):
+            raise
+        # No hardlinks here: check-then-rename leaves a small race window.
+        if os.path.lexists(dst):
+            raise FileExistsError("already exists: " + dst)
+        os.rename(src, dst)
+        return True
+    try:
+        os.unlink(src)
+    except OSError:
+        pass  # published; the staging cleanup removes the leftover link
+    return True
+
+
 def _subseq(needle, hay):
     # Case-insensitive subsequence test: the coarse prefilter that mirrors
     # nucleo's fuzzy matchability. The Rust side re-ranks with the real matcher,
@@ -483,11 +522,11 @@ def search(req):
     hits = []; scanned = 0; truncated = False
     for dirpath, dirnames, filenames in os.walk(root):
         # Prune heavy dirs + hidden dirs in place so os.walk doesn't descend.
-        dirnames[:] = [d for d in dirnames if d not in SEARCH_PRUNE
+        dirnames[:] = [d for d in dirnames if d not in SEARCH_PRUNE and not _staging(d)
                        and (show_hidden or not d.startswith("."))]
         entries = [(d, True) for d in dirnames] + [(f, False) for f in filenames]
         for name, is_dir in entries:
-            if not show_hidden and name.startswith("."):
+            if _staging(name) or (not show_hidden and name.startswith(".")):
                 continue
             scanned += 1
             if scanned > SEARCH_MAX_SCANNED:
@@ -516,10 +555,10 @@ def grep(req):
     base = root.rstrip("/") + "/"
     hits = []; scanned = 0; files = 0; truncated = False
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SEARCH_PRUNE
+        dirnames[:] = [d for d in dirnames if d not in SEARCH_PRUNE and not _staging(d)
                        and (show_hidden or not d.startswith("."))]
         for name in filenames:
-            if not show_hidden and name.startswith("."):
+            if _staging(name) or (not show_hidden and name.startswith(".")):
                 continue
             scanned += 1
             if scanned > SEARCH_MAX_SCANNED:
@@ -557,7 +596,7 @@ def grep(req):
 OPS = {"read_dir": read_dir, "list_subdirs": list_subdirs, "stat": stat,
        "realpath": realpath, "read_file": read_file, "write_file": write_file,
        "create_file": create_file, "create_dir": create_dir,
-       "rename": rename, "delete": delete, "exists": exists,
+       "rename": rename, "delete": delete, "publish": publish,
        "write_bytes": write_bytes, "search": search, "grep": grep}
 
 
@@ -762,6 +801,23 @@ fn timed_out_msg(host: &str, what: &str, budget_secs: u64) -> String {
     )
 }
 
+/// Why a remote FS op failed: the connection or helper run (`Transport`), or
+/// the op itself on a healthy host (`Failed`). Callers returning `String` keep
+/// using `?` through the `From` impl.
+#[derive(Debug)]
+enum RemoteError {
+    Transport(String),
+    Failed(String),
+}
+
+impl From<RemoteError> for String {
+    fn from(error: RemoteError) -> Self {
+        match error {
+            RemoteError::Transport(message) | RemoteError::Failed(message) => message,
+        }
+    }
+}
+
 /// Run one remote FS op and return its `data` value (or the remote error).
 ///
 /// `timeout` bounds the whole ssh exec: `Some(_)` (the read commands pass
@@ -769,6 +825,29 @@ fn timed_out_msg(host: &str, what: &str, budget_secs: u64) -> String {
 /// mutations) waits indefinitely as before, since killing mid-write is riskier
 /// than blocking.
 fn run_remote_json(
+    host: &str,
+    request: &serde_json::Value,
+    timeout: Option<std::time::Duration>,
+) -> Result<serde_json::Value, RemoteError> {
+    let parsed = remote_envelope(host, request, timeout).map_err(RemoteError::Transport)?;
+    if parsed.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+        Ok(parsed
+            .get("data")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
+    } else {
+        Err(RemoteError::Failed(
+            parsed
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown remote error")
+                .to_string(),
+        ))
+    }
+}
+
+/// Run the helper for one request and return its parsed response envelope.
+fn remote_envelope(
     host: &str,
     request: &serde_json::Value,
     timeout: Option<std::time::Duration>,
@@ -865,20 +944,7 @@ fn run_remote_json(
             ));
         }
     };
-    let parsed: serde_json::Value =
-        serde_json::from_slice(json_bytes).map_err(|e| format!("bad remote response: {e}"))?;
-    if parsed.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
-        Ok(parsed
-            .get("data")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null))
-    } else {
-        Err(parsed
-            .get("error")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("unknown remote error")
-            .to_string())
-    }
+    serde_json::from_slice(json_bytes).map_err(|e| format!("bad remote response: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1113,6 +1179,10 @@ pub fn create_file(host: &str, path: &str) -> Result<(), String> {
 
 /// Remote `fs_create_dir` (creates parents; refuses if the leaf exists).
 pub fn create_dir(host: &str, path: &str) -> Result<(), String> {
+    Ok(create_remote_dir(host, path)?)
+}
+
+fn create_remote_dir(host: &str, path: &str) -> Result<(), RemoteError> {
     run_remote_json(
         host,
         &serde_json::json!({ "op": "create_dir", "path": path }),
@@ -1141,19 +1211,14 @@ pub fn delete(host: &str, path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// True if `path` exists on the host (symlink-aware; does not follow).
-fn remote_exists(host: &str, path: &str) -> Result<bool, String> {
-    let data = run_remote_json(
-        host,
-        &serde_json::json!({ "op": "exists", "path": path }),
-        None,
-    )?;
-    Ok(data.as_bool().unwrap_or(false))
-}
-
 /// Binary-safe remote write (base64 over the wire), atomic on the host. `mode`
 /// is applied after the rename when present, preserving the source's perms.
-fn write_bytes(host: &str, path: &str, bytes: &[u8], mode: Option<u32>) -> Result<(), String> {
+fn write_bytes(
+    host: &str,
+    path: &str,
+    bytes: &[u8],
+    mode: Option<u32>,
+) -> Result<(), RemoteError> {
     let b64 = b64encode(bytes);
     run_remote_json(
         host,
@@ -1163,26 +1228,87 @@ fn write_bytes(host: &str, path: &str, bytes: &[u8], mode: Option<u32>) -> Resul
     Ok(())
 }
 
-/// Recursively upload one local path to `target` on the host. Dirs are created
-/// (failing if `target` already exists); files are streamed as bytes.
-fn upload_recursive(host: &str, src: &std::path::Path, target: &str) -> Result<(), String> {
-    let meta = std::fs::symlink_metadata(src).map_err(|e| e.to_string())?;
+/// Moves a finished staging item to `to`; never replaces an existing entry.
+fn publish(host: &str, from: &str, to: &str) -> Result<(), RemoteError> {
+    run_remote_json(
+        host,
+        &serde_json::json!({ "op": "publish", "from": from, "to": to }),
+        None,
+    )?;
+    Ok(())
+}
+
+/// One remote step of an upload; `rel` is relative to the staged item.
+#[cfg_attr(test, derive(Debug, PartialEq))]
+enum Upload {
+    Dir(String),
+    File {
+        src: std::path::PathBuf,
+        rel: String,
+        mode: Option<u32>,
+    },
+}
+
+/// Walks the local source once before any remote call, so an item that cannot
+/// be uploaded fails without touching the host.
+fn plan_upload(
+    src: &std::path::Path,
+    rel: String,
+    depth: usize,
+    plan: &mut Vec<Upload>,
+) -> std::io::Result<()> {
+    use crate::modules::fs::copy;
+    copy::check_depth(depth)?;
+    let meta = std::fs::symlink_metadata(src)?;
     if meta.is_dir() {
-        create_dir(host, target)?;
-        for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
-            let entry = entry.map_err(|e| e.to_string())?;
+        plan.push(Upload::Dir(rel.clone()));
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
             let name = entry.file_name();
-            let name = name
-                .to_str()
-                .ok_or_else(|| format!("non-UTF-8 filename under {}", src.display()))?;
-            let child = format!("{}/{name}", target.trim_end_matches('/'));
-            upload_recursive(host, &entry.path(), &child)?;
+            let name = name.to_str().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("non-UTF-8 filename under {}", src.display()),
+                )
+            })?;
+            plan_upload(&entry.path(), format!("{rel}/{name}"), depth + 1, plan)?;
         }
-        Ok(())
-    } else {
-        let bytes = std::fs::read(src).map_err(|e| e.to_string())?;
-        write_bytes(host, target, &bytes, file_mode(&meta))
+        return Ok(());
     }
+    // The helper writes plain files only: a symlink uploads its target's bytes.
+    let target = if meta.file_type().is_symlink() {
+        std::fs::metadata(src)?
+    } else {
+        meta
+    };
+    if target.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "folder symlinks cannot be copied to an SSH host",
+        ));
+    }
+    if !target.is_file() {
+        return Err(copy::unsupported_kind());
+    }
+    plan.push(Upload::File {
+        src: src.to_path_buf(),
+        rel,
+        mode: file_mode(&target),
+    });
+    Ok(())
+}
+
+fn upload(host: &str, plan: &[Upload], item: &str) -> Result<(), RemoteError> {
+    for step in plan {
+        match step {
+            Upload::Dir(rel) => create_remote_dir(host, &format!("{item}{rel}"))?,
+            Upload::File { src, rel, mode } => {
+                let bytes = std::fs::read(src).map_err(|e| RemoteError::Failed(e.to_string()))?;
+                write_bytes(host, &format!("{item}{rel}"), &bytes, *mode)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1196,24 +1322,131 @@ fn file_mode(_meta: &std::fs::Metadata) -> Option<u32> {
     None
 }
 
-/// Remote `fs_copy`: upload local `sources` into the remote `dest_dir`,
-/// recursively. Mirrors local fs_copy — refuses to overwrite an existing
-/// top-level entry; nested entries land in freshly created dirs.
-pub fn copy(host: &str, sources: &[String], dest_dir: &str) -> Result<(), String> {
+// Unique per call and random across processes; a clash only fails the item,
+// because create_dir refuses an existing name.
+fn staging_suffix() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    format!("{:016x}", hasher.finish())
+}
+
+/// Remote `fs_copy`: each source is uploaded into a hidden staging dir inside
+/// `dest_dir`, then published under the first free name. Item failures land in
+/// `failed`; a transport failure aborts the batch, since every later item
+/// would fail the same way.
+pub fn copy(
+    host: &str,
+    sources: &[String],
+    dest_dir: &str,
+    rename_on_conflict: bool,
+) -> Result<crate::modules::fs::copy::CopyResult, String> {
+    use crate::modules::fs::copy::{CopyFailure, CopyResult};
     let dest = dest_dir.trim_end_matches('/');
+    let mut taken: std::collections::HashSet<String> = read_dir(host, dest_dir, true)?
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect();
+    let mut result = CopyResult::default();
     for source in sources {
-        let src = std::path::Path::new(source);
-        let name = src
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| format!("invalid source: {source}"))?;
-        let target = format!("{dest}/{name}");
-        if remote_exists(host, &target)? {
-            return Err(format!("already exists: {target}"));
+        let outcome = copy_one(
+            host,
+            std::path::Path::new(source),
+            dest,
+            rename_on_conflict,
+            &mut taken,
+        );
+        match outcome {
+            Ok(name) => result.created.push(format!("{dest}/{name}")),
+            Err(RemoteError::Failed(message)) => {
+                log::warn!("ssh copy({source} -> {host}:{dest}) failed: {message}");
+                result.failed.push(CopyFailure {
+                    source: source.clone(),
+                    message,
+                });
+            }
+            Err(RemoteError::Transport(message)) => {
+                log::warn!("ssh copy({source} -> {host}:{dest}) aborted: {message}");
+                return Err(message);
+            }
         }
-        upload_recursive(host, src, &target)?;
     }
-    Ok(())
+    Ok(result)
+}
+
+fn copy_one(
+    host: &str,
+    src: &std::path::Path,
+    dest: &str,
+    rename_on_conflict: bool,
+    taken: &mut std::collections::HashSet<String>,
+) -> Result<String, RemoteError> {
+    use crate::modules::fs::copy;
+    let failed = |error: std::io::Error| RemoteError::Failed(error.to_string());
+    let (name, metadata) = copy::check_source(src).map_err(failed)?;
+    let name = name
+        .to_str()
+        .ok_or_else(|| RemoteError::Failed(format!("non-UTF-8 filename: {}", src.display())))?;
+    if !rename_on_conflict && taken.contains(name) {
+        return Err(failed(copy::already_exists(format!("{dest}/{name}"))));
+    }
+    let mut plan = Vec::new();
+    plan_upload(src, String::new(), 0, &mut plan).map_err(failed)?;
+
+    let staging = format!("{dest}/{}{}", copy::STAGING_PREFIX, staging_suffix());
+    create_remote_dir(host, &staging)?;
+    let staged = format!("{staging}/{}", copy::STAGED_ITEM);
+    let outcome = upload(host, &plan, &staged).and_then(|()| {
+        publish_staged(
+            host,
+            &staged,
+            dest,
+            name,
+            metadata.is_dir(),
+            rename_on_conflict,
+            taken,
+        )
+    });
+    // Without a connection the cleanup cannot run either; the rest stays hidden.
+    if !matches!(outcome, Err(RemoteError::Transport(_))) {
+        if let Err(error) = delete(host, &staging) {
+            log::warn!("ssh copy: could not remove staging {host}:{staging}: {error}");
+        }
+    }
+    outcome
+}
+
+/// Tries the Finder-style candidates, skipping names the one listing of the
+/// destination already showed; the helper's no-replace publish is the guard.
+fn publish_staged(
+    host: &str,
+    staged: &str,
+    dest: &str,
+    name: &str,
+    is_dir: bool,
+    rename_on_conflict: bool,
+    taken: &mut std::collections::HashSet<String>,
+) -> Result<String, RemoteError> {
+    use crate::modules::fs::copy;
+    for candidate in copy::copy_candidates(std::ffi::OsStr::new(name), is_dir) {
+        let candidate = candidate.to_string_lossy().into_owned();
+        if rename_on_conflict && taken.contains(&candidate) {
+            continue;
+        }
+        match publish(host, staged, &format!("{dest}/{candidate}")) {
+            Ok(()) => {
+                taken.insert(candidate.clone());
+                return Ok(candidate);
+            }
+            Err(RemoteError::Failed(message)) if message.starts_with("already exists: ") => {
+                if !rename_on_conflict {
+                    return Err(RemoteError::Failed(message));
+                }
+                taken.insert(candidate);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(RemoteError::Failed(copy::no_free_copy_name().to_string()))
 }
 
 #[cfg(test)]
@@ -1414,12 +1647,10 @@ Host !secret prod
         );
     }
 
-    // Runs the embedded helper against the local python3 (skipped when absent)
-    // and locks the FS-3 invariant: realpath must resolve a symlink to its
-    // real target, because the canonicalize-then-recheck guards depend on it.
+    /// Runs the embedded helper on the local python3, after an optional
+    /// `prelude` that can stub os calls. `None` when python3 is absent.
     #[cfg(unix)]
-    #[test]
-    fn embedded_helper_realpath_resolves_symlinks() {
+    fn run_helper(prelude: &str, req: &serde_json::Value) -> Option<serde_json::Value> {
         use std::io::Write;
         use std::process::{Command, Stdio};
 
@@ -1429,19 +1660,11 @@ Host !secret prod
             .map(|o| o.status.success())
             .unwrap_or(false);
         if !python_ok {
-            return;
+            return None;
         }
-
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("real.txt");
-        std::fs::write(&target, b"x").unwrap();
-        let link = dir.path().join("innocent.txt");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-
-        let req = serde_json::json!({ "op": "realpath", "path": link.to_string_lossy() });
         let mut child = Command::new("python3")
             .arg("-c")
-            .arg(REMOTE_PYTHON)
+            .arg(format!("{prelude}{REMOTE_PYTHON}"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -1454,16 +1677,224 @@ Host !secret prod
             .unwrap();
         let out = child.wait_with_output().expect("helper output");
         assert!(out.status.success());
+        let i = find_subslice(&out.stdout, TERAX_SENTINEL).expect("sentinel present");
+        Some(serde_json::from_slice(&out.stdout[i + TERAX_SENTINEL.len()..]).expect("json envelope"))
+    }
 
-        let stdout = out.stdout;
-        let i = find_subslice(&stdout, TERAX_SENTINEL).expect("sentinel present");
-        let parsed: serde_json::Value =
-            serde_json::from_slice(&stdout[i + TERAX_SENTINEL.len()..]).expect("json envelope");
+    // Locks the FS-3 invariant: realpath must resolve a symlink to its real
+    // target, because the canonicalize-then-recheck guards depend on it.
+    #[cfg(unix)]
+    #[test]
+    fn embedded_helper_realpath_resolves_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real.txt");
+        std::fs::write(&target, b"x").unwrap();
+        let link = dir.path().join("innocent.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let req = serde_json::json!({ "op": "realpath", "path": link.to_string_lossy() });
+        let Some(parsed) = run_helper("", &req) else {
+            return;
+        };
         assert_eq!(parsed["ok"], serde_json::Value::Bool(true));
         let resolved = parsed["data"].as_str().expect("string path");
         let expected = std::fs::canonicalize(&target).unwrap();
         assert_eq!(resolved, expected.to_string_lossy());
         assert_ne!(resolved, link.to_string_lossy(), "must not echo the link back");
+    }
+
+    #[test]
+    fn helper_staging_prefix_mirrors_copy_rs() {
+        let line = format!(
+            "STAGING_PREFIX = \"{}\"\n",
+            crate::modules::fs::copy::STAGING_PREFIX
+        );
+        assert!(REMOTE_PYTHON.contains(&line), "helper must pin {line:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn embedded_helper_listings_never_show_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        for rel in [".terax-copy-x/report", ".hidden/report"] {
+            let path = dir.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "needle\n").unwrap();
+        }
+        let root = dir.path().to_string_lossy().into_owned();
+        let data = |req: serde_json::Value| {
+            run_helper("", &req).map(|env| {
+                assert_eq!(env["ok"], true, "{env}");
+                env["data"].clone()
+            })
+        };
+        let rels = |hits: &serde_json::Value| -> Vec<String> {
+            hits.as_array()
+                .unwrap()
+                .iter()
+                .map(|h| h["rel"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        let Some(entries) =
+            data(serde_json::json!({ "op": "read_dir", "path": root, "showHidden": true }))
+        else {
+            return;
+        };
+        let names: Vec<&str> = entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, [".hidden"]);
+        let subdirs =
+            data(serde_json::json!({ "op": "list_subdirs", "path": root, "showHidden": true }));
+        assert_eq!(subdirs.unwrap(), serde_json::json!([".hidden"]));
+        let search = data(serde_json::json!({
+            "op": "search", "path": root, "query": "report", "showHidden": true,
+        }))
+        .unwrap();
+        assert_eq!(rels(&search["hits"]), [".hidden/report"]);
+        let grep = data(serde_json::json!({
+            "op": "grep", "path": root, "pattern": "needle", "showHidden": true,
+        }))
+        .unwrap();
+        assert_eq!(rels(&grep["hits"]), [".hidden/report"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn embedded_helper_publish_never_replaces() {
+        const NO_HARDLINKS: &str = "import os, errno\n\
+            def _no_link(*a, **k):\n    raise OSError(errno.EPERM, 'no hardlinks')\n\
+            os.link = _no_link\n";
+        let dir = tempfile::tempdir().unwrap();
+        let p = |rel: &str| dir.path().join(rel).to_string_lossy().into_owned();
+        let stage = |rel: &str, body: &[u8]| {
+            let path = dir.path().join(".terax-copy-s").join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, body).unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        let publish = |prelude: &str, from: &str, to: &str| {
+            run_helper(
+                prelude,
+                &serde_json::json!({ "op": "publish", "from": from, "to": to }),
+            )
+        };
+        let refused =
+            |to: &str| serde_json::json!({ "ok": false, "error": format!("already exists: {to}") });
+        let ok = serde_json::json!({ "ok": true, "data": true });
+
+        let staged = stage("f1", b"new");
+        let Some(env) = publish("", &staged, &p("free.txt")) else {
+            return;
+        };
+        assert_eq!(env, ok);
+        assert_eq!(std::fs::read(p("free.txt")).unwrap(), b"new");
+        assert!(!std::path::Path::new(&staged).exists());
+
+        std::fs::write(p("taken.txt"), b"old").unwrap();
+        let staged = stage("f2", b"new");
+        assert_eq!(
+            publish("", &staged, &p("taken.txt")).unwrap(),
+            refused(&p("taken.txt"))
+        );
+        assert_eq!(std::fs::read(p("taken.txt")).unwrap(), b"old");
+        assert!(std::path::Path::new(&staged).exists());
+
+        // A failing swap (folder into itself) must take its reservation back.
+        let item = dir.path().join(".terax-copy-s/item");
+        std::fs::create_dir(&item).unwrap();
+        let inside = item.join("sub");
+        let env = publish("", &item.to_string_lossy(), &inside.to_string_lossy()).unwrap();
+        assert_eq!(env["ok"], false, "{env}");
+        assert!(!inside.exists(), "reservation must be removed");
+        assert_eq!(publish("", &item.to_string_lossy(), &p("folder")).unwrap(), ok);
+        assert!(dir.path().join("folder").is_dir());
+        assert!(!item.exists());
+
+        // Without hardlinks the fallback still refuses an existing name.
+        let staged = stage("f3", b"fallback");
+        assert_eq!(publish(NO_HARDLINKS, &staged, &p("fb.txt")).unwrap(), ok);
+        assert_eq!(std::fs::read(p("fb.txt")).unwrap(), b"fallback");
+        let staged = stage("f4", b"new");
+        assert_eq!(
+            publish(NO_HARDLINKS, &staged, &p("taken.txt")).unwrap(),
+            refused(&p("taken.txt"))
+        );
+        assert_eq!(std::fs::read(p("taken.txt")).unwrap(), b"old");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn embedded_helper_publish_treats_case_variants_as_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("A.txt"), b"old").unwrap();
+        let insensitive = dir.path().join("a.txt").exists();
+        let staged = dir.path().join(".terax-copy-s");
+        std::fs::write(&staged, b"new").unwrap();
+        let to = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
+        let publish = |name: &str| {
+            run_helper(
+                "",
+                &serde_json::json!({
+                    "op": "publish", "from": staged.to_string_lossy(), "to": to(name),
+                }),
+            )
+        };
+        let Some(env) = publish("a.txt") else {
+            return;
+        };
+        if insensitive {
+            assert_eq!(env["error"], format!("already exists: {}", to("a.txt")));
+            assert_eq!(publish("a copy.txt").unwrap()["ok"], true);
+        } else {
+            assert_eq!(env["ok"], true);
+        }
+        assert_eq!(std::fs::read(dir.path().join("A.txt")).unwrap(), b"old");
+    }
+
+    #[test]
+    fn upload_plan_checks_depth_and_kinds_before_any_remote_call() {
+        let src = tempfile::tempdir().unwrap();
+        let nested = |name: &str, levels: usize| {
+            let mut path = src.path().join(name);
+            for _ in 0..levels {
+                path.push("d");
+            }
+            std::fs::create_dir_all(&path).unwrap();
+            src.path().join(name)
+        };
+        let ok = nested("ok", 128);
+        let deep = nested("deep", 129);
+        let mut plan = Vec::new();
+        plan_upload(&ok, String::new(), 0, &mut plan).unwrap();
+        assert_eq!(plan.len(), 129);
+        assert_eq!(plan[0], Upload::Dir(String::new()));
+        let err = plan_upload(&deep, String::new(), 0, &mut Vec::new()).unwrap_err();
+        assert_eq!(err.to_string(), "folder nesting exceeds the copy limit");
+
+        #[cfg(unix)]
+        {
+            let pkg = src.path().join("pkg");
+            std::fs::create_dir_all(pkg.join("sub")).unwrap();
+            std::fs::write(pkg.join("sub/a.txt"), b"a").unwrap();
+            std::os::unix::fs::symlink("sub/a.txt", pkg.join("file-link")).unwrap();
+            let mut plan = Vec::new();
+            plan_upload(&pkg, String::new(), 0, &mut plan).unwrap();
+            assert!(plan.iter().any(|step| matches!(
+                step,
+                Upload::File { rel, .. } if rel == "/file-link"
+            )));
+            std::os::unix::fs::symlink("sub", pkg.join("dir-link")).unwrap();
+            let err = plan_upload(&pkg, String::new(), 0, &mut Vec::new()).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "folder symlinks cannot be copied to an SSH host"
+            );
+        }
     }
 
     // End-to-end check of the real ssh + python helper path. No-op unless
@@ -1524,15 +1955,14 @@ Host !secret prod
         std::fs::create_dir_all(local.join("d")).unwrap();
         std::fs::write(local.join("bin.dat"), [0u8, 1, 2, 255, 254]).unwrap();
         std::fs::write(local.join("d/inner.txt"), b"inner").unwrap();
-        copy(
-            &host,
-            &[
-                local.join("bin.dat").to_string_lossy().into_owned(),
-                local.join("d").to_string_lossy().into_owned(),
-            ],
-            &base,
-        )
-        .expect("copy/upload");
+        let local_path = |rel: &str| local.join(rel).to_string_lossy().into_owned();
+        let uploaded = copy(&host, &[local_path("bin.dat"), local_path("d")], &base, true)
+            .expect("copy/upload");
+        assert!(uploaded.failed.is_empty(), "{:?}", uploaded.failed);
+        assert_eq!(
+            uploaded.created,
+            [format!("{base}/bin.dat"), format!("{base}/d")]
+        );
 
         let entries = read_dir(&host, &base, true).expect("read_dir base");
         assert!(entries.iter().any(|e| e.name == "bin.dat"));
@@ -1544,16 +1974,35 @@ Host !secret prod
             other => panic!("expected text, got {other:?}"),
         }
 
-        // Upload must refuse to overwrite an existing top-level target.
-        assert!(
-            copy(
+        // A clash never overwrites: refused without renaming, Finder name with it.
+        let refused = copy(&host, &[local_path("bin.dat")], &base, false).expect("copy");
+        assert!(refused.failed[0].message.contains("already exists"));
+        create_file(&host, &format!("{base}/a.txt")).expect("create a.txt");
+        std::fs::write(local.join("a.txt"), b"a").unwrap();
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(local.join("linked/sub")).unwrap();
+            std::os::unix::fs::symlink("sub", local.join("linked/inner")).unwrap();
+            let mixed = copy(
                 &host,
-                &[local.join("bin.dat").to_string_lossy().into_owned()],
+                &[local_path("a.txt"), local_path("linked")],
                 &base,
+                true,
             )
-            .is_err(),
-            "upload must not clobber"
+            .expect("copy");
+            assert_eq!(mixed.created, [format!("{base}/a copy.txt")]);
+            assert_eq!(mixed.failed.len(), 1, "{:?}", mixed.failed);
+            assert_eq!(mixed.failed[0].source, local_path("linked"));
+        }
+        let listing = run_remote_capture(&host, &format!("ls -A {base}"), None).expect("ls");
+        assert!(
+            !listing
+                .stdout
+                .contains(crate::modules::fs::copy::STAGING_PREFIX),
+            "staging left behind: {}",
+            listing.stdout
         );
+        assert!(!listing.stdout.contains("linked"), "{}", listing.stdout);
 
         // delete is recursive — the whole tree is gone afterwards.
         delete(&host, &base).expect("delete tree");

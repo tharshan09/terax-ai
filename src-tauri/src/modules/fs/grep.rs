@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use tauri::Manager;
 
+use super::copy::not_staging;
 use super::to_canon;
 use crate::modules::fs::guard;
 use crate::modules::workspace::{resolve_path, WorkspaceEnv, WorkspaceRegistry};
@@ -85,6 +86,7 @@ fn search_tree(
         .ignore(true)
         .parents(true)
         .follow_links(false)
+        .filter_entry(not_staging)
         .build_parallel();
 
     let hits: Arc<Mutex<Vec<GrepHit>>> = Arc::new(Mutex::new(Vec::new()));
@@ -359,6 +361,7 @@ pub fn fs_glob_impl(
         .ignore(true)
         .parents(true)
         .follow_links(false)
+        .filter_entry(not_staging)
         .build();
 
     let mut hits: Vec<GlobHit> = Vec::new();
@@ -439,6 +442,29 @@ mod tests {
         let reg = WorkspaceRegistry::default();
         reg.authorize(dir).expect("authorize tempdir root");
         reg
+    }
+
+    #[test]
+    fn whitelist_rules_cannot_reveal_staging() {
+        let repo = crate::modules::fs::copy::whitelist_repo_with_staging_rest();
+        let root = repo.path().to_string_lossy().into_owned();
+        let reg = reg_for(repo.path());
+
+        let grep = fs_grep_interactive_impl(
+            &ContentSearchState::default(),
+            "needle".into(),
+            root.clone(),
+            None,
+            None,
+            &reg,
+        )
+        .unwrap();
+        let hits: Vec<&str> = grep.hits.iter().map(|h| h.rel.as_str()).collect();
+        assert_eq!(hits, ["src/other.txt"]);
+
+        let glob = fs_glob_impl("**/*.txt".into(), root, None, None, &reg).unwrap();
+        let hits: Vec<&str> = glob.hits.iter().map(|h| h.rel.as_str()).collect();
+        assert_eq!(hits, ["src/other.txt"]);
     }
 
     #[test]
