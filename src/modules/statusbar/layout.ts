@@ -46,6 +46,15 @@ const DEFAULT_HIDDEN: ReadonlySet<StatusbarWidgetId> = new Set([
   "git-staged",
 ]);
 
+// Widgets that render the repository status, so a shown one keeps it refreshed.
+export const GIT_STATUS_WIDGET_IDS: ReadonlySet<StatusbarWidgetId> = new Set([
+  "git-branch",
+  "git-sync",
+  "git-changes",
+  "git-staged",
+  "line-changes",
+]);
+
 export const DEFAULT_STATUSBAR_LAYOUT: StatusbarLayout = STATUSBAR_WIDGETS.map(
   (id) => ({ id, visible: !DEFAULT_HIDDEN.has(id) }),
 );

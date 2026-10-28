@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   coerceStatusbarLayout,
   DEFAULT_STATUSBAR_LAYOUT,
+  GIT_STATUS_WIDGET_IDS,
+  isStatusbarWidgetId,
   moveWidget,
   moveWidgetByDelta,
   setWidgetVisible,
@@ -104,5 +106,28 @@ describe("setWidgetVisible", () => {
     const next = setWidgetVisible(DEFAULT_STATUSBAR_LAYOUT, "cwd", false);
     expect(next.find((w) => w.id === "cwd")?.visible).toBe(false);
     expect(setWidgetVisible(next, "cwd", false)).toBe(next);
+  });
+});
+
+describe("GIT_STATUS_WIDGET_IDS", () => {
+  it("lists exactly the catalog widgets that render the repository status", () => {
+    expect([...GIT_STATUS_WIDGET_IDS]).toEqual([
+      "git-branch",
+      "git-sync",
+      "git-changes",
+      "git-staged",
+      "line-changes",
+    ]);
+    for (const id of GIT_STATUS_WIDGET_IDS) {
+      expect(isStatusbarWidgetId(id)).toBe(true);
+    }
+  });
+
+  it("keeps a git widget visible in the default layout", () => {
+    expect(
+      DEFAULT_STATUSBAR_LAYOUT.some(
+        (w) => w.visible && GIT_STATUS_WIDGET_IDS.has(w.id),
+      ),
+    ).toBe(true);
   });
 });

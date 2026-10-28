@@ -1,12 +1,36 @@
 {
   "feature": "upstream-sync-090",
   "slice": "slice-02-media-pause",
-  "timestamp": "2026-10-28T00:00:00Z",
-  "status": "passed",
-  "implementation": {"pr": 85, "base": "968b34c", "head": "48136b2"},
-  "review": {"rounds": 3, "fixed": ["fullscreen/PiP paused by window-hidden", "PiP paused and hidden on tab switch", "stale window state on leaving fullscreen", "TERAX comment rule"], "stop": "3-round cap agreed with user"},
-  "deterministic_gate": {"lint": 0, "check_types": 0, "build": 0, "em_dash_added": 0},
-  "tests": {"vitest": {"files": 88, "passed": 790}, "cargo_test": "skipped, no src-tauri change"},
+  "timestamp": "2026-10-28T19:27:42Z",
+  "status": "passed_with_accepted_findings",
+  "implementation": {
+    "pr": 85,
+    "base": "968b34c",
+    "head": "48136b2"
+  },
+  "review": {
+    "rounds": 3,
+    "fixed": [
+      "fullscreen/PiP paused by window-hidden",
+      "PiP paused and hidden on tab switch",
+      "stale window state on leaving fullscreen",
+      "TERAX comment rule"
+    ],
+    "stop": "3-round cap agreed with user"
+  },
+  "deterministic_gate": {
+    "lint": 0,
+    "check_types": 0,
+    "build": 0,
+    "em_dash_added": 0
+  },
+  "tests": {
+    "vitest": {
+      "files": 88,
+      "passed": 790
+    },
+    "cargo_test": "skipped, no src-tauri change"
+  },
   "open_notes": [
     "QA: background-tab video in PiP may show its placeholder over the active tab",
     "QA: entering native fullscreen may pause once if visibilitychange precedes the WebKit presentation flag",
