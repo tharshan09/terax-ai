@@ -1,4 +1,4 @@
-use crate::modules::fs::copy::is_staging_name;
+use crate::modules::fs::copy::has_staging_segment;
 use crate::modules::git::types::GitChangedFile;
 
 #[derive(Default)]
@@ -62,7 +62,7 @@ pub fn parse_porcelain_v2(stdout: &str) -> PorcelainV2 {
         // Only untracked entries hide a staging rest: indexed paths stay visible
         // so a panel commit never includes a path the panel did not show.
         if let Some(rest) = tok.strip_prefix("? ") {
-            if !rest.split('/').any(is_staging_name) {
+            if !has_staging_segment(std::path::Path::new(rest)) {
                 out.files.push(make_file('?', '?', rest, None));
             }
             continue;

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::modules::fs::copy::is_staging_name;
+use crate::modules::fs::copy::has_staging_segment;
 use crate::modules::fs::to_canon;
 use crate::modules::workspace::{resolve_path, WorkspaceEnv, WorkspaceRegistry};
 
@@ -91,11 +91,6 @@ fn is_skipped(path: &Path) -> bool {
 }
 
 type WatchedAncestor<'a> = dyn Fn(&Path) -> Option<PathBuf> + 'a;
-
-fn has_staging_segment(path: &Path) -> bool {
-    path.components()
-        .any(|c| c.as_os_str().to_str().is_some_and(is_staging_name))
-}
 
 // A copy in progress is invisible; only its publish under the real name is news.
 // Staging names count only below a known watched folder, which may sit under one.

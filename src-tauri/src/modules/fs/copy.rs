@@ -38,7 +38,17 @@ pub(crate) fn staging_dir_in(dest: &Path) -> io::Result<tempfile::TempDir> {
 /// Walker `filter_entry`: `.hidden(true)` yields to whitelist rules in
 /// .gitignore, so staging dirs need this filter to stay unentered.
 pub(crate) fn not_staging(dent: &ignore::DirEntry) -> bool {
-    !dent.file_name().to_str().is_some_and(is_staging_name)
+    !has_staging_segment(Path::new(dent.file_name()))
+}
+
+pub(crate) fn has_staging_segment(path: &Path) -> bool {
+    path.components()
+        .any(|c| c.as_os_str().to_str().is_some_and(is_staging_name))
+}
+
+// A copy's leftover staging inside a source folder is never carried along.
+pub(crate) fn is_staging_entry(entry: &std::fs::DirEntry) -> bool {
+    entry.file_name().to_str().is_some_and(is_staging_name)
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -503,9 +513,8 @@ fn place(
     }
 }
 
-// exFAT and SMB lack a no-replace rename: an exclusive create claims the name,
-// so the rename is aimed at our own empty placeholder; another writer can still
-// race in between, and cleanup then leaves whatever took its place.
+// exFAT and SMB lack a no-replace rename, so an exclusive placeholder claims the
+// name; another writer can still swap it out before the rename lands on it.
 fn place_reserved(
     staged: &Path,
     target: &Path,
@@ -889,7 +898,7 @@ fn copy_dir(
     keep_dir_mode(src, dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
-        if !is_copyable(entry.file_type()?) {
+        if !is_copyable(entry.file_type()?) || is_staging_entry(&entry) {
             continue;
         }
         guard_entry(registry, &entry, linked)?;
@@ -1626,6 +1635,22 @@ mod tests {
         assert!(result.created.is_empty());
         assert_eq!(result.failed[0].source, s(&big));
         assert!(names(dest.path()).is_empty());
+    }
+
+    #[test]
+    fn a_leftover_staging_dir_in_a_source_folder_is_left_out() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let rest = src.path().join("d/.terax-copy-x9Kq2_Lm/item");
+        std::fs::create_dir_all(&rest).unwrap();
+        std::fs::write(rest.join("half"), b"h").unwrap();
+        std::fs::write(src.path().join("d/a"), b"a").unwrap();
+        let result = copy(&[src.path().join("d")], dest.path(), true);
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        assert_eq!(names(&dest.path().join("d")), ["a"]);
+        let staged = Path::new("ws/.terax-copy-x9Kq2_Lm/item");
+        assert!(has_staging_segment(staged));
+        assert!(!has_staging_segment(Path::new("ws/.terax-copy-notes/item")));
     }
 
     #[cfg(unix)]

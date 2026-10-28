@@ -1452,7 +1452,7 @@ fn plan_upload(
         });
         for entry in std::fs::read_dir(src)? {
             let entry = entry?;
-            if !copy::is_copyable(entry.file_type()?) {
+            if !copy::is_copyable(entry.file_type()?) || copy::is_staging_entry(&entry) {
                 continue;
             }
             let name = entry.file_name();
@@ -1585,10 +1585,8 @@ fn make_staging(run: &mut RemoteRun, dest: &str) -> Result<String, RemoteError> 
     }
 }
 
-/// A lost connection rejects the batch only on the first item, before its
-/// publish; later the result stays Ok with `aborted` set, so the explorer
-/// re-reads the destination only if something landed and keeps its listing if
-/// that re-read fails.
+/// A lost connection rejects the batch only on the first item; later the result
+/// stays Ok with `aborted` set, so the explorer can still show what landed.
 pub fn copy(
     host: &str,
     sources: &[String],
@@ -1734,13 +1732,17 @@ fn copy_one(
         Ok(()) => publish_staged(run, &staging, dest, name, source.is_dir, rename_on_conflict),
         Err(error) => Err(error.into()),
     };
-    // A placed item has left the staging (a clean publish removed it too), so this
-    // never takes the item; without a connection it cannot run, the rest stays hidden.
+    // Only a helper that finished or died lets go of the staging; after a lost
+    // connection or a timeout the rest stays hidden. A placed item has left it.
     if matches!(
         outcome,
-        Err(ItemError::Remote(
-            RemoteError::Failed(_) | RemoteError::Killed(_) | RemoteError::TimedOut(_)
-        ) | ItemError::PublishCutOff { .. })
+        Err(
+            ItemError::Remote(RemoteError::Failed(_) | RemoteError::Killed(_))
+                | ItemError::PublishCutOff {
+                    reason: PUBLISH_KILLED,
+                    ..
+                }
+        )
     ) {
         if let Err(error) = run(
             &serde_json::json!({ "op": "delete", "path": staging }),
@@ -3455,7 +3457,6 @@ Host !secret prod
     fn a_step_past_its_budget_fails_only_its_item() {
         let src = tempfile::tempdir().unwrap();
         let sources = local_sources(src.path(), &["a.txt", "b.txt"]);
-        let staging = serde_json::json!("/remote/.terax-copy-stub_9Xk");
         for op in ["mkstage", "write_bytes", "publish"] {
             let timed_out = timed_out_msg("stub", op, 30);
             let mut seen = 0;
@@ -3477,12 +3478,8 @@ Host !secret prod
             };
             assert_eq!(failures(&result), [(sources[0].clone(), message)], "{op}");
             assert_eq!(result.failed[0].maybe_placed, placed, "{op}");
-            let deleted = deletes(&requests);
-            if op == "mkstage" {
-                assert!(deleted.is_empty(), "no staging was made");
-            } else {
-                assert_eq!(deleted, [&staging], "{op}");
-            }
+            // The helper may still be at work, so its staging is left alone.
+            assert!(deletes(&requests).is_empty(), "{op}");
         }
     }
 
@@ -3750,6 +3747,25 @@ Host !secret prod
             result.unwrap().failed[0].message,
             "only files, folders and symbolic links can be copied"
         );
+    }
+
+    #[test]
+    fn a_leftover_staging_dir_in_an_uploaded_folder_is_left_out() {
+        let src = tempfile::tempdir().unwrap();
+        let pkg = src.path().join("pkg");
+        std::fs::create_dir_all(pkg.join(".terax-copy-x9Kq2_Lm/item")).unwrap();
+        std::fs::write(pkg.join(".terax-copy-x9Kq2_Lm/item/half"), b"h").unwrap();
+        std::fs::write(pkg.join("a.txt"), b"a").unwrap();
+        let reg = crate::modules::workspace::WorkspaceRegistry::default();
+        let mut plan = Vec::new();
+        plan_upload(&pkg, String::new(), 0, false, &mut plan, &reg).unwrap();
+        let rels: Vec<&str> = plan
+            .iter()
+            .map(|step| match step {
+                Upload::Dir { rel, .. } | Upload::File { rel, .. } => rel.as_str(),
+            })
+            .collect();
+        assert_eq!(rels, ["", "/a.txt"]);
     }
 
     #[cfg(unix)]

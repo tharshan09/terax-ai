@@ -20,19 +20,21 @@ export type DirEntry = {
   gitignored: boolean;
 };
 
+// `gen` is the read a state came from, so a commit tells which waiters it frees.
 type ChildrenState =
   | { status: "idle" }
   | { status: "loading" }
-  | { status: "loaded"; entries: DirEntry[] }
-  | { status: "error"; message: string };
+  | { status: "loaded"; entries: DirEntry[]; gen: number }
+  | { status: "error"; message: string; gen: number };
 
 type TreeState = Record<string, ChildrenState>;
 
 // A refresh() or expand() waiting for a read at least as new as `gen` to show.
 type Waiter = { gen: number; done: () => void };
 
-// The read each folder state came from, so a commit tells which waiters it frees.
-const readOf = new WeakMap<ChildrenState, number>();
+function genOf(state: ChildrenState): number {
+  return "gen" in state ? state.gen : 0;
+}
 
 function release(
   waiters: Map<string, Waiter[]>,
@@ -122,8 +124,6 @@ export function useFileTree(rootPath: string | null, options?: Options) {
   const landedRef = useRef(new Map<string, number>());
   // The newest landed state per folder, which may not have rendered yet.
   const latestRef = useRef(new Map<string, ChildrenState>());
-  // Reads whose failure keeps a loaded listing (see RefreshOptions).
-  const keepOnErrorRef = useRef(new Set<number>());
   // Reads started before the last root change never land.
   const floorRef = useRef(0);
   const waitersRef = useRef(new Map<string, Waiter[]>());
@@ -144,7 +144,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
     nodesRef.current = nodes;
     for (const [path] of waitersRef.current) {
       const shown = nodes[path];
-      if (shown) release(waitersRef.current, path, readOf.get(shown) ?? 0);
+      if (shown) release(waitersRef.current, path, genOf(shown));
     }
   }, [nodes]);
 
@@ -159,98 +159,104 @@ export function useFileTree(rootPath: string | null, options?: Options) {
     watchRemove([path]);
   }, []);
 
-  const readChildren = useCallback(async (path: string, gen: number) => {
-    const landed = landedRef.current;
-    const lands = () => {
-      if (gen <= Math.max(floorRef.current, landed.get(path) ?? 0))
-        return false;
-      landed.set(path, gen);
-      return true;
-    };
-    if (nodesRef.current[path]?.status !== "loaded") {
-      setNodes((s) => ({ ...s, [path]: { status: "loading" } }));
-    }
-    try {
-      const entries = await invoke<DirEntry[]>("fs_read_dir", {
-        path,
-        showHidden: showHiddenRef.current,
-        gitDecorations: gitDecorationsRef.current,
-        workspace: currentWorkspaceEnv(),
-      });
-      keepOnErrorRef.current.delete(gen);
-      if (!lands()) return;
-
-      // Only a listing that is on screen and not about to be replaced by a
-      // queued older one may stand in for this read.
-      const prev = nodesRef.current[path];
-      if (
-        prev?.status === "loaded" &&
-        latestRef.current.get(path) === prev &&
-        sameDirListing(prev.entries, entries)
-      ) {
-        release(waitersRef.current, path, gen);
-        return;
+  const readChildren = useCallback(
+    async (path: string, gen: number, keepOnError = false) => {
+      const landed = landedRef.current;
+      const lands = () => {
+        if (gen <= Math.max(floorRef.current, landed.get(path) ?? 0))
+          return false;
+        landed.set(path, gen);
+        return true;
+      };
+      if (nodesRef.current[path]?.status !== "loaded") {
+        setNodes((s) => ({ ...s, [path]: { status: "loading" } }));
       }
-
-      const liveDirs = new Set(
-        entries.filter((e) => e.kind === "dir").map((e) => joinPath(path, e.name)),
-      );
-      const removedRoots: string[] = [];
-      for (const key of Object.keys(nodesRef.current)) {
-        if (dirname(key) === path && !liveDirs.has(key)) removedRoots.push(key);
-      }
-      const dead = new Set<string>();
-      if (removedRoots.length > 0) {
-        const candidates = new Set<string>([
-          ...Object.keys(nodesRef.current),
-          ...expandedRef.current,
-          ...watchedRef.current,
-        ]);
-        for (const k of candidates) {
-          if (removedRoots.some((r) => isUnder(k, r))) dead.add(k);
-        }
-      }
-
-      const node: ChildrenState = { status: "loaded", entries };
-      readOf.set(node, gen);
-      latestRef.current.set(path, node);
-      setNodes((s) => {
-        const next: TreeState = {};
-        for (const [k, v] of Object.entries(s)) if (!dead.has(k)) next[k] = v;
-        next[path] = node;
-        return next;
-      });
-
-      if (dead.size > 0) {
-        setExpanded((c) => {
-          let changed = false;
-          const n = new Set(c);
-          for (const d of dead) if (n.delete(d)) changed = true;
-          return changed ? n : c;
+      try {
+        const entries = await invoke<DirEntry[]>("fs_read_dir", {
+          path,
+          showHidden: showHiddenRef.current,
+          gitDecorations: gitDecorationsRef.current,
+          workspace: currentWorkspaceEnv(),
         });
-        const toUnwatch: string[] = [];
-        for (const d of dead) {
-          // A removed folder's late answer must not bring it back.
-          landed.set(d, readCountRef.current);
-          latestRef.current.delete(d);
-          release(waitersRef.current, d, Number.POSITIVE_INFINITY);
-          if (watchedRef.current.delete(d)) toUnwatch.push(d);
+        if (!lands()) return;
+
+        // Only a listing that is on screen and not about to be replaced by a
+        // queued older one may stand in for this read.
+        const prev = nodesRef.current[path];
+        if (
+          prev?.status === "loaded" &&
+          latestRef.current.get(path) === prev &&
+          sameDirListing(prev.entries, entries)
+        ) {
+          release(waitersRef.current, path, gen);
+          return;
         }
-        watchRemove(toUnwatch);
+
+        const liveDirs = new Set(
+          entries
+            .filter((e) => e.kind === "dir")
+            .map((e) => joinPath(path, e.name)),
+        );
+        const removedRoots: string[] = [];
+        for (const key of Object.keys(nodesRef.current)) {
+          if (dirname(key) === path && !liveDirs.has(key))
+            removedRoots.push(key);
+        }
+        const dead = new Set<string>();
+        if (removedRoots.length > 0) {
+          const candidates = new Set<string>([
+            ...Object.keys(nodesRef.current),
+            ...expandedRef.current,
+            ...watchedRef.current,
+          ]);
+          for (const k of candidates) {
+            if (removedRoots.some((r) => isUnder(k, r))) dead.add(k);
+          }
+        }
+
+        const node: ChildrenState = { status: "loaded", entries, gen };
+        latestRef.current.set(path, node);
+        setNodes((s) => {
+          const next: TreeState = {};
+          for (const [k, v] of Object.entries(s)) if (!dead.has(k)) next[k] = v;
+          next[path] = node;
+          return next;
+        });
+
+        if (dead.size > 0) {
+          setExpanded((c) => {
+            let changed = false;
+            const n = new Set(c);
+            for (const d of dead) if (n.delete(d)) changed = true;
+            return changed ? n : c;
+          });
+          const toUnwatch: string[] = [];
+          for (const d of dead) {
+            // A removed folder's late answer must not bring it back.
+            landed.set(d, readCountRef.current);
+            latestRef.current.delete(d);
+            release(waitersRef.current, d, Number.POSITIVE_INFINITY);
+            if (watchedRef.current.delete(d)) toUnwatch.push(d);
+          }
+          watchRemove(toUnwatch);
+        }
+      } catch (e) {
+        if (!lands()) return;
+        if (keepOnError && latestRef.current.get(path)?.status === "loaded") {
+          release(waitersRef.current, path, gen);
+          return;
+        }
+        const node: ChildrenState = {
+          status: "error",
+          message: String(e),
+          gen,
+        };
+        latestRef.current.set(path, node);
+        setNodes((s) => ({ ...s, [path]: node }));
       }
-    } catch (e) {
-      const keep = keepOnErrorRef.current.delete(gen);
-      if (!lands()) return;
-      if (keep && latestRef.current.get(path)?.status === "loaded") {
-        release(waitersRef.current, path, gen);
-        return;
-      }
-      const node: ChildrenState = { status: "error", message: String(e) };
-      readOf.set(node, gen);
-      latestRef.current.set(path, node);
-      setNodes((s) => ({ ...s, [path]: node }));
-    }
-  }, []);
+    },
+    [],
+  );
 
   const fetchChildren = useCallback(
     (path: string): Promise<void> => readChildren(path, ++readCountRef.current),
@@ -261,13 +267,12 @@ export function useFileTree(rootPath: string | null, options?: Options) {
   const refresh = useCallback(
     (path: string, options?: RefreshOptions): Promise<void> => {
       const gen = ++readCountRef.current;
-      if (options?.keepOnError) keepOnErrorRef.current.add(gen);
       const shown = new Promise<void>((done) => {
         const list = waitersRef.current.get(path) ?? [];
         list.push({ gen, done });
         waitersRef.current.set(path, list);
       });
-      void readChildren(path, gen);
+      void readChildren(path, gen, options?.keepOnError);
       return shown;
     },
     [readChildren],
