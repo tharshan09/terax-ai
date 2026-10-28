@@ -1,0 +1,39 @@
+{
+  "feature": "upstream-sync-090",
+  "slice": "slice-03-animations",
+  "timestamp": "2026-10-28T19:42:29Z",
+  "status": "passed_with_accepted_findings",
+  "implementation": {
+    "pr": 86,
+    "base": "0cf0276",
+    "head": "c9f7a01"
+  },
+  "review": {
+    "rounds": 2,
+    "fixed": [
+      "settings window installs visibility owner"
+    ],
+    "stop": "round 2 without real bug in ported behaviour"
+  },
+  "deterministic_gate": {
+    "lint": 0,
+    "check_types": 0,
+    "build": 0,
+    "em_dash_added": 0
+  },
+  "tests": {
+    "vitest": {
+      "files": 89,
+      "passed": 795
+    },
+    "cargo_test": "skipped, no src-tauri change"
+  },
+  "open_notes": [
+    "QA: AC-7 CPU median before/after, visible and covered window (needs a dev instance)",
+    "QA: steps(12) spinner with 8-spoke Loading03Icon may look like it turns backwards (upstream identical)",
+    "QA: AC 4 to 6 in the real app",
+    "shimmer steps(40) at 1 s durations (upstream identical)",
+    "pause rule freezes exit animations while hidden (upstream identical)"
+  ],
+  "merge_commit": "7eadd70"
+}

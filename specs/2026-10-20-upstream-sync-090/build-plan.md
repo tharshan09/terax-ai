@@ -852,7 +852,12 @@ Bau-Reihenfolge (PM): slice-00 → slice-01 → slice-02 → slice-03 → slice-
 
 **Wie gebaut**
 
-_(leer bis zum Merge)_
+- Merge: PR #86, Squash-Commit `7eadd70` auf `main`.
+- Review: `/code-review high` 2 Runden. Gefixt: Settings-Fenster installiert den Sichtbarkeits-Owner und pausiert mit.
+- Abweichungen vom Plan:
+  - `src/settings/main.tsx` angefasst (ein Aufruf `installWindowVisibility()`), weil das Settings-Fenster beim Theme-Bearbeiten versteckt wird.
+  - Upstream `terax-blink`, `terax-attention-pulse`, `terax-chat-item`, `terax-pill-in` nicht übernommen (gibt es im Fork nicht).
+- AC-7 (CPU-Messung) offen, braucht eine Dev-Instanz; weitere QA-Punkte in `evidence/slice-03-animations.json` und PR #86.
 
 ### slice-04-visible-consumers: Watcher und git status nur für sichtbare Konsumenten
 
