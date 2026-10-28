@@ -342,3 +342,37 @@
 {"v":2,"ts":"2026-10-28T20:41:57Z","slice":"slice-05-lazy-start","kind":"gate","gate":"tests","result":"PASSED","exit_code":0,"head":"8708b46"}
 {"v":2,"ts":"2026-10-28T20:41:57Z","slice":"slice-05-lazy-start","kind":"gate","gate":"build","result":"PASSED","exit_code":0,"head":"8708b46"}
 {"v":2,"ts":"2026-10-28T20:47:19Z","slice":"slice-05-lazy-start","kind":"gate","gate":"code_review","round":1,"result":"PASSED","findings":10,"detail":"no real bug in ported behaviour: icon load failure without retry for mounted icons and no idle preload are upstream-identical (f6f0004); data-fallback flag existed before; rest are guard coverage (katex, CLI missing, full-graph byte limit, edge regex, ai- prefix), CI double build and helper duplication","limits":["mounted icons stay placeholders after a failed chunk load until a new icon mounts (upstream)","icons fade in on every launch, no idle preload (upstream)","dist guard does not list katex, does not cap total startup bytes","dist-budget test builds once inside pnpm test"]}
+{"v":2,"ts":"2026-10-28T21:09:29Z","slice":"slice-06-deps-version","kind":"gate","gate":"lint","result":"PASSED","exit_code":0,"head":"e7367e0"}
+{"v":2,"ts":"2026-10-28T21:09:29Z","slice":"slice-06-deps-version","kind":"gate","gate":"typecheck","result":"PASSED","exit_code":0,"head":"e7367e0"}
+{"v":2,"ts":"2026-10-28T21:09:29Z","slice":"slice-06-deps-version","kind":"gate","gate":"build","result":"PASSED","exit_code":0,"head":"e7367e0"}
+{"v":2,"ts":"2026-10-28T21:09:29Z","slice":"slice-06-deps-version","kind":"gate","gate":"size","result":"PASSED","exit_code":0,"head":"e7367e0"}
+{"v":2,"ts":"2026-10-28T21:09:29Z","slice":"slice-06-deps-version","kind":"gate","gate":"clippy","result":"PASSED","exit_code":0,"head":"e7367e0"}
+{"v":2,"ts":"2026-10-28T21:09:29Z","slice":"slice-06-deps-version","kind":"gate","gate":"cargo_test","result":"PASSED","exit_code":0,"head":"e7367e0"}
+{"v":2,"ts":"2026-10-28T21:09:29Z","slice":"slice-06-deps-version","kind":"gate","gate":"tests","result":"FAILED","exit_code":1,"head":"e7367e0","red":5,"red_files":["src/modules/explorer/FileExplorer.test.tsx"]}
+{"v":2,"ts":"2026-10-28T21:23:28Z","slice":"slice-06-deps-version","kind":"fix","gate":"tests","commits":["5bdae33","5287af8"],"detail":"virtual-core 3.19 measures clientHeight (test stub); InlineInput refocus loop against Radix focus trap, latent on base d82b714"}
+{"v":2,"ts":"2026-10-28T21:23:28Z","slice":"slice-06-deps-version","kind":"gate","gate":"lint","result":"PASSED","exit_code":0,"head":"5287af8"}
+{"v":2,"ts":"2026-10-28T21:23:28Z","slice":"slice-06-deps-version","kind":"gate","gate":"typecheck","result":"PASSED","exit_code":0,"head":"5287af8"}
+{"v":2,"ts":"2026-10-28T21:23:28Z","slice":"slice-06-deps-version","kind":"gate","gate":"tests","result":"PASSED","exit_code":0,"head":"5287af8"}
+{"v":2,"ts":"2026-10-28T21:23:28Z","slice":"slice-06-deps-version","kind":"gate","gate":"build","result":"PASSED","exit_code":0,"head":"5287af8"}
+{"v":2,"ts":"2026-10-28T21:28:03Z","slice":"slice-06-deps-version","kind":"gate","gate":"code_review","round":1,"result":"FAILED","findings":8,"fix":["InlineInput settled without focus","initial selection lost after trap","duplicate guarded focus","deterministic regression test","plugin crates pinned to JS minors","import.meta.dirname in vite config"],"limits":["dirs 6 and 7 both in the lock via auto-launch (upstream dirs 7)"],"skipped_cleanup":["codeHighlight test location (upstream placement)"]}
+{"v":2,"ts":"2026-10-28T21:42:14Z","slice":"slice-06-deps-version","kind":"gate","gate":"lint","result":"PASSED","exit_code":0,"head":"bc823e8"}
+{"v":2,"ts":"2026-10-28T21:42:14Z","slice":"slice-06-deps-version","kind":"gate","gate":"typecheck","result":"PASSED","exit_code":0,"head":"bc823e8"}
+{"v":2,"ts":"2026-10-28T21:42:14Z","slice":"slice-06-deps-version","kind":"gate","gate":"tests","result":"PASSED","exit_code":0,"head":"bc823e8"}
+{"v":2,"ts":"2026-10-28T21:42:14Z","slice":"slice-06-deps-version","kind":"gate","gate":"build","result":"PASSED","exit_code":0,"head":"bc823e8"}
+{"v":2,"ts":"2026-10-28T21:42:14Z","slice":"slice-06-deps-version","kind":"gate","gate":"clippy","result":"PASSED","exit_code":0,"head":"bc823e8"}
+{"v":2,"ts":"2026-10-28T21:42:14Z","slice":"slice-06-deps-version","kind":"gate","gate":"cargo_test","result":"PASSED","exit_code":0,"head":"bc823e8"}
+{"v":2,"ts":"2026-10-28T21:47:16Z","slice":"slice-06-deps-version","kind":"decision","gate":"code_review","round":2,"choice":"revert_to_minimal_inline_input_guard","findings":7,"detail":"c0b23a4 rewrite created three new defects (unsettled on body focus, unbounded rAF wait, no reset on initial change); back to 5287af8 behaviour, menu-within-170ms case documented; tauri core and api pinned like plugins","limits":["dirs 6 and 7 in lock (repeat, upstream)","lezer override pins 1.2.5 (upstream bf7e03d)","input stays unfocused until clicked if the menu opens within 170 ms of New file"]}
+{"v":2,"ts":"2026-10-28T21:56:01Z","slice":"slice-06-deps-version","kind":"gate","gate":"lint","result":"PASSED","exit_code":0,"head":"099f5ff"}
+{"v":2,"ts":"2026-10-28T21:56:01Z","slice":"slice-06-deps-version","kind":"gate","gate":"typecheck","result":"PASSED","exit_code":0,"head":"099f5ff"}
+{"v":2,"ts":"2026-10-28T21:56:01Z","slice":"slice-06-deps-version","kind":"gate","gate":"tests","result":"PASSED","exit_code":0,"head":"099f5ff"}
+{"v":2,"ts":"2026-10-28T21:56:01Z","slice":"slice-06-deps-version","kind":"gate","gate":"build","result":"PASSED","exit_code":0,"head":"099f5ff"}
+{"v":2,"ts":"2026-10-28T21:56:01Z","slice":"slice-06-deps-version","kind":"gate","gate":"clippy","result":"PASSED","exit_code":0,"head":"099f5ff"}
+{"v":2,"ts":"2026-10-28T21:56:01Z","slice":"slice-06-deps-version","kind":"gate","gate":"cargo_test","result":"PASSED","exit_code":0,"head":"099f5ff"}
+{"v":2,"ts":"2026-10-28T21:59:52Z","slice":"slice-06-deps-version","kind":"decision","gate":"code_review","round":3,"choice":"fix_orphaned_input_at_menu_close_then_merge","findings":8,"fix":["refocus pending inline input on context-menu close","regression test closes menu and checks focus","tauri-build pinned ~2.7"],"limits":["rename selection re-applied by the 170 ms tick can overwrite very fast typing (pre-existing)","dirs 6 and 7 (repeat)","lezer exact override (upstream)","codeHighlight test location (upstream)"],"detail":"3-round cap; fix without fourth review, gates decide"}
+{"v":2,"ts":"2026-10-28T22:06:06Z","slice":"slice-06-deps-version","kind":"gate","gate":"lint","result":"PASSED","exit_code":0,"head":"ea2a78a"}
+{"v":2,"ts":"2026-10-28T22:06:06Z","slice":"slice-06-deps-version","kind":"gate","gate":"typecheck","result":"PASSED","exit_code":0,"head":"ea2a78a"}
+{"v":2,"ts":"2026-10-28T22:06:06Z","slice":"slice-06-deps-version","kind":"gate","gate":"tests","result":"PASSED","exit_code":0,"head":"ea2a78a"}
+{"v":2,"ts":"2026-10-28T22:06:06Z","slice":"slice-06-deps-version","kind":"gate","gate":"build","result":"PASSED","exit_code":0,"head":"ea2a78a"}
+{"v":2,"ts":"2026-10-28T22:06:06Z","slice":"slice-06-deps-version","kind":"gate","gate":"size","result":"PASSED","exit_code":0,"head":"ea2a78a"}
+{"v":2,"ts":"2026-10-28T22:06:06Z","slice":"slice-06-deps-version","kind":"gate","gate":"clippy","result":"PASSED","exit_code":0,"head":"ea2a78a"}
+{"v":2,"ts":"2026-10-28T22:06:06Z","slice":"slice-06-deps-version","kind":"gate","gate":"cargo_test","result":"PASSED","exit_code":0,"head":"ea2a78a"}

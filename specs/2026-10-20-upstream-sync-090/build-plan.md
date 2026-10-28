@@ -1139,4 +1139,12 @@ Bau-Reihenfolge (PM): slice-00 → slice-01 → slice-02 → slice-03 → slice-
 
 **Wie gebaut**
 
-_(leer bis zum Merge)_
+- Merge: PR #89, Squash-Commit `5825ef2` auf `main`. Version 0.8.7.
+- Review: `/code-review high` 3 Runden (Obergrenze); Fix nach Runde 3 ohne vierte Runde, Gates grün.
+- Abweichungen vom Plan:
+  - `@tauri-apps/plugin-autostart` `~2.7.0` statt `~2.6.0` (Crate löst auf 2.7.0, CLI verlangt gleiche Minor).
+  - `tauri`, `tauri-build`, alle Plugin-Crates und ihre JS-Pakete auf dieselbe Minor gepinnt.
+  - Sieben Crates jünger als drei Tage um einen Patch zurückgehalten (wie die npm-Release-Bremse).
+  - Von der Suite gefunden und gefixt: Test-Stub für `virtual-core` 3.19 (`clientHeight`); latente Fokus-Schleife in `InlineInput` gegen den Radix-Fokus-Trap, minimaler Guard plus Refokus beim Schließen des Menüs. Eine größere Umschreibung aus Runde 1 wurde in Runde 2 zurückgenommen.
+  - `vite.config.ts` mit `import.meta.dirname`.
+- QA-Punkte und Grenzen: siehe `evidence/slice-06-deps-version.json` und PR #89.

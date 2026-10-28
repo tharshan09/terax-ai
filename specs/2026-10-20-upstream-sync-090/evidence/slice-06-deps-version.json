@@ -1,0 +1,17 @@
+{
+  "feature": "upstream-sync-090",
+  "slice": "slice-06-deps-version",
+  "timestamp": "2026-10-28T22:06:31Z",
+  "status": "passed_with_accepted_findings",
+  "implementation": {"pr": 89, "base": "d82b714", "head": "ea2a78a"},
+  "review": {"rounds": 3, "fixed": ["virtual-core 3.19 test stub", "InlineInput focus loop against menu trap (latent)", "plugin, core and build crates pinned to JS minors", "import.meta.dirname", "orphaned inline input after menu close"], "stop": "3-round cap; round-3 fix without fourth review, gates green"},
+  "deterministic_gate": {"install_frozen": 0, "lint": 0, "check_types": 0, "build": 0, "size": 0, "clippy": 0, "em_dash_added": 0},
+  "tests": {"vitest": {"files": 96, "passed": 1074}, "cargo_test": {"passed": 547, "failed": 0}},
+  "open_notes": [
+    "QA: About shows 0.8.7, autostart toggle (auto-launch 0.6), highlighting in three editor themes",
+    "dirs 6 and 7 in lock (auto-launch)",
+    "lezer exact override (upstream)",
+    "pre-existing: rename stem selection re-applied by the 170 ms tick"
+  ],
+  "merge_commit": "5825ef2"
+}
