@@ -6,6 +6,7 @@ import {
   pasteExclusively,
   pasteKeyAction,
   reportCopyFailures,
+  rereadAfterCopy,
 } from "@/modules/explorer/lib/clipboardPaste";
 import { joinPath } from "@/modules/explorer/lib/paths";
 import type { WorkspaceEnv } from "@/modules/workspace";
@@ -218,6 +219,34 @@ describe("reportCopyFailures", () => {
   });
 });
 
+describe("rereadAfterCopy", () => {
+  const isExpanded = (dir: string) => dir === "/ws/open";
+  const lost = "ssh: connection closed";
+  const reread = (result: CopyResult, dir: string) =>
+    rereadAfterCopy(result, dir, "/ws", isExpanded);
+
+  it("re-reads the root or an open folder after a copy, failures or not", () => {
+    const done = { created: ["/ws/a"], failed: [] };
+    const partly = {
+      created: [],
+      failed: [{ source: "/x/b", message: "Permission denied" }],
+    };
+    expect(reread(done, "/ws")).toEqual({});
+    expect(reread(done, "/ws/open")).toEqual({});
+    expect(reread(partly, "/ws/open")).toEqual({});
+    expect(reread(done, "/ws/shut")).toBeNull();
+  });
+
+  it("after a lost connection re-reads only if something landed, keeping the listing", () => {
+    const landed = { created: ["/ws/a"], failed: [], aborted: lost };
+    const nothing = { created: [], failed: [], aborted: lost };
+    expect(reread(landed, "/ws")).toEqual({ keepOnError: true });
+    expect(reread(landed, "/ws/open")).toEqual({ keepOnError: true });
+    expect(reread(landed, "/ws/shut")).toBeNull();
+    expect(reread(nothing, "/ws/open")).toBeNull();
+  });
+});
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => {
@@ -297,7 +326,7 @@ describe("pasteClipboardFiles", () => {
     const open = options();
     open.isExpanded.mockReturnValue(true);
     await pasteClipboardFiles("/ws/docs", open);
-    expect(open.refresh).toHaveBeenCalledWith("/ws/docs");
+    expect(open.refresh).toHaveBeenCalledWith("/ws/docs", {});
     expect(open.expand).not.toHaveBeenCalled();
 
     invoke.mockResolvedValueOnce(clip(["/tmp/a.txt"])).mockResolvedValueOnce({
@@ -322,7 +351,7 @@ describe("pasteClipboardFiles", () => {
       const opts = options(workspace);
       opts.isExpanded.mockReturnValue(true);
       await pasteClipboardFiles("/ws/docs", opts);
-      expect(opts.refresh).toHaveBeenCalledWith("/ws/docs");
+      expect(opts.refresh).toHaveBeenCalledWith("/ws/docs", {});
       expect(opts.select).toHaveBeenCalledTimes(1);
       expect(opts.select).toHaveBeenCalledWith("/ws/docs/a.txt");
     }
@@ -336,7 +365,9 @@ describe("pasteClipboardFiles", () => {
     const opts = options();
     opts.refresh.mockReturnValueOnce(reread.promise);
     const paste = pasteClipboardFiles("/ws", opts);
-    await vi.waitFor(() => expect(opts.refresh).toHaveBeenCalledWith("/ws"));
+    await vi.waitFor(() =>
+      expect(opts.refresh).toHaveBeenCalledWith("/ws", {}),
+    );
     expect(opts.select).not.toHaveBeenCalled();
     reread.resolve();
     expect(await paste).toEqual(["/ws/a.txt"]);
@@ -356,7 +387,7 @@ describe("pasteClipboardFiles", () => {
     const rows = new Set([joinPath("/", "a.txt")]);
     opts.hasRow.mockImplementation((path) => rows.has(path));
     expect(await pasteClipboardFiles("/", opts)).toEqual(["/a.txt"]);
-    expect(opts.refresh).toHaveBeenCalledWith("/");
+    expect(opts.refresh).toHaveBeenCalledWith("/", {});
     expect(opts.hasRow).toHaveBeenCalledWith("/a.txt");
     expect(opts.select).toHaveBeenCalledWith("/a.txt");
   });
@@ -438,7 +469,7 @@ describe("pasteClipboardFiles", () => {
     expect(toast.error).toHaveBeenCalledWith("Could not copy 2 items", {
       description: "/x/gone.txt: No such file or directory",
     });
-    expect(opts.refresh).toHaveBeenCalledWith("/ws");
+    expect(opts.refresh).toHaveBeenCalledWith("/ws", {});
   });
 
   it("uses the singular for one failed item and selects nothing when all fail", async () => {

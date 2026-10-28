@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 use crate::modules::fs::copy::has_staging_segment;
 use crate::modules::fs::to_canon;
@@ -90,30 +90,9 @@ fn is_skipped(path: &Path) -> bool {
         .is_some_and(|n| SKIP_DIRS.contains(&n))
 }
 
-type WatchedAncestor<'a> = dyn Fn(&Path) -> Option<PathBuf> + 'a;
-
-// A copy in progress is invisible; only its publish under the real name is news.
-// Staging names count only below a known watched folder, which may sit under one.
-fn in_staging(path: &Path, watched_ancestor: &WatchedAncestor) -> bool {
-    has_staging_segment(path)
-        && watched_ancestor(path)
-            .is_some_and(|dir| path.strip_prefix(dir).is_ok_and(has_staging_segment))
-}
-
 #[derive(Default)]
 pub struct FsWatchState {
     inner: Mutex<Option<WatchInner>>,
-}
-
-impl FsWatchState {
-    // One lock for the whole walk up, not one per ancestor.
-    fn watched_ancestor(&self, path: &Path) -> Option<PathBuf> {
-        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let inner = guard.as_ref()?;
-        path.ancestors()
-            .find(|dir| inner.refcounts.contains_key(*dir))
-            .map(Path::to_path_buf)
-    }
 }
 
 struct WatchInner {
@@ -157,8 +136,6 @@ fn ensure_started(state: &FsWatchState, app: &AppHandle) -> Result<(), String> {
 }
 
 fn drain_loop(rx: mpsc::Receiver<notify::Result<Event>>, app: AppHandle) {
-    let state = app.state::<FsWatchState>();
-    let watched = |path: &Path| state.watched_ancestor(path);
     loop {
         let first = match rx.recv() {
             Ok(ev) => ev,
@@ -166,13 +143,13 @@ fn drain_loop(rx: mpsc::Receiver<notify::Result<Event>>, app: AppHandle) {
         };
 
         let mut paths: HashSet<String> = HashSet::new();
-        collect(&mut paths, first, &watched);
+        collect(&mut paths, first);
 
         let deadline = Instant::now() + MAX_WINDOW;
         loop {
             let timeout = DEBOUNCE.min(deadline.saturating_duration_since(Instant::now()));
             match rx.recv_timeout(timeout) {
-                Ok(ev) => collect(&mut paths, ev, &watched),
+                Ok(ev) => collect(&mut paths, ev),
                 Err(RecvTimeoutError::Timeout) => break,
                 Err(RecvTimeoutError::Disconnected) => return,
             }
@@ -193,12 +170,13 @@ fn drain_loop(rx: mpsc::Receiver<notify::Result<Event>>, app: AppHandle) {
     }
 }
 
-fn collect(set: &mut HashSet<String>, ev: notify::Result<Event>, watched: &WatchedAncestor) {
+// A copy in progress is invisible; only its publish under the real name is news.
+fn collect(set: &mut HashSet<String>, ev: notify::Result<Event>) {
     let Ok(ev) = ev else { return };
     if matches!(ev.kind, EventKind::Access(_)) {
         return;
     }
-    for p in ev.paths.iter().filter(|p| !in_staging(p, watched)) {
+    for p in ev.paths.iter().filter(|p| !has_staging_segment(p)) {
         set.insert(to_canon(p));
     }
 }
@@ -316,14 +294,9 @@ mod tests {
         assert!(!is_skipped(Path::new("/a/node_modules/pkg")));
     }
 
-    fn watching(dir: &'static str) -> impl Fn(&Path) -> Option<PathBuf> {
-        move |path| path.ancestors().find(|a| *a == Path::new(dir)).map(Path::to_path_buf)
-    }
-
     #[test]
     fn collect_ignores_access_and_dedups() {
         let mut set = HashSet::new();
-        let watched = watching("/a");
         collect(
             &mut set,
             Ok(Event {
@@ -331,7 +304,6 @@ mod tests {
                 paths: vec![PathBuf::from("/a/x")],
                 attrs: Default::default(),
             }),
-            &watched,
         );
         assert!(set.is_empty());
 
@@ -342,8 +314,8 @@ mod tests {
                 attrs: Default::default(),
             })
         };
-        collect(&mut set, modify(), &watched);
-        collect(&mut set, modify(), &watched);
+        collect(&mut set, modify());
+        collect(&mut set, modify());
         assert_eq!(set.len(), 1);
     }
 
@@ -358,13 +330,11 @@ mod tests {
     #[test]
     fn staging_comings_and_goings_raise_no_change_but_the_publish_does() {
         use notify::event::{CreateKind, ModifyKind, RemoveKind, RenameMode};
-        let watched = watching("/ws");
         let mut set = HashSet::new();
         let staging = "/ws/.terax-copy-ab12Cd34";
         collect(
             &mut set,
             event(EventKind::Create(CreateKind::Folder), &[staging]),
-            &watched,
         );
         collect(
             &mut set,
@@ -372,12 +342,10 @@ mod tests {
                 EventKind::Create(CreateKind::File),
                 &["/ws/.terax-copy-ab12Cd34/item"],
             ),
-            &watched,
         );
         collect(
             &mut set,
             event(EventKind::Remove(RemoveKind::Folder), &[staging]),
-            &watched,
         );
         assert!(set.is_empty());
 
@@ -387,78 +355,25 @@ mod tests {
                 EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
                 &["/ws/.terax-copy-ab12Cd34/item", "/ws/a copy.txt"],
             ),
-            &watched,
         );
         assert_eq!(set, HashSet::from([to_canon("/ws/a copy.txt")]));
     }
 
+    // By segment alone, so a workspace reached through a link (/tmp is
+    // /private/tmp on macOS) filters the same as any other.
     #[test]
-    fn a_watched_folder_below_a_staging_name_still_reports_its_changes() {
+    fn any_path_with_a_staging_segment_raises_no_change() {
         use notify::event::CreateKind;
-        let root = "/x/.terax-copy-old7_Mn2/proj";
-        let watched = watching(root);
-        let mut set = HashSet::new();
-        for path in [
-            "/x/.terax-copy-old7_Mn2/proj/a.txt",
-            "/x/.terax-copy-old7_Mn2/proj/.terax-copy-ab12Cd34",
-            "/x/.terax-copy-old7_Mn2/proj/.terax-copy-ab12Cd34/item",
-        ] {
-            collect(
-                &mut set,
-                event(EventKind::Create(CreateKind::Any), &[path]),
-                &watched,
-            );
-        }
-        collect(
-            &mut set,
-            event(EventKind::Create(CreateKind::Folder), &[root]),
-            &watched,
-        );
-        assert_eq!(
-            set,
-            HashSet::from([
-                to_canon("/x/.terax-copy-old7_Mn2/proj/a.txt"),
-                to_canon(root)
-            ])
-        );
-    }
-
-    #[test]
-    fn a_staging_path_outside_every_watched_folder_is_still_reported() {
-        use notify::event::CreateKind;
-        let unwatched = |_: &Path| -> Option<PathBuf> { None };
-        let mut set = HashSet::new();
-        let path = "/gone/.terax-copy-ab12Cd34/item";
-        collect(
-            &mut set,
-            event(EventKind::Create(CreateKind::Any), &[path]),
-            &unwatched,
-        );
-        assert_eq!(set, HashSet::from([to_canon(path)]));
-    }
-
-    #[test]
-    fn only_a_path_with_a_staging_segment_looks_up_its_watched_folder() {
-        use notify::event::CreateKind;
-        let lookups = std::cell::Cell::new(0);
-        let inner = watching("/ws");
-        let watched = |path: &Path| {
-            lookups.set(lookups.get() + 1);
-            inner(path)
-        };
         let mut set = HashSet::new();
         for path in [
             "/ws/a.txt",
             "/ws/src/.terax-copyx",
             "/ws/.terax-copy-ab12Cd34/item",
+            "/tmp/ws/.terax-copy-ab12Cd34",
+            "/gone/.terax-copy-ab12Cd34/item/sub",
         ] {
-            collect(
-                &mut set,
-                event(EventKind::Create(CreateKind::Any), &[path]),
-                &watched,
-            );
+            collect(&mut set, event(EventKind::Create(CreateKind::Any), &[path]));
         }
-        assert_eq!(lookups.get(), 1);
         assert_eq!(
             set,
             HashSet::from([to_canon("/ws/a.txt"), to_canon("/ws/src/.terax-copyx")])

@@ -1647,6 +1647,11 @@ fn copy_with(
         maybe_placed: true,
         ..failure(source, message)
     };
+    let abort = |result: &mut CopyResult, rest: &[String], message: String| {
+        let failures = rest.iter().map(|source| failure(source, &message));
+        result.failed.extend(failures);
+        result.aborted = Some(message);
+    };
     for (index, source) in sources.iter().enumerate() {
         let item = copy_one(
             run,
@@ -1655,41 +1660,42 @@ fn copy_with(
             rename_on_conflict,
             registry,
         );
+        let rest = &sources[index + 1..];
         match item {
             Ok(name) => result.created.push(created_path(dest_dir, &name)),
-            Err(ItemError::Remote(
-                RemoteError::Failed(message)
-                | RemoteError::Killed(message)
-                | RemoteError::TimedOut(message),
-            )) => {
+            Err(ItemError::Remote(RemoteError::Failed(message) | RemoteError::Killed(message))) => {
                 log::warn!("ssh copy({source} -> {host}:{dest}) failed: {message}");
                 result.failed.push(failure(source, &message));
+            }
+            // The budget allows 64 KiB/s on the wire, so a timeout most likely
+            // means a hung host: the item fails and the rest is not tried.
+            Err(ItemError::Remote(RemoteError::TimedOut(message))) => {
+                log::warn!("ssh copy({source} -> {host}:{dest}) timed out: {message}");
+                result.failed.push(failure(source, &message));
+                abort(&mut result, rest, message);
+                break;
             }
             Err(ItemError::Remote(RemoteError::Transport(message))) => {
                 log::warn!("ssh copy({source} -> {host}:{dest}) aborted: {message}");
                 if index == 0 {
                     return Err(message);
                 }
-                let rest = sources[index..].iter();
-                result
-                    .failed
-                    .extend(rest.map(|source| failure(source, &message)));
-                result.aborted = Some(message);
+                abort(&mut result, &sources[index..], message);
                 break;
             }
             Err(ItemError::PublishLost(message)) => {
                 log::warn!("ssh copy({source} -> {host}:{dest}) lost while publishing: {message}");
                 result.failed.push(maybe_placed(source, PUBLISH_LOST));
-                let rest = sources[index + 1..].iter();
-                result
-                    .failed
-                    .extend(rest.map(|source| failure(source, &message)));
-                result.aborted = Some(message);
+                abort(&mut result, rest, message);
                 break;
             }
             Err(ItemError::PublishCutOff { reason, cause }) => {
                 log::warn!("ssh copy({source} -> {host}:{dest}) {reason}: {cause}");
                 result.failed.push(maybe_placed(source, reason));
+                if reason == PUBLISH_TIMED_OUT {
+                    abort(&mut result, rest, cause);
+                    break;
+                }
             }
         }
     }
@@ -3454,32 +3460,41 @@ Host !secret prod
     }
 
     #[test]
-    fn a_step_past_its_budget_fails_only_its_item() {
+    fn a_step_past_its_budget_fails_its_item_and_stops_the_batch() {
         let src = tempfile::tempdir().unwrap();
-        let sources = local_sources(src.path(), &["a.txt", "b.txt"]);
+        let sources = local_sources(src.path(), &["a.txt", "b.txt", "c.txt"]);
         for op in ["mkstage", "write_bytes", "publish"] {
             let timed_out = timed_out_msg("stub", op, 30);
             let mut seen = 0;
             let (result, requests) = stub_copy(&sources, |request| {
                 if request["op"] == op {
                     seen += 1;
-                    if seen == 1 {
+                    if seen == 2 {
                         return Err(RemoteError::TimedOut(timed_out.clone()));
                     }
                 }
                 healthy(request)
             });
             let result = result.expect("a slow step must not reject the batch");
-            assert_eq!(result.created, ["/remote/b.txt"], "{op}");
-            assert_eq!(result.aborted, None, "{op}");
-            let (message, placed) = match op {
-                "publish" => (PUBLISH_TIMED_OUT.to_string(), true),
-                _ => (timed_out.clone(), false),
+            assert_eq!(result.created, ["/remote/a.txt"], "{op}");
+            assert_eq!(result.aborted.as_deref(), Some(timed_out.as_str()), "{op}");
+            let first = match op {
+                "publish" => PUBLISH_TIMED_OUT.to_string(),
+                _ => timed_out.clone(),
             };
-            assert_eq!(failures(&result), [(sources[0].clone(), message)], "{op}");
-            assert_eq!(result.failed[0].maybe_placed, placed, "{op}");
+            assert_eq!(
+                failures(&result),
+                [
+                    (sources[1].clone(), first),
+                    (sources[2].clone(), timed_out.clone()),
+                ],
+                "{op}"
+            );
+            let placed: Vec<bool> = result.failed.iter().map(|f| f.maybe_placed).collect();
+            assert_eq!(placed, [op == "publish", false], "{op}");
             // The helper may still be at work, so its staging is left alone.
             assert!(deletes(&requests).is_empty(), "{op}");
+            assert_eq!(requests.iter().filter(|r| creates_staging(r)).count(), 2);
         }
     }
 

@@ -8,35 +8,33 @@ pub struct ClipboardFiles {
 
 /// Only file URLs are read, never text or images, and only on an explicit paste.
 #[tauri::command]
-pub async fn fs_clipboard_paths(app: tauri::AppHandle) -> Result<ClipboardFiles, String> {
+pub async fn fs_clipboard_paths() -> Result<ClipboardFiles, String> {
     #[cfg(target_os = "macos")]
     {
-        // AppKit expects pasteboard access on the main thread; awaiting its
-        // answer parks only this task, no thread.
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        app.run_on_main_thread(move || {
-            let pasteboard = objc2_app_kit::NSPasteboard::generalPasteboard();
-            let _ = tx.send(read_files(&pasteboard));
-        })
-        .map_err(|e| e.to_string())?;
-        receive_paths(rx, MAIN_THREAD_BUDGET).await
+        // NSPasteboard may be read off the main thread, so a slow (lazy)
+        // provider blocks only this worker, never the window.
+        let read = tauri::async_runtime::spawn_blocking(|| {
+            objc2::rc::autoreleasepool(|_| {
+                read_files(&objc2_app_kit::NSPasteboard::generalPasteboard())
+            })
+        });
+        receive_paths(read, READ_BUDGET).await
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = app;
         Err("clipboard file paste is only supported on macOS".into())
     }
 }
 
 #[cfg(target_os = "macos")]
-const MAIN_THREAD_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+const READ_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[cfg(target_os = "macos")]
-async fn receive_paths(
-    rx: tokio::sync::oneshot::Receiver<ClipboardFiles>,
+async fn receive_paths<E>(
+    read: impl std::future::Future<Output = Result<ClipboardFiles, E>>,
     budget: std::time::Duration,
 ) -> Result<ClipboardFiles, String> {
-    match tokio::time::timeout(budget, rx).await {
+    match tokio::time::timeout(budget, read).await {
         Ok(Ok(files)) => Ok(files),
         _ => Err("clipboard read timed out or was cancelled".to_string()),
     }
@@ -227,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn a_silent_or_gone_main_thread_fails_with_the_timeout_text() {
+    fn a_silent_or_gone_reader_fails_with_the_timeout_text() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()

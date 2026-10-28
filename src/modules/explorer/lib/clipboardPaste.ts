@@ -87,6 +87,19 @@ function inView(
   return true;
 }
 
+// An open folder is re-read after a copy; after a lost connection only if
+// something landed, and then a failing re-read keeps the last good listing.
+export function rereadAfterCopy(
+  result: CopyResult,
+  dir: string,
+  root: string,
+  isExpanded: (dir: string) => boolean,
+): RefreshOptions | null {
+  if (dir !== root && !isExpanded(dir)) return null;
+  if (!result.aborted) return {};
+  return result.created.length > 0 ? { keepOnError: true } : null;
+}
+
 function missingItems(unresolved: number): string {
   return unresolved === 1
     ? "1 copied item no longer exists"
@@ -135,8 +148,6 @@ export async function pasteClipboardFiles(
 ): Promise<string[]> {
   const isCurrent = () => isCurrentScope(scope);
   if (!isCurrent()) return cancelled();
-  // A collapsed folder is read when it opens, so it gets no extra re-read.
-  const isOpen = () => destDir === scope.rootPath || isExpanded(destDir);
   let unresolved = 0;
   try {
     const clipboard = await invoke<ClipboardFiles>("fs_clipboard_paths");
@@ -162,15 +173,13 @@ export async function pasteClipboardFiles(
     }
     reportCopyFailures(result, unresolved);
     if (!isCurrent()) return [];
-    // After a lost connection only an open folder something landed in is
-    // re-read, and a failing re-read keeps its last good listing.
+    // A collapsed folder is read when it opens, so it gets no extra re-read.
+    const reread = rereadAfterCopy(result, destDir, scope.rootPath, isExpanded);
     const shown = inView(destDir, scope.rootPath, isExpanded);
-    if (result.aborted) {
-      if (!isOpen() || result.created.length === 0) return [];
-      await refresh(destDir, { keepOnError: true });
-    } else if (isOpen()) await refresh(destDir);
-    else if (result.created.length > 0 && shown) await expand(destDir);
-    else return result.created;
+    if (reread) await refresh(destDir, reread);
+    else if (!result.aborted && result.created.length > 0 && shown)
+      await expand(destDir);
+    else return result.aborted ? [] : result.created;
     if (!isCurrent()) return [];
     const row = result.created[0];
     if (row && hasRow(row)) select(row);

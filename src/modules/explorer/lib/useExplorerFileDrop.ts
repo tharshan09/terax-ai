@@ -6,6 +6,7 @@ import {
   type CopyResult,
   type ExplorerScope,
   reportCopyFailures,
+  rereadAfterCopy,
 } from "@/modules/explorer/lib/clipboardPaste";
 import { targetDirFor } from "@/modules/explorer/lib/paths";
 import type { RefreshOptions } from "@/modules/explorer/lib/useFileTree";
@@ -83,18 +84,14 @@ export function useExplorerFileDrop(options: Options) {
           })
             .then((result): RefreshOptions | null => {
               reportCopyFailures(result);
-              if (!result.aborted) return {};
-              return result.created.length > 0 ? { keepOnError: true } : null;
+              return rereadAfterCopy(result, dir, scope.rootPath, isExpanded);
             })
             .catch((err) => {
               toast.error(`Copy failed: ${String(err)}`);
               return null;
             })
             .then((reread) => {
-              // As after a paste: a rejected copy or one that placed nothing
-              // keeps the listing, and a collapsed folder is read when it opens.
-              const open = dir === scope.rootPath || isExpanded(dir);
-              if (reread && open && !disposed && isCurrent(scope))
+              if (reread && !disposed && isCurrent(scope))
                 onCopied(dir, reread);
             });
         }
