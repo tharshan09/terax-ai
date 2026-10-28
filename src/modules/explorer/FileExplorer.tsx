@@ -432,7 +432,7 @@ export const FileExplorer = memo(
       tree.pendingCreate?.parentPath === rootPath ? tree.pendingCreate : null;
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-      if (tree.renaming || tree.pendingCreate || isSearchOpen) return;
+      if (tree.renaming || tree.pendingCreate) return;
       const target = e.target as HTMLElement;
       if (
         target.tagName === "INPUT" ||
@@ -441,7 +441,8 @@ export const FileExplorer = memo(
       )
         return;
 
-      const pasteKey = pasteKeyAction(e, IS_MAC);
+      // Like the menu's Paste, Cmd+V works wherever the tree shows.
+      const pasteKey = isSearchActive ? null : pasteKeyAction(e, IS_MAC);
       if (pasteKey) {
         e.preventDefault();
         if (pasteKey === "paste" && scope) {
@@ -453,7 +454,7 @@ export const FileExplorer = memo(
         return;
       }
 
-      if (entryPaths.length === 0) return;
+      if (isSearchOpen || entryPaths.length === 0) return;
 
       const currentIdx = selectedPath ? entryPaths.indexOf(selectedPath) : -1;
       const move = (next: number) => {

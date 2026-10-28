@@ -271,7 +271,7 @@ describe("useFileTree read promises", () => {
 });
 
 describe("useFileTree mutations", () => {
-  it("frees the create row once the file exists, and its re-read beats a stale watcher read", async () => {
+  it("keeps the create row until its re-read renders, and that listing beats a stale watcher read", async () => {
     const pending = reads();
     const create = deferred();
     const answer = invoke.getMockImplementation();
@@ -296,15 +296,16 @@ describe("useFileTree mutations", () => {
       });
       create.resolve();
     });
-    expect(result.current.pendingCreate).toBeNull();
+    expect(result.current.pendingCreate).not.toBeNull();
     expect(settled).toBe(false);
     expect(pending.map((r) => r.path)).toEqual(["/mk", "/mk", "/mk"]);
     const [stale, reread] = pending.slice(1);
 
     await act(async () => reread.resolve([entry("a"), entry("b")]));
+    await vi.waitFor(() => expect(settled).toBe(true));
+    expect(result.current.pendingCreate).toBeNull();
     await act(async () => stale.resolve([entry("a")]));
     expect(listing(result.current, "/mk")).toEqual(["a", "b"]);
-    await vi.waitFor(() => expect(settled).toBe(true));
   });
 });
 

@@ -242,9 +242,10 @@ pub(crate) fn guard_read(registry: &WorkspaceRegistry, path: &Path) -> io::Resul
 }
 
 // The user picked the folder, so its links may lead outside the workspace, as
-// local copies keep them; an innocent name hiding a secret is still refused.
-pub(crate) fn guard_link(path: &Path) -> io::Result<()> {
-    if guard::check_read_str(&path.to_string_lossy()).is_err() {
+// local copies keep them, but never to a secret. Only a link the user named
+// directly may be a secret by its own name, as an editor open may.
+pub(crate) fn guard_link(path: &Path, named: bool) -> io::Result<()> {
+    if named && guard::check_read_str(&path.to_string_lossy()).is_err() {
         return Ok(());
     }
     match std::fs::canonicalize(path) {
@@ -512,7 +513,15 @@ fn place_reserved(
     };
     claimed.map_err(|error| refusal(error, target))?;
     let swapped = match swap(staged, target) {
-        Err(error) if is_dir && refuses_folder_swap(&error) => fill_claim(staged, target, swap),
+        Err(error) if is_dir && refuses_folder_swap(&error) => {
+            // Another writer may have filled the claim since: never mix into or remove it.
+            let empty = std::fs::read_dir(target).map(|mut entries| entries.next().is_none());
+            match empty {
+                Ok(true) => fill_claim(staged, target, swap),
+                Ok(false) => return Err(Refused::Failed(already_exists(target.display()))),
+                Err(error) => Err(error),
+            }
+        }
         other => other,
     };
     swapped.map_err(|error| {
@@ -895,6 +904,7 @@ fn copy_link_content(
     followed: &mut Vec<PathBuf>,
 ) -> io::Result<()> {
     guard_read(registry, src)?;
+    guard_link(src, depth == 0)?;
     let target = std::fs::metadata(src)?;
     if target.is_dir() {
         let from = std::fs::canonicalize(src.parent().unwrap_or(src))?;
@@ -2189,6 +2199,38 @@ mod tests {
         assert_eq!(names(dest.path()), [&*staged_name, "v"]);
         assert_eq!(names(&v), ["a.txt", "sub"], "the earlier copy is untouched");
         assert_eq!(names(&staged).len(), 1, "the moved entry was removed again");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_claim_another_writer_filled_is_left_alone_and_fails_the_item() {
+        let dest = tempfile::tempdir().unwrap();
+        let staged = staged_in(dest.path());
+        std::fs::create_dir(&staged).unwrap();
+        std::fs::write(staged.join("a.txt"), b"ours").unwrap();
+        let unsupported =
+            |_: &Path, _: &Path| Err(io::Error::from_raw_os_error(NO_REPLACE_UNSUPPORTED[0]));
+        let intruder = |_: &Path, to: &Path| {
+            std::fs::write(to.join("theirs.txt"), b"theirs").unwrap();
+            Err(io::Error::from_raw_os_error(libc::EEXIST))
+        };
+        let error = publish(
+            &staged,
+            dest.path(),
+            OsStr::new("v"),
+            true,
+            false,
+            unsupported,
+            intruder,
+        )
+        .unwrap_err();
+        let v = dest.path().join("v");
+        assert_eq!(
+            error.to_string(),
+            format!("already exists: {}", v.display())
+        );
+        assert_eq!(names(&v), ["theirs.txt"]);
+        assert_eq!(std::fs::read(staged.join("a.txt")).unwrap(), b"ours");
     }
 
     #[test]

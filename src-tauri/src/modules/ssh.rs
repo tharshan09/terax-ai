@@ -494,6 +494,10 @@ class _Taken(Exception):
     pass
 
 
+class _Foreign(FileExistsError):
+    pass
+
+
 def _reserve_and_swap(src, dst, is_dir):
     # The exclusive placeholder makes the rename replace only our own empty
     # entry, never something another writer put at `dst` meanwhile.
@@ -510,7 +514,12 @@ def _reserve_and_swap(src, dst, is_dir):
         except OSError as ex:
             if not is_dir or ex.errno not in FOLDER_SWAP_REFUSED:
                 raise
+            # Another writer may have filled the claim since: never mix into or remove it.
+            if os.listdir(dst):
+                raise _Foreign("already exists: " + dst)
             _fill_claim(src, dst)
+    except _Foreign:
+        raise
     except BaseException:
         try:
             (os.rmdir if is_dir else os.unlink)(dst)
@@ -1434,7 +1443,7 @@ fn plan_upload(
     // so every link is judged here, where the upload reads through it.
     let link = meta.file_type().is_symlink();
     let target = if link {
-        copy::guard_link(src)?;
+        copy::guard_link(src, depth == 0)?;
         std::fs::metadata(src).map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => broken_symlink(src, &rel),
             _ => error,
@@ -1568,12 +1577,13 @@ pub fn copy(
 
 const PUBLISH_LOST: &str = "connection lost while publishing; the item may already be in place";
 
-/// A connection lost during an item's publish leaves its fate unknown, so it
-/// neither rejects the batch nor counts as created.
+/// A publish cut off leaves its item's fate unknown, so it neither rejects the
+/// batch nor counts as created. Only a lost connection also stops the batch.
 #[derive(Debug)]
 enum ItemError {
     Remote(RemoteError),
     PublishLost(String),
+    PublishKilled(String),
 }
 
 impl From<RemoteError> for ItemError {
@@ -1632,6 +1642,12 @@ fn copy_with(
                     .extend(rest.map(|source| failure(source, &message)));
                 result.aborted = Some(message);
                 break;
+            }
+            Err(ItemError::PublishKilled(message)) => {
+                log::warn!(
+                    "ssh copy({source} -> {host}:{dest}) killed while publishing: {message}"
+                );
+                result.failed.push(failure(source, PUBLISH_LOST));
             }
         }
     }
@@ -1721,10 +1737,9 @@ fn publish_staged(
             Ok(other) => {
                 return Err(RemoteError::Failed(format!("bad publish response: {other}")).into())
             }
+            Err(RemoteError::Transport(message)) => return Err(ItemError::PublishLost(message)),
             // A helper killed mid-publish may already have placed the item.
-            Err(RemoteError::Transport(message) | RemoteError::Killed(message)) => {
-                return Err(ItemError::PublishLost(message))
-            }
+            Err(RemoteError::Killed(message)) => return Err(ItemError::PublishKilled(message)),
             Err(error) => return Err(error.into()),
         }
     }
@@ -2399,6 +2414,41 @@ Host !secret prod
         kept.sort();
         assert_eq!(kept, ["a.txt", "sub"]);
         assert!(std::path::Path::new(&item).join("sub/b.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn embedded_helper_publish_leaves_a_claim_another_writer_filled_alone() {
+        let intruder = [
+            "import os, errno",
+            "def _intruder(a, b):",
+            "    if os.path.isdir(b):",
+            "        with open(os.path.join(b, 'theirs.txt'), 'w') as f: f.write('theirs')",
+            "    raise OSError(errno.EEXIST, 'File exists')",
+            "os.rename = _intruder",
+            "",
+        ]
+        .join("\n");
+        let dir = tempfile::tempdir().unwrap();
+        let item = dir.path().join(".terax-copy-s5Vd3_Jf/item");
+        std::fs::create_dir_all(&item).unwrap();
+        std::fs::write(item.join("a.txt"), b"ours").unwrap();
+        let request = publish_request(
+            &item.to_string_lossy(),
+            &format!("{}/", dir.path().display()),
+            &["v", "v copy"],
+        );
+        let Some(env) = run_helper(&intruder, &request) else {
+            return;
+        };
+        let v = dir.path().join("v");
+        assert_eq!(env["error"], format!("already exists: {}", v.display()));
+        assert_eq!(std::fs::read(v.join("theirs.txt")).unwrap(), b"theirs");
+        assert!(
+            !dir.path().join("v copy").exists(),
+            "no further name is tried"
+        );
+        assert_eq!(std::fs::read(item.join("a.txt")).unwrap(), b"ours");
     }
 
     #[cfg(unix)]
@@ -3151,27 +3201,27 @@ Host !secret prod
     }
 
     #[test]
-    fn a_helper_killed_while_publishing_leaves_the_item_fate_unknown() {
-        const KILLED: &str = "remote helper exited with status 137";
+    fn a_helper_killed_while_publishing_leaves_only_that_item_fate_unknown() {
         let src = tempfile::tempdir().unwrap();
         let sources = local_sources(src.path(), &["a.txt", "b.txt"]);
+        let mut publishes_seen = 0;
         let (result, requests) = stub_copy(&sources, |request| {
             if request["op"] == "publish" {
-                return Err(exit_error(Some(137), ""));
+                publishes_seen += 1;
+                if publishes_seen == 1 {
+                    return Err(exit_error(Some(137), ""));
+                }
             }
             healthy(request)
         });
         let result = result.expect("a killed publish must not reject the batch");
-        assert!(result.created.is_empty());
+        assert_eq!(result.created, ["/remote/b.txt"]);
         assert_eq!(
             failures(&result),
-            [
-                (sources[0].clone(), PUBLISH_LOST.to_string()),
-                (sources[1].clone(), KILLED.to_string()),
-            ]
+            [(sources[0].clone(), PUBLISH_LOST.to_string())]
         );
-        assert_eq!(result.aborted.as_deref(), Some(KILLED));
-        assert_eq!(publishes(&requests).len(), 1);
+        assert_eq!(result.aborted, None);
+        assert_eq!(publishes(&requests).len(), 2);
         assert!(deletes(&requests).is_empty(), "the item may be in place");
     }
 
@@ -3287,6 +3337,41 @@ Host !secret prod
         let changed = crate::modules::fs::copy::changed_since_plan().to_string();
         assert!(matches!(result, Err(RemoteError::Failed(m)) if m == changed));
         assert!(!requests.iter().any(|r| r["op"] == "write_bytes"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_secret_named_link_in_an_uploaded_folder_is_judged_by_its_target() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(src.path().join("keys")).unwrap();
+        std::fs::write(src.path().join("keys/id_ed25519"), b"PRIVATE").unwrap();
+        std::fs::write(src.path().join("settings.txt"), b"x=1").unwrap();
+        let reg = crate::modules::workspace::WorkspaceRegistry::default();
+        let plan = |root: &std::path::Path| {
+            let mut plan = Vec::new();
+            plan_upload(root, String::new(), 0, false, &mut plan, &reg).map(|()| plan)
+        };
+        let folder = |name: &str, target: &str| {
+            let pkg = src.path().join(name);
+            std::fs::create_dir(&pkg).unwrap();
+            std::os::unix::fs::symlink(src.path().join(target), pkg.join(".env")).unwrap();
+            pkg
+        };
+
+        let err = plan(&folder("leaks", "keys/id_ed25519")).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "refused: \"id_ed25519\" matches a sensitive-file pattern"
+        );
+        let planned = plan(&folder("plain", "settings.txt")).unwrap();
+        assert!(planned
+            .iter()
+            .any(|step| matches!(step, Upload::File { rel, .. } if rel == "/.env")));
+
+        // A link the user named directly keeps the editor's trusted open.
+        let named = src.path().join(".env");
+        std::os::unix::fs::symlink(src.path().join("keys/id_ed25519"), &named).unwrap();
+        assert!(plan(&named).is_ok());
     }
 
     #[cfg(unix)]

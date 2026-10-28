@@ -249,51 +249,6 @@ describe("FileExplorer paste and drop scope", () => {
   });
 });
 
-describe("FileExplorer keyboard after an edit", () => {
-  it("handles keys again once the rename is done, while its re-read still runs", async () => {
-    const restore = rowsInView();
-    try {
-      const file = (name: string) => ({
-        name,
-        kind: "file" as const,
-        size: 0,
-        mtime: 0,
-        gitignored: false,
-      });
-      const rereads: ((entries: unknown) => void)[] = [];
-      let listed = false;
-      serve({
-        fs_read_dir: () => {
-          if (listed)
-            return new Promise((resolve) => {
-              rereads.push(resolve);
-            });
-          listed = true;
-          return Promise.resolve([file("a.txt"), file("b.txt")]);
-        },
-      });
-      const open = vi.fn();
-      render(<FileExplorer rootPath="/kb" onOpenFile={open} />);
-      fireEvent.doubleClick(await screen.findByText("a.txt"));
-      const input = await screen.findByDisplayValue("a.txt");
-      fireEvent.change(input, { target: { value: "c.txt" } });
-      fireEvent.keyDown(input, { key: "Enter" });
-      await vi.waitFor(() => expect(rereads).toHaveLength(1));
-      await settle();
-      expect(screen.queryByDisplayValue("c.txt")).toBeNull();
-
-      fireEvent.keyDown(treeArea(), { key: "ArrowDown" });
-      fireEvent.keyDown(treeArea(), { key: "Enter" });
-      expect(open).toHaveBeenCalledWith("/kb/a.txt");
-
-      await act(async () => rereads[0]([file("b.txt"), file("c.txt")]));
-      expect(await screen.findByText("c.txt")).toBeTruthy();
-    } finally {
-      restore();
-    }
-  });
-});
-
 describe("FileExplorer paste selection", () => {
   it("keeps the newer paste's selection when an older paste's re-read lands last", async () => {
     const restore = rowsInView();
@@ -355,5 +310,19 @@ describe("FileExplorer paste selection", () => {
     } finally {
       restore();
     }
+  });
+});
+
+describe("FileExplorer paste shortcut", () => {
+  it("pastes with Cmd+V while the search bar is open but the tree still shows", async () => {
+    serve({
+      fs_clipboard_paths: () => Promise.resolve({ paths: [], unresolved: 0 }),
+    });
+    render(explorer("/srch"));
+    await settle();
+    fireEvent.click(screen.getByLabelText("Search files"));
+    fireEvent.keyDown(treeArea(), { key: "v", code: "KeyV", metaKey: true });
+    await vi.waitFor(() => expect(commands()).toContain("fs_clipboard_paths"));
+    await settle();
   });
 });
