@@ -7,30 +7,20 @@ type Props = {
   onCancel: () => void;
 };
 
-type FocusState = { focusing: boolean; landed: boolean };
-
 // A blur inside our own focus() call means a focus trap (an open modal menu)
 // took focus straight back; refocusing again would recurse forever.
-function takeFocus(
+function focusUnlessTrapped(
   el: HTMLInputElement,
-  initial: string,
-  state: FocusState,
+  focusing: { current: boolean },
 ): boolean {
-  if (state.focusing) return false;
-  state.focusing = true;
+  if (focusing.current) return false;
+  focusing.current = true;
   try {
     el.focus({ preventScroll: true });
   } finally {
-    state.focusing = false;
+    focusing.current = false;
   }
-  if (el.ownerDocument.activeElement !== el) return false;
-  if (!state.landed) {
-    state.landed = true;
-    const dot = initial.lastIndexOf(".");
-    if (dot > 0) el.setSelectionRange(0, dot);
-    else el.select();
-  }
-  return true;
+  return el.ownerDocument.activeElement === el;
 }
 
 /**
@@ -48,7 +38,7 @@ export function InlineInput({
   const ref = useRef<HTMLInputElement>(null);
   const committedRef = useRef(false);
   const settledRef = useRef(false);
-  const focusRef = useRef<FocusState>({ focusing: false, landed: false });
+  const focusingRef = useRef(false);
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -65,29 +55,22 @@ export function InlineInput({
     // cycle. Repeated open/cancel pairs accumulate and walk the tree off
     // the left edge. We're already rendering the input where it should be
     // visible — there is no scroll-into-view we need from focus().
-    const state = focusRef.current;
-    let watch = 0;
-    // Settle only once focus has landed. While a trap holds it, wait for the
-    // element it moved focus to to leave the DOM (the menu closed), then retry.
-    const settle = () => {
-      if (takeFocus(el, initial, state)) {
-        settledRef.current = true;
-        return;
-      }
-      const holder = el.ownerDocument.activeElement;
-      if (!holder || holder === el.ownerDocument.body) return;
-      const wait = () => {
-        if (holder.isConnected) watch = requestAnimationFrame(wait);
-        else settle();
-      };
-      watch = requestAnimationFrame(wait);
+    const focus = () => {
+      if (!focusUnlessTrapped(el, focusingRef)) return;
+      const dot = initial.lastIndexOf(".");
+      if (dot > 0) el.setSelectionRange(0, dot);
+      else el.select();
     };
-    takeFocus(el, initial, state);
-    const raf = requestAnimationFrame(() => takeFocus(el, initial, state));
-    const timer = setTimeout(settle, 170);
+    focus();
+    const raf = requestAnimationFrame(() => focus());
+    // Known limit: a menu still open at this tick keeps focus, so the input
+    // settles unfocused until clicked.
+    const timer = setTimeout(() => {
+      focus();
+      settledRef.current = true;
+    }, 170);
     return () => {
       cancelAnimationFrame(raf);
-      cancelAnimationFrame(watch);
       clearTimeout(timer);
     };
   }, [initial]);
@@ -120,7 +103,7 @@ export function InlineInput({
       }}
       onBlur={() => {
         if (!settledRef.current) {
-          if (ref.current) takeFocus(ref.current, initial, focusRef.current);
+          if (ref.current) focusUnlessTrapped(ref.current, focusingRef);
           return;
         }
         commit();

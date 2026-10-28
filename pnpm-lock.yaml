@@ -123,7 +123,7 @@ importers:
         specifier: ^3.14.13
         version: 3.14.22(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
       '@tauri-apps/api':
-        specifier: ^2.12.3
+        specifier: ~2.12.3
         version: 2.12.4
       '@tauri-apps/plugin-autostart':
         specifier: ~2.7.0
