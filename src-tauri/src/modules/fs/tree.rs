@@ -317,6 +317,28 @@ mod tests {
         assert!(git_non_ignored_names(repo.path(), true).contains(".hidden"));
     }
 
+    // The root the user opened, or a folder above it, may carry a staging name.
+    #[test]
+    fn a_root_named_like_staging_still_lists_and_hides_staging_below() {
+        let dir = tempfile::tempdir().unwrap();
+        for root in [
+            dir.path().join(".terax-copy-old7_Mn2"),
+            dir.path().join(".terax-copy-old7_Mn2/proj"),
+        ] {
+            std::fs::create_dir_all(root.join(".terax-copy-ab12Cd34")).unwrap();
+            std::fs::write(root.join("a.txt"), b"a").unwrap();
+            let names = git_non_ignored_names(&root, true);
+            assert!(names.contains("a.txt"), "{root:?}: {names:?}");
+            assert!(!names.contains(".terax-copy-ab12Cd34"), "{names:?}");
+            let listed =
+                fs_read_dir_blocking(root.to_string_lossy().into_owned(), true, None, None)
+                    .unwrap();
+            let listed: Vec<&str> = listed.iter().map(|e| e.name.as_str()).collect();
+            assert!(listed.contains(&"a.txt"), "{listed:?}");
+            assert!(!listed.contains(&".terax-copy-ab12Cd34"), "{listed:?}");
+        }
+    }
+
     fn sorted(mut v: Vec<&str>) -> Vec<&str> {
         v.sort_by(|a, b| natural_cmp(a, b));
         v

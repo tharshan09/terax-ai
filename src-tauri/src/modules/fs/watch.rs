@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tauri::{AppHandle, Emitter, State};
 
-use crate::modules::fs::copy::has_staging_segment;
+use crate::modules::fs::copy::is_staging_name;
 use crate::modules::fs::to_canon;
 use crate::modules::workspace::{resolve_path, WorkspaceEnv, WorkspaceRegistry};
 
@@ -170,13 +170,24 @@ fn drain_loop(rx: mpsc::Receiver<notify::Result<Event>>, app: AppHandle) {
     }
 }
 
+// Watches are not recursive, so an event is a watched folder or an entry right in
+// one: a staging dir there, or an entry right inside it, is a copy in progress.
+fn in_staging(path: &Path) -> bool {
+    let staging = |p: Option<&Path>| {
+        p.and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .is_some_and(is_staging_name)
+    };
+    staging(Some(path)) || staging(path.parent())
+}
+
 // A copy in progress is invisible; only its publish under the real name is news.
 fn collect(set: &mut HashSet<String>, ev: notify::Result<Event>) {
     let Ok(ev) = ev else { return };
     if matches!(ev.kind, EventKind::Access(_)) {
         return;
     }
-    for p in ev.paths.iter().filter(|p| !has_staging_segment(p)) {
+    for p in ev.paths.iter().filter(|p| !in_staging(p)) {
         set.insert(to_canon(p));
     }
 }
@@ -359,24 +370,30 @@ mod tests {
         assert_eq!(set, HashSet::from([to_canon("/ws/a copy.txt")]));
     }
 
-    // By segment alone, so a workspace reached through a link (/tmp is
-    // /private/tmp on macOS) filters the same as any other.
+    // Only the entry and its folder count, so a workspace inside a staging-named
+    // folder still reports, and the path needs no lookup of watched folders.
     #[test]
-    fn any_path_with_a_staging_segment_raises_no_change() {
+    fn staging_is_judged_by_the_entry_and_its_folder_only() {
         use notify::event::CreateKind;
         let mut set = HashSet::new();
         for path in [
             "/ws/a.txt",
             "/ws/src/.terax-copyx",
+            "/ws/.terax-copy-ab12Cd34",
             "/ws/.terax-copy-ab12Cd34/item",
-            "/tmp/ws/.terax-copy-ab12Cd34",
-            "/gone/.terax-copy-ab12Cd34/item/sub",
+            "/x/.terax-copy-old7_Mn2/proj/a.txt",
+            "/x/.terax-copy-old7_Mn2/proj/.terax-copy-ab12Cd34",
+            "/x/.terax-copy-old7_Mn2/proj/.terax-copy-ab12Cd34/item",
         ] {
             collect(&mut set, event(EventKind::Create(CreateKind::Any), &[path]));
         }
         assert_eq!(
             set,
-            HashSet::from([to_canon("/ws/a.txt"), to_canon("/ws/src/.terax-copyx")])
+            HashSet::from([
+                to_canon("/ws/a.txt"),
+                to_canon("/ws/src/.terax-copyx"),
+                to_canon("/x/.terax-copy-old7_Mn2/proj/a.txt"),
+            ])
         );
     }
 }

@@ -445,6 +445,33 @@ mod tests {
     }
 
     #[test]
+    fn a_root_named_like_staging_is_still_searched_but_staging_below_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".terax-copy-old7_Mn2");
+        std::fs::create_dir_all(root.join(".terax-copy-ab12Cd34")).unwrap();
+        std::fs::write(root.join("a.txt"), "needle\n").unwrap();
+        std::fs::write(root.join(".terax-copy-ab12Cd34/b.txt"), "needle\n").unwrap();
+        let reg = reg_for(&root);
+        let at = root.to_string_lossy().into_owned();
+
+        let grep = fs_grep_interactive_impl(
+            &ContentSearchState::default(),
+            "needle".into(),
+            at.clone(),
+            None,
+            None,
+            &reg,
+        )
+        .unwrap();
+        let hits: Vec<&str> = grep.hits.iter().map(|h| h.rel.as_str()).collect();
+        assert_eq!(hits, ["a.txt"]);
+
+        let glob = fs_glob_impl("**/*.txt".into(), at, None, None, &reg).unwrap();
+        let hits: Vec<&str> = glob.hits.iter().map(|h| h.rel.as_str()).collect();
+        assert_eq!(hits, ["a.txt"]);
+    }
+
+    #[test]
     fn whitelist_rules_cannot_reveal_staging() {
         let repo = crate::modules::fs::copy::whitelist_repo_with_staging_rest();
         let root = repo.path().to_string_lossy().into_owned();

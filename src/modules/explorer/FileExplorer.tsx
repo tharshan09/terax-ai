@@ -569,6 +569,7 @@ export const FileExplorer = memo(
       menuScope && (
         <ContextMenuItem
           className={COMPACT_ITEM}
+          disabled={renameInProgress}
           onSelect={() =>
             void pasteInto(
               targetDirFor(

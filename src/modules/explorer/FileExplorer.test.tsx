@@ -493,3 +493,23 @@ describe("FileExplorer after a failed copy", () => {
     }
   });
 });
+
+describe("FileExplorer paste while typing a name", () => {
+  it("offers no context-menu Paste while a new name is being typed", async () => {
+    serve({
+      fs_clipboard_paths: () =>
+        Promise.resolve({ paths: ["/x/f.txt"], unresolved: 0 }),
+    });
+    render(explorer("/typing"));
+    await settle();
+    fireEvent.click(screen.getByTitle("New file"));
+    await settle();
+    fireEvent.contextMenu(treeArea());
+    const paste = await screen.findByText("Paste");
+    const item = paste.closest("[role='menuitem']");
+    expect(item?.getAttribute("aria-disabled")).toBe("true");
+    if (item) fireEvent.click(item);
+    await settle();
+    expect(commands()).not.toContain("fs_clipboard_paths");
+  });
+});

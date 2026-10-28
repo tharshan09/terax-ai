@@ -452,6 +452,15 @@ mod tests {
     }
 
     #[test]
+    fn a_root_named_like_staging_is_still_searched_but_staging_below_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".terax-copy-old7_Mn2");
+        write_all(&root, &["report.txt", ".terax-copy-ab12Cd34/report.pdf"]);
+        assert_eq!(search_rels(&root, "report", true), ["report.txt"]);
+        assert_eq!(listed(&root, true), ["report.txt"]);
+    }
+
+    #[test]
     fn whitelist_rules_cannot_reveal_staging() {
         let repo = crate::modules::fs::copy::whitelist_repo_with_staging_rest();
         for show_hidden in [true, false] {

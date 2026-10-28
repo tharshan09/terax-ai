@@ -35,10 +35,10 @@ pub(crate) fn staging_dir_in(dest: &Path) -> io::Result<tempfile::TempDir> {
         .tempdir_in(dest)
 }
 
-/// Walker `filter_entry`: `.hidden(true)` yields to whitelist rules in
-/// .gitignore, so staging dirs need this filter to stay unentered.
+/// Walker `filter_entry`: `.hidden(true)` yields to whitelist rules in .gitignore,
+/// so staging needs this; the walk root is the user's own pick and never counts.
 pub(crate) fn not_staging(dent: &ignore::DirEntry) -> bool {
-    !has_staging_segment(Path::new(dent.file_name()))
+    dent.depth() == 0 || !has_staging_segment(Path::new(dent.file_name()))
 }
 
 pub(crate) fn has_staging_segment(path: &Path) -> bool {

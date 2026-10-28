@@ -36,7 +36,8 @@ async fn receive_paths<E>(
 ) -> Result<ClipboardFiles, String> {
     match tokio::time::timeout(budget, read).await {
         Ok(Ok(files)) => Ok(files),
-        _ => Err("clipboard read timed out or was cancelled".to_string()),
+        Ok(Err(_)) => Err("clipboard read failed".to_string()),
+        Err(_) => Err("clipboard read timed out or was cancelled".to_string()),
     }
 }
 
@@ -225,27 +226,32 @@ mod tests {
     }
 
     #[test]
-    fn a_silent_or_gone_reader_fails_with_the_timeout_text() {
+    fn a_silent_reader_times_out_and_a_failed_one_says_so() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
             .unwrap();
-        let message = "clipboard read timed out or was cancelled";
         let budget = std::time::Duration::from_millis(20);
         runtime.block_on(async {
-            let (silent, rx) = tokio::sync::oneshot::channel::<ClipboardFiles>();
-            assert_eq!(receive_paths(rx, budget).await.unwrap_err(), message);
-            drop(silent);
-            let (gone, rx) = tokio::sync::oneshot::channel::<ClipboardFiles>();
-            drop(gone);
-            assert_eq!(receive_paths(rx, budget).await.unwrap_err(), message);
-            let (tx, rx) = tokio::sync::oneshot::channel();
+            let silent = std::future::pending::<Result<ClipboardFiles, ()>>();
+            assert_eq!(
+                receive_paths(silent, budget).await.unwrap_err(),
+                "clipboard read timed out or was cancelled"
+            );
+            let panicked = tokio::task::spawn_blocking(|| -> ClipboardFiles {
+                panic!("the pasteboard reader panicked")
+            });
+            let roomy = std::time::Duration::from_secs(5);
+            assert_eq!(
+                receive_paths(panicked, roomy).await.unwrap_err(),
+                "clipboard read failed"
+            );
             let files = ClipboardFiles {
                 paths: vec!["/a".to_string()],
                 unresolved: 1,
             };
-            tx.send(files).unwrap();
-            let got = receive_paths(rx, budget).await.unwrap();
+            let ready = std::future::ready(Ok::<_, ()>(files));
+            let got = receive_paths(ready, budget).await.unwrap();
             assert_eq!((got.paths, got.unresolved), (vec!["/a".to_string()], 1));
         });
     }
