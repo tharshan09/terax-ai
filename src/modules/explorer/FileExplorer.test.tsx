@@ -421,48 +421,75 @@ describe("FileExplorer selection and drops", () => {
 });
 
 describe("FileExplorer after a failed copy", () => {
-  it("keeps the last listing when a paste or drop copy is rejected or aborted", async () => {
-    const lost = "ssh: connection closed";
-    let outcome: "rejected" | "aborted" | "normal" = "normal";
-    serve({
-      fs_clipboard_paths: () =>
-        Promise.resolve({ paths: ["/x/f.txt"], unresolved: 0 }),
-      fs_copy: () => {
-        if (outcome === "rejected") return Promise.reject(lost);
-        const aborted = outcome === "aborted";
-        return Promise.resolve({
-          created: [],
-          failed: aborted ? [{ source: "/x/f.txt", message: lost }] : [],
-          aborted: aborted ? lost : null,
-        });
-      },
-    });
-    render(explorer("/kept"));
-    await settle();
-    const paste = async () => {
-      fireEvent.contextMenu(treeArea());
-      fireEvent.click(await screen.findByText("Paste"));
-    };
-    const drop = () =>
-      act(async () =>
-        webview.drop?.({
-          payload: {
-            type: "drop",
-            paths: ["/x/f.txt"],
-            position: { x: 10, y: 10 },
-          },
-        }),
-      );
-    for (const transfer of [paste, drop]) {
-      for (const next of ["rejected", "aborted", "normal"] as const) {
-        outcome = next;
-        const before = invoke.mock.calls.length;
-        await transfer();
-        await vi.waitFor(() => expect(commands(before)).toContain("fs_copy"));
-        await settle();
-        await settle();
-        expect(reads(before)).toEqual(next === "normal" ? ["/kept"] : []);
+  it("re-reads after a failed copy only if something landed, keeping the listing", async () => {
+    const restore = rowsInView();
+    try {
+      const lost = "ssh: connection closed";
+      type Outcome = "rejected" | "aborted" | "aborted-placed" | "normal";
+      let outcome: Outcome = "normal";
+      serve({
+        fs_read_dir: () =>
+          outcome === "aborted-placed"
+            ? Promise.reject(lost)
+            : Promise.resolve([
+                {
+                  name: "keep.txt",
+                  kind: "file",
+                  size: 0,
+                  mtime: 0,
+                  gitignored: false,
+                },
+              ]),
+        fs_clipboard_paths: () =>
+          Promise.resolve({ paths: ["/x/f.txt"], unresolved: 0 }),
+        fs_copy: () => {
+          if (outcome === "rejected") return Promise.reject(lost);
+          const aborted = outcome.startsWith("aborted");
+          return Promise.resolve({
+            created: outcome === "aborted-placed" ? ["/kept/f.txt"] : [],
+            failed: aborted ? [{ source: "/x/g.txt", message: lost }] : [],
+            aborted: aborted ? lost : null,
+          });
+        },
+      });
+      render(explorer("/kept"));
+      expect(await screen.findByText("keep.txt")).toBeTruthy();
+      const paste = async () => {
+        fireEvent.contextMenu(treeArea());
+        fireEvent.click(await screen.findByText("Paste"));
+      };
+      const drop = () =>
+        act(async () =>
+          webview.drop?.({
+            payload: {
+              type: "drop",
+              paths: ["/x/f.txt"],
+              position: { x: 10, y: 10 },
+            },
+          }),
+        );
+      const outcomes: Outcome[] = [
+        "rejected",
+        "aborted",
+        "aborted-placed",
+        "normal",
+      ];
+      for (const transfer of [paste, drop]) {
+        for (const next of outcomes) {
+          outcome = next;
+          const before = invoke.mock.calls.length;
+          await transfer();
+          await vi.waitFor(() => expect(commands(before)).toContain("fs_copy"));
+          await settle();
+          await settle();
+          const rereads = next === "normal" || next === "aborted-placed";
+          expect(reads(before)).toEqual(rereads ? ["/kept"] : []);
+          expect(screen.getByText("keep.txt")).toBeTruthy();
+          expect(screen.queryByText(lost)).toBeNull();
+        }
       }
+    } finally {
+      restore();
     }
   });
 });

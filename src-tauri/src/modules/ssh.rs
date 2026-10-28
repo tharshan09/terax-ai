@@ -502,9 +502,17 @@ class _Foreign(FileExistsError):
     pass
 
 
+def _file_id(path):
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
 def _reserve_and_swap(src, dst, is_dir):
-    # The exclusive placeholder makes the rename replace only our own empty
-    # entry, never something another writer put at `dst` meanwhile.
+    # The exclusive placeholder aims the rename at our own empty entry; another
+    # writer can still race in between, and cleanup then leaves what took its place.
     try:
         if is_dir:
             os.mkdir(dst)
@@ -512,6 +520,7 @@ def _reserve_and_swap(src, dst, is_dir):
             os.close(os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
     except FileExistsError:
         raise _Taken()
+    claim = _file_id(dst)
     try:
         try:
             os.rename(src, dst)
@@ -525,10 +534,11 @@ def _reserve_and_swap(src, dst, is_dir):
     except _Foreign:
         raise
     except BaseException:
-        try:
-            (os.rmdir if is_dir else os.unlink)(dst)
-        except OSError:
-            pass
+        if _file_id(dst) == claim:
+            try:
+                (os.rmdir if is_dir else os.unlink)(dst)
+            except OSError:
+                pass
         raise
 
 
@@ -907,7 +917,7 @@ fn timed_out_msg(host: &str, what: &str, budget_secs: u64) -> String {
 }
 
 /// A copy batch stops on `Transport` (ssh itself or the connection failed) and
-/// goes on after `Failed` (only this op failed on a reachable host).
+/// goes on after the others (only this op failed on a reachable host).
 #[derive(Debug)]
 enum RemoteError {
     Transport(String),
@@ -915,6 +925,8 @@ enum RemoteError {
     /// The helper died by a signal before it answered: like `Failed` on a
     /// reachable host, but what the op already did is unknown.
     Killed(String),
+    /// The step ran past its budget and was killed; the host may only be slow.
+    TimedOut(String),
 }
 
 impl From<RemoteError> for String {
@@ -922,7 +934,8 @@ impl From<RemoteError> for String {
         match error {
             RemoteError::Transport(message)
             | RemoteError::Failed(message)
-            | RemoteError::Killed(message) => message,
+            | RemoteError::Killed(message)
+            | RemoteError::TimedOut(message) => message,
         }
     }
 }
@@ -1062,7 +1075,7 @@ fn run_remote_json(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("?");
             log::warn!("run_remote_json: remote fs op '{op}' on '{host}' exceeded {budget}s budget; killed");
-            return Err(Transport(timed_out_msg(host, op, budget)));
+            return Err(RemoteError::TimedOut(timed_out_msg(host, op, budget)));
         }
     };
     let _ = writer.join();
@@ -1573,7 +1586,9 @@ fn make_staging(run: &mut RemoteRun, dest: &str) -> Result<String, RemoteError> 
 }
 
 /// A lost connection rejects the batch only on the first item, before its
-/// publish; later the result stays Ok so the explorer re-reads the destination.
+/// publish; later the result stays Ok with `aborted` set, so the explorer
+/// re-reads the destination only if something landed and keeps its listing if
+/// that re-read fails.
 pub fn copy(
     host: &str,
     sources: &[String],
@@ -1593,6 +1608,7 @@ pub fn copy(
 
 const PUBLISH_LOST: &str = "connection lost while publishing";
 const PUBLISH_KILLED: &str = "remote helper stopped while publishing";
+const PUBLISH_TIMED_OUT: &str = "publishing timed out";
 
 /// A publish cut off leaves its item's fate unknown, so it neither rejects the
 /// batch nor counts as created. Only a lost connection also stops the batch.
@@ -1600,7 +1616,11 @@ const PUBLISH_KILLED: &str = "remote helper stopped while publishing";
 enum ItemError {
     Remote(RemoteError),
     PublishLost(String),
-    PublishKilled(String),
+    /// `reason` is the item's message, `cause` what the step reported.
+    PublishCutOff {
+        reason: &'static str,
+        cause: String,
+    },
 }
 
 impl From<RemoteError> for ItemError {
@@ -1639,7 +1659,11 @@ fn copy_with(
         );
         match item {
             Ok(name) => result.created.push(created_path(dest_dir, &name)),
-            Err(ItemError::Remote(RemoteError::Failed(message) | RemoteError::Killed(message))) => {
+            Err(ItemError::Remote(
+                RemoteError::Failed(message)
+                | RemoteError::Killed(message)
+                | RemoteError::TimedOut(message),
+            )) => {
                 log::warn!("ssh copy({source} -> {host}:{dest}) failed: {message}");
                 result.failed.push(failure(source, &message));
             }
@@ -1665,11 +1689,9 @@ fn copy_with(
                 result.aborted = Some(message);
                 break;
             }
-            Err(ItemError::PublishKilled(message)) => {
-                log::warn!(
-                    "ssh copy({source} -> {host}:{dest}) killed while publishing: {message}"
-                );
-                result.failed.push(maybe_placed(source, PUBLISH_KILLED));
+            Err(ItemError::PublishCutOff { reason, cause }) => {
+                log::warn!("ssh copy({source} -> {host}:{dest}) {reason}: {cause}");
+                result.failed.push(maybe_placed(source, reason));
             }
         }
     }
@@ -1716,10 +1738,9 @@ fn copy_one(
     // never takes the item; without a connection it cannot run, the rest stays hidden.
     if matches!(
         outcome,
-        Err(
-            ItemError::Remote(RemoteError::Failed(_) | RemoteError::Killed(_))
-                | ItemError::PublishKilled(_)
-        )
+        Err(ItemError::Remote(
+            RemoteError::Failed(_) | RemoteError::Killed(_) | RemoteError::TimedOut(_)
+        ) | ItemError::PublishCutOff { .. })
     ) {
         if let Err(error) = run(
             &serde_json::json!({ "op": "delete", "path": staging }),
@@ -1771,7 +1792,14 @@ fn publish_staged(
             }
             Err(RemoteError::Transport(message)) => return Err(ItemError::PublishLost(message)),
             // A helper killed mid-publish may already have placed the item.
-            Err(RemoteError::Killed(message)) => return Err(ItemError::PublishKilled(message)),
+            Err(RemoteError::Killed(cause)) => {
+                let reason = PUBLISH_KILLED;
+                return Err(ItemError::PublishCutOff { reason, cause });
+            }
+            Err(RemoteError::TimedOut(cause)) => {
+                let reason = PUBLISH_TIMED_OUT;
+                return Err(ItemError::PublishCutOff { reason, cause });
+            }
             Err(error) => return Err(error.into()),
         }
     }
@@ -2481,6 +2509,47 @@ Host !secret prod
             "no further name is tried"
         );
         assert_eq!(std::fs::read(item.join("a.txt")).unwrap(), b"ours");
+    }
+
+    // The swap stub puts another writer's entry where our placeholder was,
+    // then fails; the cleanup must leave theirs.
+    #[cfg(unix)]
+    #[test]
+    fn embedded_helper_publish_leaves_what_replaced_its_placeholder() {
+        let prelude = [
+            "import os, errno",
+            "def _no_link(*a, **k): raise OSError(errno.ENOSYS, 'no hardlinks')",
+            "os.link = _no_link",
+            "_rename = os.rename",
+            "def _replaced(a, b):",
+            "    theirs = b + '.theirs'",
+            "    if os.path.isdir(a): os.mkdir(theirs)",
+            "    else:",
+            "        with open(theirs, 'w') as f: f.write('theirs')",
+            "    _rename(theirs, b)",
+            "    raise OSError(errno.EIO, 'swap failed')",
+            "os.rename = _replaced",
+            "",
+        ]
+        .join("\n");
+        let dir = tempfile::tempdir().unwrap();
+        let base = format!("{}/", dir.path().display());
+        let staging = dir.path().join(".terax-copy-s5Vd3_Jf");
+        std::fs::create_dir_all(staging.join("folder")).unwrap();
+        std::fs::write(staging.join("file"), b"ours").unwrap();
+        for (staged, name) in [("file", "f.txt"), ("folder", "d")] {
+            let from = staging.join(staged).to_string_lossy().into_owned();
+            let Some(env) = run_helper(&prelude, &publish_request(&from, &base, &[name])) else {
+                return;
+            };
+            assert_eq!(env["ok"], false, "{env}");
+            let target = dir.path().join(name);
+            assert!(target.exists(), "{name}: the replacement was removed");
+            if name == "f.txt" {
+                assert_eq!(std::fs::read(&target).unwrap(), b"theirs");
+            }
+            assert!(staging.join(staged).exists());
+        }
     }
 
     #[cfg(unix)]
@@ -3380,6 +3449,41 @@ Host !secret prod
             deletes(&requests),
             [&serde_json::json!("/remote/.terax-copy-stub_9Xk")]
         );
+    }
+
+    #[test]
+    fn a_step_past_its_budget_fails_only_its_item() {
+        let src = tempfile::tempdir().unwrap();
+        let sources = local_sources(src.path(), &["a.txt", "b.txt"]);
+        let staging = serde_json::json!("/remote/.terax-copy-stub_9Xk");
+        for op in ["mkstage", "write_bytes", "publish"] {
+            let timed_out = timed_out_msg("stub", op, 30);
+            let mut seen = 0;
+            let (result, requests) = stub_copy(&sources, |request| {
+                if request["op"] == op {
+                    seen += 1;
+                    if seen == 1 {
+                        return Err(RemoteError::TimedOut(timed_out.clone()));
+                    }
+                }
+                healthy(request)
+            });
+            let result = result.expect("a slow step must not reject the batch");
+            assert_eq!(result.created, ["/remote/b.txt"], "{op}");
+            assert_eq!(result.aborted, None, "{op}");
+            let (message, placed) = match op {
+                "publish" => (PUBLISH_TIMED_OUT.to_string(), true),
+                _ => (timed_out.clone(), false),
+            };
+            assert_eq!(failures(&result), [(sources[0].clone(), message)], "{op}");
+            assert_eq!(result.failed[0].maybe_placed, placed, "{op}");
+            let deleted = deletes(&requests);
+            if op == "mkstage" {
+                assert!(deleted.is_empty(), "no staging was made");
+            } else {
+                assert_eq!(deleted, [&staging], "{op}");
+            }
+        }
     }
 
     #[test]

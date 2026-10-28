@@ -257,6 +257,28 @@ describe("useFileTree read promises", () => {
     await vi.waitFor(() => expect(settled).toBe(true));
   });
 
+  it("keeps a loaded listing when a refresh that asked for it fails", async () => {
+    const pending = reads();
+    const { result } = renderHook(() => useFileTree("/keep"));
+    await act(async () => pending[0].resolve([entry("a")]));
+
+    let settled = false;
+    act(() => {
+      void result.current.refresh("/keep", { keepOnError: true }).then(() => {
+        settled = true;
+      });
+    });
+    await act(async () => pending[1].reject("ssh: connection closed"));
+    await vi.waitFor(() => expect(settled).toBe(true));
+    expect(listing(result.current, "/keep")).toEqual(["a"]);
+
+    act(() => {
+      void result.current.refresh("/keep");
+    });
+    await act(async () => pending[2].reject("ssh: connection closed"));
+    expect(listing(result.current, "/keep")).toBe("error");
+  });
+
   it("settles expand once the folder's listing is in the tree", async () => {
     const pending = reads();
     const { result } = renderHook(() => useFileTree("/ws"));

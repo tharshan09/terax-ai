@@ -451,7 +451,8 @@ fn relock(_path: &Path, _flags: Option<u32>) {}
 #[cfg(not(target_os = "macos"))]
 fn unlock_tree(_dir: &Path) {}
 
-/// `rename` must never replace; `swap` only ever replaces our own placeholder.
+/// `rename` must never replace; `swap` is aimed at our own placeholder, which on
+/// volumes without a no-replace rename another writer can swap out in between.
 fn publish(
     staged: &Path,
     dest: &Path,
@@ -503,7 +504,8 @@ fn place(
 }
 
 // exFAT and SMB lack a no-replace rename: an exclusive create claims the name,
-// so the rename only ever replaces our own empty placeholder.
+// so the rename is aimed at our own empty placeholder; another writer can still
+// race in between, and cleanup then leaves whatever took its place.
 fn place_reserved(
     staged: &Path,
     target: &Path,
@@ -520,6 +522,7 @@ fn place_reserved(
             .map(drop)
     };
     claimed.map_err(|error| refusal(error, target))?;
+    let claim = file_id(target);
     let swapped = match swap(staged, target) {
         Err(error) if is_dir && refuses_folder_swap(&error) => {
             // Another writer may have filled the claim since: never mix into or remove it.
@@ -533,13 +536,38 @@ fn place_reserved(
         other => other,
     };
     swapped.map_err(|error| {
-        let _ = if is_dir {
-            std::fs::remove_dir(target)
-        } else {
-            std::fs::remove_file(target)
-        };
+        if still_ours(target, claim) {
+            let _ = if is_dir {
+                std::fs::remove_dir(target)
+            } else {
+                std::fs::remove_file(target)
+            };
+        }
         Refused::Failed(error)
     })
+}
+
+#[cfg(unix)]
+fn file_id(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    Some((meta.dev(), meta.ino()))
+}
+
+#[cfg(unix)]
+fn still_ours(path: &Path, claim: Option<(u64, u64)>) -> bool {
+    claim.is_some() && file_id(path) == claim
+}
+
+#[cfg(not(unix))]
+fn file_id(_path: &Path) -> Option<(u64, u64)> {
+    None
+}
+
+// Without inode numbers the claim is trusted as before.
+#[cfg(not(unix))]
+fn still_ours(_path: &Path, _claim: Option<(u64, u64)>) -> bool {
+    true
 }
 
 fn swap_onto_claim(staged: &Path, target: &Path) -> io::Result<()> {
@@ -2296,6 +2324,54 @@ mod tests {
         );
         assert_eq!(names(&v), ["theirs.txt"]);
         assert_eq!(std::fs::read(staged.join("a.txt")).unwrap(), b"ours");
+    }
+
+    // Another writer replaces our placeholder before the swap fails; the
+    // cleanup must leave theirs.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_failed_swap_leaves_whatever_replaced_the_placeholder() {
+        let dest = tempfile::tempdir().unwrap();
+        let unsupported =
+            |_: &Path, _: &Path| Err(io::Error::from_raw_os_error(NO_REPLACE_UNSUPPORTED[0]));
+        for is_dir in [false, true] {
+            let staged = staged_in(dest.path());
+            let theirs = dest.path().join("theirs");
+            if is_dir {
+                std::fs::create_dir(&staged).unwrap();
+                std::fs::create_dir(&theirs).unwrap();
+            } else {
+                std::fs::write(&staged, b"ours").unwrap();
+                std::fs::write(&theirs, b"theirs").unwrap();
+            }
+            let replace = |_: &Path, to: &Path| {
+                std::fs::rename(&theirs, to).unwrap();
+                Err(io::Error::from_raw_os_error(libc::EIO))
+            };
+            let name = if is_dir { "d" } else { "f.txt" };
+            let error = publish(
+                &staged,
+                dest.path(),
+                OsStr::new(name),
+                is_dir,
+                false,
+                unsupported,
+                replace,
+            )
+            .unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::EIO));
+            let target = dest.path().join(name);
+            assert_eq!(std::fs::symlink_metadata(&target).unwrap().is_dir(), is_dir);
+            if !is_dir {
+                assert_eq!(std::fs::read(&target).unwrap(), b"theirs");
+            }
+            assert!(staged.exists());
+            if is_dir {
+                std::fs::remove_dir(&staged).unwrap();
+            } else {
+                std::fs::remove_file(&staged).unwrap();
+            }
+        }
     }
 
     #[test]

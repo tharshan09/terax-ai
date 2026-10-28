@@ -47,6 +47,10 @@ function release(
   for (const w of list) if (w.gen <= gen) w.done();
 }
 
+// `keepOnError`: a failing read leaves a loaded listing in place (a host that
+// just dropped the connection), and the caller's toast says what went wrong.
+export type RefreshOptions = { keepOnError?: boolean };
+
 export type PendingCreate = {
   parentPath: string;
   kind: "file" | "dir";
@@ -118,6 +122,8 @@ export function useFileTree(rootPath: string | null, options?: Options) {
   const landedRef = useRef(new Map<string, number>());
   // The newest landed state per folder, which may not have rendered yet.
   const latestRef = useRef(new Map<string, ChildrenState>());
+  // Reads whose failure keeps a loaded listing (see RefreshOptions).
+  const keepOnErrorRef = useRef(new Set<number>());
   // Reads started before the last root change never land.
   const floorRef = useRef(0);
   const waitersRef = useRef(new Map<string, Waiter[]>());
@@ -171,6 +177,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
         gitDecorations: gitDecorationsRef.current,
         workspace: currentWorkspaceEnv(),
       });
+      keepOnErrorRef.current.delete(gen);
       if (!lands()) return;
 
       // Only a listing that is on screen and not about to be replaced by a
@@ -232,7 +239,12 @@ export function useFileTree(rootPath: string | null, options?: Options) {
         watchRemove(toUnwatch);
       }
     } catch (e) {
+      const keep = keepOnErrorRef.current.delete(gen);
       if (!lands()) return;
+      if (keep && latestRef.current.get(path)?.status === "loaded") {
+        release(waitersRef.current, path, gen);
+        return;
+      }
       const node: ChildrenState = { status: "error", message: String(e) };
       readOf.set(node, gen);
       latestRef.current.set(path, node);
@@ -247,8 +259,9 @@ export function useFileTree(rootPath: string | null, options?: Options) {
 
   // Settles once this read, or a newer one, shows in the rendered tree.
   const refresh = useCallback(
-    (path: string): Promise<void> => {
+    (path: string, options?: RefreshOptions): Promise<void> => {
       const gen = ++readCountRef.current;
+      if (options?.keepOnError) keepOnErrorRef.current.add(gen);
       const shown = new Promise<void>((done) => {
         const list = waitersRef.current.get(path) ?? [];
         list.push({ gen, done });

@@ -467,13 +467,17 @@ describe("pasteClipboardFiles", () => {
     expect(opts.expand).not.toHaveBeenCalled();
   });
 
-  it("keeps the last listing when the connection dropped during the copy", async () => {
+  it("after a lost connection re-reads only an open folder something landed in, keeping its listing on error", async () => {
     const lost = "ssh: connection closed";
-    for (const open of [true, false]) {
+    for (const [open, created] of [
+      [true, ["/ws/docs/a"]],
+      [false, ["/ws/docs/a"]],
+      [true, []],
+    ] as const) {
       invoke
         .mockResolvedValueOnce(clip(["/x/a", "/x/b"]))
         .mockResolvedValueOnce({
-          created: ["/ws/docs/a"],
+          created: [...created],
           failed: [{ source: "/x/b", message: lost }],
           aborted: lost,
         });
@@ -483,9 +487,17 @@ describe("pasteClipboardFiles", () => {
       expect(toast.error).toHaveBeenLastCalledWith("Could not copy 1 item", {
         description: lost,
       });
-      expect(opts.refresh).not.toHaveBeenCalled();
+      const rereads = open && created.length > 0;
+      if (rereads) {
+        expect(opts.refresh).toHaveBeenCalledWith("/ws/docs", {
+          keepOnError: true,
+        });
+        expect(opts.select).toHaveBeenCalledWith("/ws/docs/a");
+      } else {
+        expect(opts.refresh).not.toHaveBeenCalled();
+        expect(opts.select).not.toHaveBeenCalled();
+      }
       expect(opts.expand).not.toHaveBeenCalled();
-      expect(opts.select).not.toHaveBeenCalled();
     }
   });
 

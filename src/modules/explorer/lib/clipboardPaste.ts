@@ -7,6 +7,7 @@ import {
 } from "@/modules/terminal/lib/keymap";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import { dirname } from "./paths";
+import type { RefreshOptions } from "./useFileTree";
 
 // One paste at a time; a second request says so instead of silently doing
 // nothing. `release` frees the lock early, never one a later paste took.
@@ -63,7 +64,7 @@ type PasteOptions = {
   isCurrent: (scope: ExplorerScope) => boolean;
   isExpanded: (dir: string) => boolean;
   // Both settle once the folder's re-read shows in the tree.
-  refresh: (dir: string) => Promise<void>;
+  refresh: (dir: string, options?: RefreshOptions) => Promise<void>;
   expand: (dir: string) => Promise<void>;
   hasRow: (path: string) => boolean;
   select: (path: string) => void;
@@ -160,10 +161,14 @@ export async function pasteClipboardFiles(
       onCopySettled();
     }
     reportCopyFailures(result, unresolved);
-    // A lost connection keeps the last good listing; a re-read could not land.
-    if (!isCurrent() || result.aborted) return [];
+    if (!isCurrent()) return [];
+    // After a lost connection only an open folder something landed in is
+    // re-read, and a failing re-read keeps its last good listing.
     const shown = inView(destDir, scope.rootPath, isExpanded);
-    if (isOpen()) await refresh(destDir);
+    if (result.aborted) {
+      if (!isOpen() || result.created.length === 0) return [];
+      await refresh(destDir, { keepOnError: true });
+    } else if (isOpen()) await refresh(destDir);
     else if (result.created.length > 0 && shown) await expand(destDir);
     else return result.created;
     if (!isCurrent()) return [];

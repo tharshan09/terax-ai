@@ -8,6 +8,7 @@ import {
   reportCopyFailures,
 } from "@/modules/explorer/lib/clipboardPaste";
 import { targetDirFor } from "@/modules/explorer/lib/paths";
+import type { RefreshOptions } from "@/modules/explorer/lib/useFileTree";
 
 type Options = {
   scope: ExplorerScope | null;
@@ -15,7 +16,7 @@ type Options = {
   isDir: (path: string) => boolean | undefined;
   isExpanded: (dir: string) => boolean;
   onDrop: () => void;
-  onCopied: (destDir: string) => void;
+  onCopied: (destDir: string, options?: RefreshOptions) => void;
 };
 
 // Tauri reports the drop point in physical pixels on some platforms; scale down
@@ -80,20 +81,21 @@ export function useExplorerFileDrop(options: Options) {
             workspace: scope.workspace,
             renameOnConflict: true,
           })
-            .then((result) => {
+            .then((result): RefreshOptions | null => {
               reportCopyFailures(result);
-              return !result.aborted;
+              if (!result.aborted) return {};
+              return result.created.length > 0 ? { keepOnError: true } : null;
             })
             .catch((err) => {
               toast.error(`Copy failed: ${String(err)}`);
-              return false;
+              return null;
             })
-            .then((copied) => {
-              // A rejected or aborted copy keeps the last good listing, and a
-              // collapsed folder is read when it opens, as after a paste.
+            .then((reread) => {
+              // As after a paste: a rejected copy or one that placed nothing
+              // keeps the listing, and a collapsed folder is read when it opens.
               const open = dir === scope.rootPath || isExpanded(dir);
-              if (copied && open && !disposed && isCurrent(scope))
-                onCopied(dir);
+              if (reread && open && !disposed && isCurrent(scope))
+                onCopied(dir, reread);
             });
         }
       })
