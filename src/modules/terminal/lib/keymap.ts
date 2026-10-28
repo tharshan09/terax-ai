@@ -41,7 +41,10 @@ function isNativeChord(event: TerminalKeyEvent, isMac: boolean): boolean {
 const LATIN_LETTER = /^[a-z]$/i;
 
 // The physical key counts only on a non-Latin layout, so Dvorak Cmd+K stays K.
-function isChordLetter(event: TerminalKeyEvent, letter: string): boolean {
+export function isChordLetter(
+  event: TerminalKeyEvent,
+  letter: string,
+): boolean {
   const { key } = event;
   if (LATIN_LETTER.test(key)) return key.toLowerCase() === letter;
   return event.code === `Key${letter.toUpperCase()}`;

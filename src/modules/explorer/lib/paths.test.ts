@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { basename, dirname, targetDirFor } from "@/modules/explorer/lib/paths";
+import { dirname, targetDirFor } from "@/modules/explorer/lib/paths";
 
 describe("targetDirFor", () => {
   const dirs = new Set(["/ws/docs", "/ws/b"]);
@@ -45,15 +45,5 @@ describe("dirname", () => {
     ["C:/a.txt", "C:"],
   ])("%s -> %s", (path, parent) => {
     expect(dirname(path)).toBe(parent);
-  });
-});
-
-describe("basename", () => {
-  it.each([
-    ["/ws/docs/a.txt", "a.txt"],
-    ["/ws/a\\b.txt", "a\\b.txt"],
-    ["C:/repo/a.txt", "a.txt"],
-  ])("%s -> %s", (path, name) => {
-    expect(basename(path)).toBe(name);
   });
 });

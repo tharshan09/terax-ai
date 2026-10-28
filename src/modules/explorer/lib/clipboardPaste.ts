@@ -5,7 +5,6 @@ import {
   type TerminalKeyEvent,
 } from "@/modules/terminal/lib/keymap";
 import type { WorkspaceEnv } from "@/modules/workspace";
-import { basename, joinPath } from "./paths";
 
 // One paste at a time; a second request says so instead of silently doing
 // nothing. `release` frees the lock early, never one a later paste took.
@@ -140,8 +139,7 @@ export async function pasteClipboardFiles(
     if (isOpen()) await refresh(destDir);
     else if (result.created.length > 0) await expand(destDir);
     if (!isCurrent()) return [];
-    const first = result.created[0];
-    const row = first && joinPath(destDir, basename(first));
+    const row = result.created[0];
     if (row && hasRow(row)) select(row);
     return result.created;
   } catch (err) {

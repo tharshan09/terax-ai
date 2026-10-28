@@ -601,6 +601,7 @@ fn copy_dir(
     followed: &mut Vec<PathBuf>,
 ) -> io::Result<()> {
     std::fs::create_dir(dst)?;
+    keep_dir_mode(src, dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         guard_entry(registry, &entry, linked)?;
@@ -614,6 +615,25 @@ fn copy_dir(
             followed,
         )?;
     }
+    Ok(())
+}
+
+/// Group and other bits follow the source folder; the owner keeps rwx so the
+/// staged tree can still be filled, published and removed.
+pub(crate) fn dir_mode(source_mode: u32) -> u32 {
+    (source_mode & 0o777) | 0o700
+}
+
+// `dst` is fresh in our private staging, so this cannot follow a planted link.
+#[cfg(unix)]
+fn keep_dir_mode(src: &Path, dst: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = dir_mode(std::fs::metadata(src)?.permissions().mode());
+    std::fs::set_permissions(dst, std::fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn keep_dir_mode(_src: &Path, _dst: &Path) -> io::Result<()> {
     Ok(())
 }
 
@@ -699,7 +719,7 @@ fn copy_name(name: &OsStr, n: usize, is_dir: bool) -> OsString {
         None => (stem, 0),
     };
     let mut out = base.to_os_string();
-    match count.saturating_add(n) {
+    match count + n {
         1 => out.push(" copy"),
         number => out.push(format!(" copy {number}")),
     }
@@ -710,7 +730,8 @@ fn copy_name(name: &OsStr, n: usize, is_dir: bool) -> OsString {
     out
 }
 
-/// `a copy` is copy 1 of `a`, `a copy 7` copy 7; a count never starts with 0.
+/// `a copy` is copy 1 of `a`, `a copy 7` copy 7; a count never starts with 0
+/// and never exceeds the names a publish tries, so counting on cannot overflow.
 fn copy_count(stem: &str) -> Option<(&str, usize)> {
     if let Some(base) = stem.strip_suffix(" copy") {
         return Some((base, 1));
@@ -719,7 +740,11 @@ fn copy_count(stem: &str) -> Option<(&str, usize)> {
     if digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    Some((base, digits.parse().ok()?))
+    let count = digits
+        .parse()
+        .ok()
+        .filter(|&count| count <= MAX_COPY_SUFFIX)?;
+    Some((base, count))
 }
 
 /// A `git init` repo whose `.gitignore` whitelists every folder and `.txt`
@@ -839,6 +864,69 @@ mod tests {
             .take(3)
             .collect();
         assert_eq!(first, ["a copy.txt", "a copy 2.txt", "a copy 3.txt"]);
+    }
+
+    #[test]
+    fn a_count_past_the_copy_limit_is_part_of_the_name() {
+        let name = |n: &str, i, dir| copy_name(OsStr::new(n), i, dir);
+        assert_eq!(name("a copy 10000.txt", 1, false), "a copy 10001.txt");
+        assert_eq!(name("a copy 10001.txt", 1, false), "a copy 10001 copy.txt");
+        let max = "a copy 18446744073709551615.txt";
+        assert_eq!(name(max, 1, false), "a copy 18446744073709551615 copy.txt");
+        assert_eq!(
+            name("v copy 18446744073709551616", 2, true),
+            "v copy 18446744073709551616 copy 2"
+        );
+        let first: Vec<OsString> = copy_candidates(OsStr::new(max), false).take(3).collect();
+        assert_eq!(
+            first,
+            [
+                max,
+                "a copy 18446744073709551615 copy.txt",
+                "a copy 18446744073709551615 copy 2.txt"
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_copied_folder_keeps_the_source_mode_but_stays_the_owners() {
+        use std::os::unix::fs::PermissionsExt;
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let set = |rel: &str, mode: u32| {
+            let perms = std::fs::Permissions::from_mode(mode);
+            std::fs::set_permissions(src.path().join(rel), perms).unwrap();
+        };
+        std::fs::create_dir_all(src.path().join("private/inner")).unwrap();
+        std::fs::create_dir(src.path().join("shared")).unwrap();
+        std::fs::create_dir_all(src.path().join("locked/sub")).unwrap();
+        std::fs::write(src.path().join("locked/sub/a.txt"), b"a").unwrap();
+        set("private/inner", 0o750);
+        set("private", 0o700);
+        set("shared", 0o775);
+        set("locked/sub", 0o555);
+        set("locked", 0o555);
+
+        let sources = ["private", "shared", "locked"].map(|n| src.path().join(n));
+        let result = copy(&sources, dest.path(), false);
+        set("locked", 0o755);
+        set("locked/sub", 0o755);
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        let mode = |rel: &str| {
+            let meta = std::fs::metadata(dest.path().join(rel)).unwrap();
+            meta.permissions().mode() & 0o777
+        };
+        assert_eq!(mode("private"), 0o700);
+        assert_eq!(mode("private/inner"), 0o750);
+        assert_eq!(mode("shared"), 0o775);
+        assert_eq!(mode("locked"), 0o755);
+        assert_eq!(mode("locked/sub"), 0o755);
+        assert_eq!(
+            std::fs::read(dest.path().join("locked/sub/a.txt")).unwrap(),
+            b"a"
+        );
+        assert!(no_staging_left(dest.path()));
     }
 
     fn staged_in(dir: &Path) -> PathBuf {

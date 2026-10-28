@@ -338,6 +338,12 @@ def list_subdirs(req):
     return out
 
 
+def list_names(req):
+    # The copy's free-name search needs names only, so no entry is stat'ed.
+    names = os.listdir(os.path.expanduser(req["path"]))
+    return [n for n in names if not _staging(n) and _utf8_ok(n)][:MAX_ENTRIES]
+
+
 def stat(req):
     path = os.path.expanduser(req["path"])
     st = os.stat(path, follow_symlinks=True)
@@ -418,6 +424,9 @@ def create_dir(req):
         os.makedirs(path, exist_ok=False)
     else:
         os.mkdir(path)
+    # Exact, unlike mkdir's umask-cut mode; a failure fails the folder, never widens it.
+    if req.get("mode") is not None:
+        os.chmod(path, req["mode"])
     return True
 
 
@@ -623,7 +632,7 @@ def grep(req):
     return {"hits": hits, "truncated": truncated, "files_scanned": files}
 
 
-OPS = {"read_dir": read_dir, "list_subdirs": list_subdirs, "stat": stat,
+OPS = {"read_dir": read_dir, "list_subdirs": list_subdirs, "list_names": list_names, "stat": stat,
        "realpath": realpath, "read_file": read_file, "write_file": write_file,
        "create_file": create_file, "create_dir": create_dir, "mkstage": mkstage,
        "rename": rename, "delete": delete, "publish": publish,
@@ -771,11 +780,6 @@ fn classify_ssh_error(stderr: &str) -> Option<String> {
     if s.contains("timed out") {
         return Some("Connection timed out — the host is unreachable.".to_string());
     }
-    if s.contains("python3") && s.contains("not found") {
-        return Some(
-            "python3 isn't installed on the host — the remote file browser requires it.".to_string(),
-        );
-    }
     None
 }
 
@@ -871,12 +875,14 @@ fn with_stderr(message: String, stderr: &str) -> String {
     }
 }
 
+/// Only ssh's own exit reads stderr as an ssh message: a helper's stderr may
+/// say "Permission denied" about a file, never about the login.
 fn exit_error(code: Option<i32>, stderr: &str) -> RemoteError {
-    if let Some(message) = classify_ssh_error(stderr) {
-        return RemoteError::Transport(message);
-    }
     let excerpt = stderr_excerpt(stderr);
     match code {
+        Some(COMMAND_NOT_FOUND_EXIT) if stderr.contains("python3") => RemoteError::Transport(
+            "python3 isn't installed on the host; the remote file browser requires it.".to_string(),
+        ),
         Some(COMMAND_NOT_FOUND_EXIT) if excerpt.is_empty() => RemoteError::Transport(
             "the remote helper could not start: command not found on the host (exit 127)"
                 .to_string(),
@@ -888,16 +894,17 @@ fn exit_error(code: Option<i32>, stderr: &str) -> RemoteError {
         } else {
             format!("the remote helper could not start: {excerpt}")
         }),
-        Some(code) if code != SSH_OWN_FAILURE_EXIT => RemoteError::Failed(if stderr.is_empty() {
-            format!("remote helper exited with status {code}")
-        } else {
-            format!("ssh: {stderr}")
-        }),
-        _ => RemoteError::Transport(if stderr.is_empty() {
-            "ssh command failed".to_string()
-        } else {
-            format!("ssh: {stderr}")
-        }),
+        Some(code @ 128..SSH_OWN_FAILURE_EXIT) => RemoteError::Failed(with_stderr(
+            format!("remote helper exited with status {code}"),
+            stderr,
+        )),
+        _ => RemoteError::Transport(classify_ssh_error(stderr).unwrap_or_else(|| {
+            if stderr.is_empty() {
+                "ssh command failed".to_string()
+            } else {
+                format!("ssh: {stderr}")
+            }
+        })),
     }
 }
 
@@ -985,18 +992,31 @@ fn run_remote_json(
     read_envelope(status.code(), &stdout_bytes, overflow, stderr.trim())
 }
 
-/// Only a sentinel-prefixed object with a boolean `ok` is the helper's answer;
-/// its error fails the item, anything else is transport.
+/// An ssh failure is transport whatever reached stdout; on any other exit the
+/// helper's answer stands, and only without one does the exit code decide.
 fn read_envelope(
     code: Option<i32>,
     stdout: &[u8],
     overflow: bool,
     stderr: &str,
 ) -> Result<serde_json::Value, RemoteError> {
-    use RemoteError::{Failed, Transport};
-    if code != Some(0) {
+    if matches!(code, None | Some(SSH_OWN_FAILURE_EXIT)) {
         return Err(exit_error(code, stderr));
     }
+    match helper_answer(stdout, overflow, stderr) {
+        Err(RemoteError::Transport(_)) if code != Some(0) => Err(exit_error(code, stderr)),
+        answer => answer,
+    }
+}
+
+/// Only a sentinel-prefixed object with a boolean `ok` is the helper's answer;
+/// its error fails the item, anything else is transport.
+fn helper_answer(
+    stdout: &[u8],
+    overflow: bool,
+    stderr: &str,
+) -> Result<serde_json::Value, RemoteError> {
+    use RemoteError::{Failed, Transport};
     if overflow {
         return Err(Transport(
             "remote response exceeded the 16 MiB limit".to_string(),
@@ -1150,21 +1170,11 @@ pub fn read_dir(
     path: &str,
     show_hidden: bool,
 ) -> Result<Vec<crate::modules::fs::tree::DirEntry>, String> {
-    read_dir_with(
-        &mut |request, timeout| run_remote_json(host, request, timeout),
-        path,
-        show_hidden,
-    )
-}
-
-/// The `read_dir` request and its parsing over any transport (the copy's stub too).
-fn read_dir_with(
-    run: &mut RemoteRun,
-    path: &str,
-    show_hidden: bool,
-) -> Result<Vec<crate::modules::fs::tree::DirEntry>, String> {
-    let request = serde_json::json!({ "op": "read_dir", "path": path, "showHidden": show_hidden });
-    let data = run(&request, Some(REMOTE_FS_TIMEOUT))?;
+    let data = run_remote_json(
+        host,
+        &serde_json::json!({ "op": "read_dir", "path": path, "showHidden": show_hidden }),
+        Some(REMOTE_FS_TIMEOUT),
+    )?;
     serde_json::from_value(data).map_err(|e| format!("bad read_dir response: {e}"))
 }
 
@@ -1316,7 +1326,10 @@ type RemoteRun<'a> = dyn FnMut(&serde_json::Value, Option<std::time::Duration>) 
 /// One remote step of an upload; `rel` is relative to the staged item.
 #[cfg_attr(test, derive(Debug, PartialEq))]
 enum Upload {
-    Dir(String),
+    Dir {
+        rel: String,
+        mode: Option<u32>,
+    },
     File {
         src: std::path::PathBuf,
         rel: String,
@@ -1338,7 +1351,10 @@ fn plan_upload(
     copy::check_depth(depth)?;
     let meta = std::fs::symlink_metadata(src)?;
     if meta.is_dir() {
-        plan.push(Upload::Dir(rel.clone()));
+        plan.push(Upload::Dir {
+            rel: rel.clone(),
+            mode: file_mode(&meta).map(copy::dir_mode),
+        });
         for entry in std::fs::read_dir(src)? {
             let entry = entry?;
             let name = entry.file_name();
@@ -1400,9 +1416,10 @@ fn broken_symlink(src: &std::path::Path, rel: &str) -> std::io::Error {
 fn upload(run: &mut RemoteRun, plan: &[Upload], item: &str) -> Result<(), RemoteError> {
     for step in plan {
         let (request, budget) = match step {
-            Upload::Dir(rel) => (
+            Upload::Dir { rel, mode } => (
                 serde_json::json!({
                     "op": "create_dir", "path": format!("{item}{rel}"), "parents": false,
+                    "mode": mode,
                 }),
                 Some(REMOTE_FS_TIMEOUT),
             ),
@@ -1592,11 +1609,15 @@ impl TakenNames<'_> {
 }
 
 fn list_names(run: &mut RemoteRun, host: &str, dest_dir: &str) -> Listing {
+    let request = serde_json::json!({ "op": "list_names", "path": dest_dir });
     for attempt in 1..=LISTING_ATTEMPTS {
-        match read_dir_with(run, dest_dir, true) {
-            Ok(entries) => {
-                return Listing::Listed(entries.into_iter().map(|entry| entry.name).collect())
-            }
+        let names = run(&request, Some(REMOTE_FS_TIMEOUT))
+            .map_err(String::from)
+            .and_then(|data| {
+                serde_json::from_value(data).map_err(|e| format!("bad list_names response: {e}"))
+            });
+        match names {
+            Ok(names) => return Listing::Listed(names),
             Err(error) => {
                 log::warn!(
                     "ssh copy: could not list {host}:{dest_dir} (attempt {attempt}): {error}"
@@ -1794,9 +1815,6 @@ Host !secret prod
         assert!(classify_ssh_error("connect to host x port 22: Connection refused")
             .unwrap()
             .contains("refused"));
-        assert!(classify_ssh_error("bash: python3: command not found")
-            .unwrap()
-            .contains("python3"));
         assert!(classify_ssh_error("some unrelated noise").is_none());
     }
 
@@ -2328,6 +2346,62 @@ Host !secret prod
         assert!(!dir.path().join("gone").exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn embedded_helper_create_dir_sets_the_exact_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = |rel: &str| dir.path().join(rel).to_string_lossy().into_owned();
+        let create = |rel: &str, mode: u32| {
+            run_helper(
+                "import os\nos.umask(0o022)\n",
+                &serde_json::json!({
+                    "op": "create_dir", "path": path(rel), "parents": false, "mode": mode,
+                }),
+            )
+        };
+        let mode = |rel: &str| std::fs::metadata(path(rel)).unwrap().permissions().mode() & 0o777;
+        let Some(env) = create("private", 0o700) else {
+            return;
+        };
+        assert_eq!(env["ok"], true, "{env}");
+        assert_eq!(mode("private"), 0o700);
+        assert_eq!(create("shared", 0o775).unwrap()["ok"], true);
+        assert_eq!(mode("shared"), 0o775, "the umask must not cut the mode");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn embedded_helper_list_names_lists_without_a_stat() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".terax-copy-x9Kq2_Lm")).unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join(".env"), b"").unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"").unwrap();
+        std::os::unix::fs::symlink("gone", dir.path().join("dead")).unwrap();
+        let no_stat = [
+            "import os",
+            "def _no_stat(*a, **k): raise OSError('list_names must not stat')",
+            "os.stat = os.lstat = os.scandir = _no_stat",
+            "",
+        ]
+        .join("\n");
+        let request =
+            serde_json::json!({ "op": "list_names", "path": dir.path().to_string_lossy() });
+        let Some(env) = run_helper(&no_stat, &request) else {
+            return;
+        };
+        assert_eq!(env["ok"], true, "{env}");
+        let mut names: Vec<&str> = env["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|name| name.as_str().unwrap())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, [".env", "a.txt", "dead", "sub"]);
+    }
+
     /// Runs the SSH copy loop against `respond` instead of a host and returns
     /// the result with every request it sent.
     fn stub_copy(
@@ -2358,7 +2432,7 @@ Host !secret prod
 
     fn healthy(request: &serde_json::Value) -> RemoteReply {
         Ok(match request["op"].as_str() {
-            Some("read_dir") => serde_json::json!([]),
+            Some("list_names") => serde_json::json!([]),
             Some("mkstage") => serde_json::json!(format!(
                 "{}{}stub_9Xk",
                 request["path"].as_str().unwrap(),
@@ -2469,7 +2543,7 @@ Host !secret prod
         ];
         for listing in listings {
             let (result, requests) = stub_copy(&sources, |request| {
-                if request["op"] == "read_dir" {
+                if request["op"] == "list_names" {
                     return listing();
                 }
                 if request["op"] == "publish" && request["to"] == "/remote/a.txt" {
@@ -2487,8 +2561,8 @@ Host !secret prod
                 .collect();
             assert_eq!(targets, ["/remote/a.txt", "/remote/a copy.txt"]);
             assert_eq!(
-                ops(&requests, &["read_dir", "publish"]),
-                ["publish", "read_dir", "read_dir", "publish"]
+                ops(&requests, &["list_names", "publish"]),
+                ["publish", "list_names", "list_names", "publish"]
             );
         }
     }
@@ -2499,7 +2573,7 @@ Host !secret prod
         let sources = local_sources(src.path(), &["a.txt"]);
         let mut listings = 0;
         let (result, requests) = stub_copy(&sources, |request| {
-            if request["op"] == "read_dir" {
+            if request["op"] == "list_names" {
                 listings += 1;
                 if listings == 1 {
                     return Err(RemoteError::Failed(
@@ -2516,8 +2590,8 @@ Host !secret prod
             ["/remote/a.txt", "/remote/a copy 2.txt"]
         );
         assert_eq!(
-            ops(&requests, &["read_dir", "publish"]),
-            ["publish", "read_dir", "read_dir", "publish"]
+            ops(&requests, &["list_names", "publish"]),
+            ["publish", "list_names", "list_names", "publish"]
         );
     }
 
@@ -2526,7 +2600,7 @@ Host !secret prod
         let src = tempfile::tempdir().unwrap();
         let sources = local_sources(src.path(), &["a.txt", "b.txt"]);
         let (result, requests) = stub_copy(&sources, |request| {
-            if request["op"] == "read_dir" {
+            if request["op"] == "list_names" {
                 return Err(RemoteError::Failed("Permission denied".into()));
             }
             if request["op"] == "publish" {
@@ -2545,7 +2619,7 @@ Host !secret prod
             ]
         );
         assert_eq!(
-            requests.iter().filter(|r| r["op"] == "read_dir").count(),
+            requests.iter().filter(|r| r["op"] == "list_names").count(),
             LISTING_ATTEMPTS
         );
         let targets = publish_targets(&requests);
@@ -2562,14 +2636,7 @@ Host !secret prod
     }
 
     fn listing(names: &[&str]) -> RemoteReply {
-        Ok(names
-            .iter()
-            .map(|name| {
-                serde_json::json!({
-                    "name": name, "kind": "file", "size": 3, "mtime": 0, "gitignored": false,
-                })
-            })
-            .collect())
+        Ok(serde_json::json!(names))
     }
 
     fn publish_targets(requests: &[serde_json::Value]) -> Vec<&serde_json::Value> {
@@ -2599,18 +2666,18 @@ Host !secret prod
         let src = tempfile::tempdir().unwrap();
         let sources = local_sources(src.path(), &["readme.md"]);
         let (result, requests) = stub_copy(&sources, |request| {
-            if request["op"] == "read_dir" {
+            if request["op"] == "list_names" {
                 return listing(&["README.md"]);
             }
             healthy(request)
         });
         assert_eq!(result.unwrap().created, ["/remote/readme.md"]);
         assert_eq!(publish_targets(&requests), ["/remote/readme.md"]);
-        assert!(!requests.iter().any(|r| r["op"] == "read_dir"));
+        assert!(!requests.iter().any(|r| r["op"] == "list_names"));
 
         // A case-insensitive host refuses the variant in the publish itself.
         let (result, requests) = stub_copy(&sources, |request| {
-            if request["op"] == "read_dir" {
+            if request["op"] == "list_names" {
                 return listing(&["README.md"]);
             }
             if request["op"] == "publish" && request["to"] == "/remote/readme.md" {
@@ -2626,12 +2693,12 @@ Host !secret prod
             ["/remote/readme.md", "/remote/readme copy.md"]
         );
         assert_eq!(
-            ops(&requests, &["read_dir", "publish"]),
-            ["publish", "read_dir", "publish"]
+            ops(&requests, &["list_names", "publish"]),
+            ["publish", "list_names", "publish"]
         );
 
         let (result, requests) = stub_copy(&sources, |request| {
-            if request["op"] == "read_dir" {
+            if request["op"] == "list_names" {
                 return listing(&["readme.md", "readme copy.md"]);
             }
             refuse(&["/remote/readme.md"], request).unwrap_or_else(|| healthy(request))
@@ -2674,7 +2741,7 @@ Host !secret prod
         let src = tempfile::tempdir().unwrap();
         let sources = local_sources(src.path(), &["a.txt", "b.txt"]);
         let (result, requests) = stub_copy(&sources, |request| {
-            if request["op"] == "read_dir" {
+            if request["op"] == "list_names" {
                 return listing(&["a.txt", "b.txt"]);
             }
             refuse(&["/remote/a.txt", "/remote/b.txt"], request).unwrap_or_else(|| healthy(request))
@@ -2687,7 +2754,10 @@ Host !secret prod
             publish_targets(&requests),
             ["/remote/a.txt", "/remote/a copy.txt", "/remote/b copy.txt"]
         );
-        assert_eq!(requests.iter().filter(|r| r["op"] == "read_dir").count(), 1);
+        assert_eq!(
+            requests.iter().filter(|r| r["op"] == "list_names").count(),
+            1
+        );
     }
 
     #[test]
@@ -2754,6 +2824,29 @@ Host !secret prod
         assert!(dirs.iter().all(|r| r["parents"] == false), "{dirs:?}");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn upload_folders_carry_the_source_mode_and_owner_access() {
+        use std::os::unix::fs::PermissionsExt;
+        let src = tempfile::tempdir().unwrap();
+        let pkg = src.path().join("pkg");
+        std::fs::create_dir_all(pkg.join("locked")).unwrap();
+        let set = |path: &std::path::Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        set(&pkg.join("locked"), 0o555);
+        set(&pkg, 0o700);
+        let (result, requests) = stub_copy(&[pkg.to_string_lossy().into_owned()], healthy);
+        set(&pkg.join("locked"), 0o755);
+        assert_eq!(result.unwrap().created, ["/remote/pkg"]);
+        let modes: Vec<Option<u64>> = requests
+            .iter()
+            .filter(|r| r["op"] == "create_dir")
+            .map(|r| r["mode"].as_u64())
+            .collect();
+        assert_eq!(modes, [Some(0o700), Some(0o755)]);
+    }
+
     #[test]
     fn control_steps_run_on_a_budget_but_uploads_do_not() {
         let src = tempfile::tempdir().unwrap();
@@ -2786,7 +2879,7 @@ Host !secret prod
             ("create_dir", control),
             ("write_bytes", None),
             ("publish", control),
-            ("read_dir", control),
+            ("list_names", control),
             ("publish", control),
             ("delete", control),
         ];
@@ -2824,6 +2917,57 @@ Host !secret prod
                 assert_eq!(message, "the remote helper could not start: MemoryError")
             }
             other => panic!("exit 1 without an answer must stop the batch: {other:?}"),
+        }
+        match exit_error(Some(127), "bash: python3: command not found") {
+            RemoteError::Transport(message) => assert_eq!(
+                message,
+                "python3 isn't installed on the host; the remote file browser requires it."
+            ),
+            other => panic!("a missing python3 must stop the batch: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn only_ssh_itself_reads_stderr_as_an_ssh_failure() {
+        let denied = "PermissionError: [Errno 13] Permission denied: '/srv/x'";
+        let answered =
+            br#"__TERAX_JSON__{"ok": false, "error": "[Errno 13] Permission denied: '/srv/x'"}"#;
+        match read_envelope(Some(1), answered, false, denied) {
+            Err(RemoteError::Failed(message)) => {
+                assert_eq!(message, "[Errno 13] Permission denied: '/srv/x'")
+            }
+            other => panic!("an answered error must fail only the item: {other:?}"),
+        }
+        match read_envelope(Some(137), b"", false, "Permission denied") {
+            Err(RemoteError::Failed(message)) => assert_eq!(
+                message,
+                "remote helper exited with status 137 (stderr: Permission denied)"
+            ),
+            other => panic!("137 must fail only the item: {other:?}"),
+        }
+        match read_envelope(Some(255), answered, false, "Permission denied (publickey).") {
+            Err(RemoteError::Transport(message)) => {
+                assert!(
+                    message.starts_with("SSH authentication failed"),
+                    "{message}"
+                )
+            }
+            other => panic!("255 is ssh's own failure: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_item_failure_quotes_only_the_last_stderr_line() {
+        let stderr = format!(
+            "{}\nTraceback (most recent call last):\nKilled",
+            "x".repeat(4096)
+        );
+        match exit_error(Some(143), &stderr) {
+            RemoteError::Failed(message) => assert_eq!(
+                message,
+                "remote helper exited with status 143 (stderr: Killed)"
+            ),
+            other => panic!("143 must fail only the item: {other:?}"),
         }
     }
 
@@ -3059,7 +3203,7 @@ Host !secret prod
         let mut plan = Vec::new();
         plan_upload(&ok, &mut plan).unwrap();
         assert_eq!(plan.len(), 129);
-        assert_eq!(plan[0], Upload::Dir(String::new()));
+        assert!(matches!(&plan[0], Upload::Dir { rel, .. } if rel.is_empty()));
         let err = plan_upload(&deep, &mut Vec::new()).unwrap_err();
         assert_eq!(err.to_string(), "folder nesting exceeds the copy limit");
 

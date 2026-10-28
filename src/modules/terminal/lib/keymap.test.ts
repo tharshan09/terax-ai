@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  isChordLetter,
   isTerminalCopyChord,
   isTerminalPasteChord,
   terminalDeleteSequence,
@@ -239,6 +240,23 @@ describe("isTerminalCopyChord", () => {
         isMac: true,
       }),
     ).toBe(false);
+  });
+});
+
+describe("isChordLetter", () => {
+  it("reads Ctrl+Shift+C/V by the shifted letter on Latin layouts", () => {
+    const shifted = (key: string, code: string) =>
+      evt({ ctrlKey: true, shiftKey: true, key, code });
+    expect(isChordLetter(shifted("C", "KeyC"), "c")).toBe(true);
+    expect(isChordLetter(shifted("V", "KeyV"), "v")).toBe(true);
+    expect(isChordLetter(shifted("J", "KeyC"), "c")).toBe(false);
+    expect(isChordLetter(shifted("C", "KeyI"), "c")).toBe(true);
+  });
+
+  it("falls back to the physical key only on non-Latin layouts", () => {
+    expect(isChordLetter(evt({ key: "С", code: "KeyC" }), "c")).toBe(true);
+    expect(isChordLetter(evt({ key: "М", code: "KeyV" }), "v")).toBe(true);
+    expect(isChordLetter(evt({ key: "М", code: "KeyM" }), "v")).toBe(false);
   });
 });
 

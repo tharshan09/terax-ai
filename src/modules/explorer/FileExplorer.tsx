@@ -548,6 +548,27 @@ export const FileExplorer = memo(
       }
     };
 
+    const renderPasteItem = () =>
+      IS_MAC &&
+      menuScope && (
+        <ContextMenuItem
+          className={COMPACT_ITEM}
+          onSelect={() =>
+            void pasteInto(
+              targetDirFor(
+                menuTarget?.path,
+                () => menuTarget?.isDir,
+                menuScope.rootPath,
+              ),
+              menuScope,
+            )
+          }
+        >
+          Paste
+          <ContextMenuShortcut>⌘V</ContextMenuShortcut>
+        </ContextMenuItem>
+      );
+
     return (
       <div
         ref={containerRef}
@@ -789,24 +810,7 @@ export const FileExplorer = memo(
                   >
                     New Folder
                   </ContextMenuItem>
-                  {IS_MAC && menuScope && (
-                    <ContextMenuItem
-                      className={COMPACT_ITEM}
-                      onSelect={() =>
-                        void pasteInto(
-                          targetDirFor(
-                            menuTarget.path,
-                            () => menuTarget.isDir,
-                            menuScope.rootPath,
-                          ),
-                          menuScope,
-                        )
-                      }
-                    >
-                      Paste
-                      <ContextMenuShortcut>⌘V</ContextMenuShortcut>
-                    </ContextMenuItem>
-                  )}
+                  {renderPasteItem()}
                   <ContextMenuSeparator />
                   <ContextMenuItem
                     className={COMPACT_ITEM}
@@ -876,17 +880,7 @@ export const FileExplorer = memo(
                   >
                     New Folder
                   </ContextMenuItem>
-                  {IS_MAC && menuScope && (
-                    <ContextMenuItem
-                      className={COMPACT_ITEM}
-                      onSelect={() =>
-                        void pasteInto(menuScope.rootPath, menuScope)
-                      }
-                    >
-                      Paste
-                      <ContextMenuShortcut>⌘V</ContextMenuShortcut>
-                    </ContextMenuItem>
-                  )}
+                  {renderPasteItem()}
                   <ContextMenuSeparator />
                   <ContextMenuItem
                     className={COMPACT_ITEM}

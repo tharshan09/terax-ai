@@ -67,9 +67,27 @@ type Handlers = Record<string, (args: unknown) => Promise<unknown>>;
 
 function serve(handlers: Handlers = {}) {
   invoke.mockImplementation((cmd: string, args: unknown) => {
-    if (cmd === "fs_read_dir") return Promise.resolve([]);
-    return handlers[cmd]?.(args) ?? Promise.resolve();
+    const handler = handlers[cmd];
+    if (handler) return handler(args);
+    return Promise.resolve(cmd === "fs_read_dir" ? [] : undefined);
   });
+}
+
+// The virtualizer renders no row while its scroll box measures 0 px high.
+function rowsInView(): () => void {
+  const original = Object.getOwnPropertyDescriptor(
+    HTMLElement.prototype,
+    "offsetHeight",
+  );
+  Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+    configurable: true,
+    get: () => 600,
+  });
+  return () => {
+    if (original)
+      Object.defineProperty(HTMLElement.prototype, "offsetHeight", original);
+    else Reflect.deleteProperty(HTMLElement.prototype, "offsetHeight");
+  };
 }
 
 function explorer(rootPath: string) {
@@ -127,6 +145,45 @@ describe("FileExplorer paste and drop scope", () => {
       }),
     );
     await settle();
+  });
+
+  it("pastes from a row menu into that folder, or beside that file", async () => {
+    const restore = rowsInView();
+    try {
+      const entry = (name: string, kind: "dir" | "file") => ({
+        name,
+        kind,
+        size: 0,
+        mtime: 0,
+        gitignored: false,
+      });
+      serve({
+        fs_read_dir: (args) =>
+          Promise.resolve(
+            (args as { path: string }).path === "/a"
+              ? [entry("d", "dir"), entry("f.txt", "file")]
+              : [],
+          ),
+        fs_clipboard_paths: () =>
+          Promise.resolve({ paths: ["/x/n.txt"], unresolved: 0 }),
+        fs_copy: () => Promise.resolve({ created: [], failed: [] }),
+      });
+      const copiedInto = () =>
+        invoke.mock.calls
+          .filter(([cmd]) => cmd === "fs_copy")
+          .map(([, args]) => (args as { destDir: string }).destDir);
+      render(explorer("/a"));
+      for (const row of ["f.txt", "d"]) {
+        const before = copiedInto().length;
+        fireEvent.contextMenu(await screen.findByText(row));
+        fireEvent.click(await screen.findByText("Paste"));
+        await vi.waitFor(() => expect(copiedInto()).toHaveLength(before + 1));
+        await settle();
+      }
+      expect(copiedInto()).toEqual(["/a", "/a/d"]);
+    } finally {
+      restore();
+    }
   });
 
   it("neither copies nor changes the tree when the menu was opened on another root", async () => {

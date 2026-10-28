@@ -11,11 +11,6 @@ export function dirname(path: string): string {
   return path.slice(0, i);
 }
 
-// Not `@/lib/utils` basename: that one also splits at `\`, which a key's name may hold.
-export function basename(path: string): string {
-  return path.slice(path.lastIndexOf("/") + 1);
-}
-
 // The folder a row stands for when something lands on it: paste, drop or move.
 export function targetDirFor<Root extends string | null>(
   row: string | null | undefined,
