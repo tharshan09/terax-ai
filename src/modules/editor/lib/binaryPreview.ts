@@ -2,8 +2,6 @@
 // pure module so the security-load-bearing decision (when the sandbox-less PDF
 // iframe may render) is unit-testable without mounting CodeMirror.
 
-import type { WorkspaceEnv } from "@/modules/workspace";
-
 export const IMAGE_EXTS = new Set([
   "png",
   "jpg",
@@ -47,14 +45,6 @@ export function remoteImageMime(ext: string): string | null {
   return REMOTE_IMAGE_MIME.get(ext) ?? null;
 }
 
-/**
- * The asset protocol serves only local files, so an image in an SSH workspace
- * is read as bytes over the remote helper instead of via `convertFileSrc`.
- */
-export function readsImageRemotely(ext: string, env: WorkspaceEnv): boolean {
-  return env.kind === "ssh" && IMAGE_EXTS.has(ext);
-}
-
 export type BinaryPreviewMode =
   | "loading"
   | "image"
@@ -77,17 +67,22 @@ export type BinaryPreviewMode =
  * @param mediaReady  the asset scope + pdf verification for this path have
  *                    settled (i.e. `mediaReadyPath === path`)
  * @param pdfVerified `null` while the `%PDF-` check is pending, else its result
+ * @param overSsh     the file lives on an SSH host, where the asset protocol
+ *                    would serve a same-named local file instead
  */
 export function binaryPreviewMode(
   ext: string,
   mediaReady: boolean,
   pdfVerified: boolean | null,
+  overSsh: boolean,
 ): BinaryPreviewMode {
   const isImage = IMAGE_EXTS.has(ext);
   const isVideo = VIDEO_EXTS.has(ext);
   const isAudio = AUDIO_EXTS.has(ext);
   const isPdf = ext === "pdf";
   const isMedia = isImage || isVideo || isAudio || isPdf;
+  // Only images have a remote read path; they never wait on the asset scope.
+  if (overSsh) return isImage ? "image" : "card";
   // Hold the loader until the asset scope (and, for a pdf, the magic-byte
   // verification) has settled, so the iframe never flashes for an unverified
   // pdf.

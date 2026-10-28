@@ -374,13 +374,14 @@ def read_file(req):
 
 def read_bytes(req):
     # Reads the resolved target and reports it, so the caller can refuse a
-    # symlink to a secret; regular files only, so a FIFO never blocks.
-    path = os.path.expanduser(req["path"]); limit = req.get("limit", MAX_READ)
+    # symlink to a secret; O_NONBLOCK keeps a FIFO swapped in from blocking.
+    path = os.path.expanduser(req["path"])
+    limit = min(int(req.get("limit", MAX_READ)), MAX_READ)
     real = os.path.realpath(path)
     if not S_ISREG(os.stat(real).st_mode):
         raise ValueError("not a regular file: " + path)
-    fd = os.open(real, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    with os.fdopen(fd, "rb") as f:
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    with os.fdopen(os.open(real, flags), "rb") as f:
         st = os.fstat(f.fileno())
         if not S_ISREG(st.st_mode):
             raise ValueError("not a regular file: " + path)
@@ -2253,6 +2254,86 @@ Host !secret prod
         let ok = parse_read_bytes(serde_json::json!({ "real": "/x/a.png", "b64": "Zm9v" }))
             .unwrap();
         assert_eq!((ok.resolved_path.as_str(), ok.bytes.as_slice()), ("/x/a.png", &b"foo"[..]));
+    }
+
+    #[test]
+    fn the_largest_read_bytes_reply_fits_under_the_stdout_cap() {
+        let cap = crate::modules::fs::file::MAX_READ_BYTES;
+        assert!(
+            REMOTE_PYTHON.contains(&format!("\nMAX_READ = {} * 1024 * 1024\n", cap >> 20)),
+            "the helper cap must match MAX_READ_BYTES"
+        );
+        // A PATH_MAX `real` escaped at 6 bytes per byte (\uXXXX), plus keys and sentinel.
+        let path = 4096 * 6;
+        let envelope = TERAX_SENTINEL.len() + r#"{"ok": true, "data": {"real": "", "b64": ""}}"#.len();
+        let b64 = b64encode(&vec![0; usize::try_from(cap).unwrap()]).len();
+        let reply = b64 + path + envelope;
+        assert!(reply < MAX_REMOTE_STDOUT, "{reply} >= {MAX_REMOTE_STDOUT}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn embedded_helper_read_bytes_clamps_the_limit_to_the_cap() {
+        let cap = usize::try_from(crate::modules::fs::file::MAX_READ_BYTES).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let over = dir.path().join("over.png");
+        std::fs::write(&over, vec![0u8; cap + 1]).unwrap();
+        let req = serde_json::json!({
+            "op": "read_bytes", "path": over.to_string_lossy(), "limit": cap * 2,
+        });
+        let Some(env) = run_helper("", &req) else {
+            return;
+        };
+        assert_eq!(env["ok"], serde_json::Value::Bool(false));
+        assert!(env["error"].as_str().unwrap().contains("too large"), "{env}");
+
+        let full = dir.path().join("full.png");
+        std::fs::write(&full, vec![0u8; cap]).unwrap();
+        let req = serde_json::json!({ "op": "read_bytes", "path": full.to_string_lossy() });
+        let (code, stdout, stderr) = helper_output("", &req).unwrap();
+        assert_eq!(code, Some(0), "{stderr}");
+        assert!(stdout.len() < MAX_REMOTE_STDOUT, "{} bytes", stdout.len());
+        let i = find_subslice(&stdout, TERAX_SENTINEL).expect("sentinel present");
+        let env: serde_json::Value = serde_json::from_slice(&stdout[i + TERAX_SENTINEL.len()..]).unwrap();
+        assert_eq!(env["ok"], serde_json::Value::Bool(true));
+        assert_eq!(parse_read_bytes(env["data"].clone()).unwrap().bytes.len(), cap);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn embedded_helper_read_bytes_refuses_a_swapped_in_fifo_without_blocking() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe.png");
+        let c_path = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        // The stat still sees a regular file, as if the FIFO replaced it after.
+        let prelude = [
+            "import os",
+            "_stat = os.stat",
+            "class _Regular: st_mode = 0o100600; st_size = 0",
+            "os.stat = lambda p, *a, **k: _Regular() if str(p).endswith('pipe.png') else _stat(p, *a, **k)",
+            "",
+        ]
+        .join("\n");
+        // A blocked open is released by a writer after 3 s, so a regression fails, not hangs.
+        let writer_path = fifo.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(writer_path);
+        });
+
+        let started = std::time::Instant::now();
+        let req = serde_json::json!({ "op": "read_bytes", "path": fifo.to_string_lossy() });
+        let Some(env) = run_helper(&prelude, &req) else {
+            return;
+        };
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "the open blocked");
+        assert_eq!(env["ok"], serde_json::Value::Bool(false));
+        assert!(env["error"].as_str().unwrap().contains("not a regular file"), "{env}");
     }
 
     #[test]
