@@ -6,6 +6,7 @@ import {
   pasteKeyAction,
   pasteTargetDir,
   pendingPasteAction,
+  reportCopyFailures,
   rereadUnlessWatched,
 } from "@/modules/explorer/lib/clipboardPaste";
 import { dirname } from "@/modules/explorer/lib/useFileTree";
@@ -34,6 +35,12 @@ describe("pasteTargetDir", () => {
     const selected = "/ws/a.md";
     expect(pasteTargetDir(selected, isDir, "/ws")).toBe("/ws");
     expect(pasteTargetDir("/ws/b", () => true, "/ws")).toBe("/ws/b");
+  });
+
+  it("gives drop and move the same folder for a row, the root without one", () => {
+    expect(pasteTargetDir("/ws/docs/x.md", isDir, null)).toBe("/ws/docs");
+    expect(pasteTargetDir(undefined, isDir, "/ws")).toBe("/ws");
+    expect(pasteTargetDir("", isDir, null)).toBeNull();
   });
 
   it.each([
@@ -181,6 +188,34 @@ describe("isPasteShortcut", () => {
     expect(
       pasteKeyAction({ ...key({ ctrlKey: true }), repeat: false }, true),
     ).toBeNull();
+  });
+});
+
+describe("reportCopyFailures", () => {
+  it("names the lost connection instead of the first failed item", () => {
+    const lost =
+      "SSH request to 'h' timed out after 30s (budget) and was killed: publish";
+    reportCopyFailures({
+      created: ["/ws/a.txt"],
+      failed: [
+        { source: "/x/b", message: "Permission denied" },
+        { source: "/x/c", message: lost },
+        { source: "/x/d", message: lost },
+      ],
+      aborted: lost,
+    });
+    expect(toast.error).toHaveBeenCalledWith("Could not copy 3 items", {
+      description: lost,
+    });
+
+    reportCopyFailures({
+      created: [],
+      failed: [{ source: "/x/b", message: "Permission denied" }],
+      aborted: null,
+    });
+    expect(toast.error).toHaveBeenLastCalledWith("Could not copy 1 item", {
+      description: "/x/b: Permission denied",
+    });
   });
 });
 

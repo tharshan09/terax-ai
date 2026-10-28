@@ -4,10 +4,10 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   type CopyResult,
+  pasteTargetDir,
   reportCopyFailures,
 } from "@/modules/explorer/lib/clipboardPaste";
 import { currentWorkspaceEnv } from "@/modules/workspace";
-import { dirname } from "./useFileTree";
 
 type Options = {
   rootPath: string | null;
@@ -33,10 +33,8 @@ function dirAt(
   const el = document.elementFromPoint(lx, ly) as HTMLElement | null;
   if (!el) return null;
   const row = el.closest<HTMLElement>("[data-fs-path]");
-  if (row) {
-    const p = row.getAttribute("data-fs-path") as string;
-    return isDir(p) ? p : dirname(p);
-  }
+  if (row)
+    return pasteTargetDir(row.getAttribute("data-fs-path"), isDir, rootPath);
   if (el.closest("[data-explorer-drop]")) return rootPath;
   return null;
 }

@@ -8,11 +8,12 @@ import {
 import type { WorkspaceEnv } from "@/modules/workspace";
 import { dirname } from "./useFileTree";
 
-export function pasteTargetDir(
-  selected: string | null,
+// The folder a row stands for when something lands on it: paste, drop or move.
+export function pasteTargetDir<Root extends string | null>(
+  selected: string | null | undefined,
   isDir: (path: string) => boolean | undefined,
-  rootPath: string,
-): string {
+  rootPath: Root,
+): string | Root {
   if (!selected) return rootPath;
   return isDir(selected) ? selected : dirname(selected);
 }
@@ -72,6 +73,7 @@ export function pendingPasteAction(
 export type CopyResult = {
   created: string[];
   failed: { source: string; message: string }[];
+  aborted?: string | null;
 };
 
 type PasteOptions = {
@@ -93,12 +95,13 @@ export function rereadUnlessWatched(
   if (!isWatched(dir)) refresh(dir);
 }
 
+// A lost connection explains every failure after it, so it beats the first one.
 export function reportCopyFailures(result: CopyResult): void {
   if (result.failed.length === 0) return;
   const first = result.failed[0];
   const count = result.failed.length;
   toast.error(`Could not copy ${count} ${count === 1 ? "item" : "items"}`, {
-    description: `${first.source}: ${first.message}`,
+    description: result.aborted ?? `${first.source}: ${first.message}`,
   });
 }
 

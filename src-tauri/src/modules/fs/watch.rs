@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::modules::fs::copy::is_staging_name;
 use crate::modules::fs::to_canon;
@@ -90,15 +90,33 @@ fn is_skipped(path: &Path) -> bool {
         .is_some_and(|n| SKIP_DIRS.contains(&n))
 }
 
+type Watched<'a> = dyn Fn(&Path) -> bool + 'a;
+
 // A copy in progress is invisible; only its publish under the real name is news.
-fn in_staging(path: &Path) -> bool {
-    path.components()
+// Only names below the watched folder count: the folder may sit under such a name.
+fn in_staging(path: &Path, watched: &Watched) -> bool {
+    let below = path
+        .ancestors()
+        .find(|dir| watched(dir))
+        .and_then(|dir| path.strip_prefix(dir).ok())
+        .unwrap_or(path);
+    below
+        .components()
         .any(|c| c.as_os_str().to_str().is_some_and(is_staging_name))
 }
 
 #[derive(Default)]
 pub struct FsWatchState {
     inner: Mutex<Option<WatchInner>>,
+}
+
+impl FsWatchState {
+    fn watches(&self, dir: &Path) -> bool {
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .as_ref()
+            .is_some_and(|inner| inner.refcounts.contains_key(dir))
+    }
 }
 
 struct WatchInner {
@@ -142,6 +160,8 @@ fn ensure_started(state: &FsWatchState, app: &AppHandle) -> Result<(), String> {
 }
 
 fn drain_loop(rx: mpsc::Receiver<notify::Result<Event>>, app: AppHandle) {
+    let state = app.state::<FsWatchState>();
+    let watched = |dir: &Path| state.watches(dir);
     loop {
         let first = match rx.recv() {
             Ok(ev) => ev,
@@ -149,13 +169,13 @@ fn drain_loop(rx: mpsc::Receiver<notify::Result<Event>>, app: AppHandle) {
         };
 
         let mut paths: HashSet<String> = HashSet::new();
-        collect(&mut paths, first);
+        collect(&mut paths, first, &watched);
 
         let deadline = Instant::now() + MAX_WINDOW;
         loop {
             let timeout = DEBOUNCE.min(deadline.saturating_duration_since(Instant::now()));
             match rx.recv_timeout(timeout) {
-                Ok(ev) => collect(&mut paths, ev),
+                Ok(ev) => collect(&mut paths, ev, &watched),
                 Err(RecvTimeoutError::Timeout) => break,
                 Err(RecvTimeoutError::Disconnected) => return,
             }
@@ -176,12 +196,12 @@ fn drain_loop(rx: mpsc::Receiver<notify::Result<Event>>, app: AppHandle) {
     }
 }
 
-fn collect(set: &mut HashSet<String>, ev: notify::Result<Event>) {
+fn collect(set: &mut HashSet<String>, ev: notify::Result<Event>, watched: &Watched) {
     let Ok(ev) = ev else { return };
     if matches!(ev.kind, EventKind::Access(_)) {
         return;
     }
-    for p in ev.paths.iter().filter(|p| !in_staging(p)) {
+    for p in ev.paths.iter().filter(|p| !in_staging(p, watched)) {
         set.insert(to_canon(p));
     }
 }
@@ -311,9 +331,14 @@ mod tests {
         assert!(!is_skipped(Path::new("/a/node_modules/pkg")));
     }
 
+    fn watching(dir: &'static str) -> impl Fn(&Path) -> bool {
+        move |path| path == Path::new(dir)
+    }
+
     #[test]
     fn collect_ignores_access_and_dedups() {
         let mut set = HashSet::new();
+        let watched = watching("/a");
         collect(
             &mut set,
             Ok(Event {
@@ -321,6 +346,7 @@ mod tests {
                 paths: vec![PathBuf::from("/a/x")],
                 attrs: Default::default(),
             }),
+            &watched,
         );
         assert!(set.is_empty());
 
@@ -331,8 +357,8 @@ mod tests {
                 attrs: Default::default(),
             })
         };
-        collect(&mut set, modify());
-        collect(&mut set, modify());
+        collect(&mut set, modify(), &watched);
+        collect(&mut set, modify(), &watched);
         assert_eq!(set.len(), 1);
     }
 
@@ -366,21 +392,24 @@ mod tests {
         assert_eq!(inner.refcounts.len(), 1);
     }
 
+    fn event(kind: EventKind, paths: &[&str]) -> notify::Result<Event> {
+        Ok(Event {
+            kind,
+            paths: paths.iter().map(PathBuf::from).collect(),
+            attrs: Default::default(),
+        })
+    }
+
     #[test]
     fn staging_comings_and_goings_raise_no_change_but_the_publish_does() {
         use notify::event::{CreateKind, ModifyKind, RemoveKind, RenameMode};
-        let event = |kind: EventKind, paths: &[&str]| -> notify::Result<Event> {
-            Ok(Event {
-                kind,
-                paths: paths.iter().map(PathBuf::from).collect(),
-                attrs: Default::default(),
-            })
-        };
+        let watched = watching("/ws");
         let mut set = HashSet::new();
         let staging = "/ws/.terax-copy-ab12";
         collect(
             &mut set,
             event(EventKind::Create(CreateKind::Folder), &[staging]),
+            &watched,
         );
         collect(
             &mut set,
@@ -388,10 +417,12 @@ mod tests {
                 EventKind::Create(CreateKind::File),
                 &["/ws/.terax-copy-ab12/item"],
             ),
+            &watched,
         );
         collect(
             &mut set,
             event(EventKind::Remove(RemoveKind::Folder), &[staging]),
+            &watched,
         );
         assert!(set.is_empty());
 
@@ -401,7 +432,36 @@ mod tests {
                 EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
                 &["/ws/.terax-copy-ab12/item", "/ws/a copy.txt"],
             ),
+            &watched,
         );
         assert_eq!(set, HashSet::from([to_canon("/ws/a copy.txt")]));
+    }
+
+    #[test]
+    fn a_watched_folder_below_a_staging_name_still_reports_its_changes() {
+        use notify::event::CreateKind;
+        let root = "/x/.terax-copy-old/proj";
+        let watched = watching(root);
+        let mut set = HashSet::new();
+        for path in [
+            "/x/.terax-copy-old/proj/a.txt",
+            "/x/.terax-copy-old/proj/.terax-copy-ab12",
+            "/x/.terax-copy-old/proj/.terax-copy-ab12/item",
+        ] {
+            collect(
+                &mut set,
+                event(EventKind::Create(CreateKind::Any), &[path]),
+                &watched,
+            );
+        }
+        collect(
+            &mut set,
+            event(EventKind::Create(CreateKind::Folder), &[root]),
+            &watched,
+        );
+        assert_eq!(
+            set,
+            HashSet::from([to_canon("/x/.terax-copy-old/proj/a.txt"), to_canon(root)])
+        );
     }
 }

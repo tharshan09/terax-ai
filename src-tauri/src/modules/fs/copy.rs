@@ -1,7 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt::Display;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 use tauri::Manager;
@@ -33,6 +33,8 @@ pub(crate) fn not_staging(dent: &ignore::DirEntry) -> bool {
 pub struct CopyResult {
     pub created: Vec<String>,
     pub failed: Vec<CopyFailure>,
+    /// Why the batch stopped early (the connection), when it did.
+    pub aborted: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -120,7 +122,7 @@ pub(crate) struct Source<'a> {
 }
 
 /// The kind is unfollowed, so each branch decides what a symlink source means.
-/// A plain source is judged once here; its entries only when it is `linked`.
+/// A plain source is read, so it is judged here; a link only where it is read.
 pub(crate) fn check_source<'a>(
     src: &'a Path,
     registry: &WorkspaceRegistry,
@@ -135,12 +137,40 @@ pub(crate) fn check_source<'a>(
     if !(kind.is_file() || kind.is_dir() || kind.is_symlink()) {
         return Err(unsupported_kind());
     }
-    let linked = kind.is_symlink() || to_canon(guard_read(registry, src)?) != to_canon(src);
+    let linked = kind.is_symlink() || behind_link(src, &guard_read(registry, src)?);
     Ok(Source {
         name,
         is_dir: kind.is_dir(),
         linked,
     })
+}
+
+/// A link on the way renames a folder of `src`. Spelling (case, Unicode form)
+/// and a top-level alias such as /tmp -> /private/tmp keep every name.
+fn behind_link(src: &Path, canonical: &Path) -> bool {
+    let mut real = canonical.components().rev();
+    for raw in src.ancestors() {
+        match raw.components().next_back() {
+            Some(Component::Normal(name)) => match real.next() {
+                Some(Component::Normal(real_name)) if same_name(raw, name, real_name) => {}
+                _ => return true,
+            },
+            Some(Component::ParentDir | Component::CurDir) => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
+// No protected name is non-ASCII, so a real entry under another Unicode form passes.
+fn same_name(raw: &Path, name: &OsStr, real: &OsStr) -> bool {
+    match (name.to_str(), real.to_str()) {
+        (Some(a), Some(b)) if a.to_lowercase() == b.to_lowercase() => true,
+        (Some(a), Some(b)) if !a.is_ascii() && !b.is_ascii() => {
+            std::fs::symlink_metadata(raw).is_ok_and(|m| !m.file_type().is_symlink())
+        }
+        _ => name == real,
+    }
 }
 
 // SECURITY: a paste is an explicit user action, so copies follow the editor's
@@ -1079,6 +1109,63 @@ mod tests {
             "refused: path is inside a protected directory (appdata/roaming/gcloud)"
         );
         assert!(names(&dest).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_workspace_link_to_an_outside_target_is_copied_as_a_link() {
+        let ws = tempfile::tempdir().unwrap();
+        let opt = tempfile::tempdir().unwrap();
+        let tool = opt.path().join("tool");
+        std::fs::create_dir(&tool).unwrap();
+        std::fs::create_dir(ws.path().join("src")).unwrap();
+        std::os::unix::fs::symlink(&tool, ws.path().join("src/tool")).unwrap();
+        let dest = ws.path().join("dest");
+        std::fs::create_dir(&dest).unwrap();
+
+        let result = copy_batch(
+            vec![s(ws.path().join("src/tool"))],
+            &s(&dest),
+            &WorkspaceEnv::Local,
+            &reg_for(ws.path()),
+            true,
+        )
+        .unwrap();
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        assert_eq!(result.created, [s(dest.join("tool"))]);
+        let copied = dest.join("tool");
+        assert!(std::fs::symlink_metadata(&copied)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_link(&copied).unwrap(), tool);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_link_on_the_way_marks_a_source_as_linked() {
+        let tmp = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+        assert!(tmp.path().starts_with("/tmp"));
+        let dir = tmp.path().join("Dir");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::os::unix::fs::symlink(&dir, tmp.path().join("alias")).unwrap();
+        let cafe = tmp.path().join("Caf\u{e9}");
+        std::fs::create_dir(&cafe).unwrap();
+        let reg = WorkspaceRegistry::default();
+        let linked = |path: PathBuf| check_source(&path, &reg).unwrap().linked;
+
+        assert!(!linked(dir.clone()));
+        assert!(!linked(dir.join("sub")));
+        let shouted = tmp.path().join("DIR");
+        if shouted.exists() {
+            assert!(!linked(shouted));
+        }
+        let decomposed = tmp.path().join("Cafe\u{301}");
+        if decomposed.exists() {
+            assert!(!linked(decomposed));
+        }
+        assert!(linked(tmp.path().join("alias")));
+        assert!(linked(tmp.path().join("alias/sub")));
     }
 
     #[test]

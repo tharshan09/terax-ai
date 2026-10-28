@@ -680,7 +680,8 @@ const MAX_REMOTE_STDOUT: usize = 16 * 1024 * 1024;
 pub const REMOTE_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
 
 /// Per-call budget for **user-triggered remote FS reads** (`fs_read_dir`,
-/// `fs_read_file`, `fs_canonicalize`, `fs_stat`). Generous, because a healthy
+/// `fs_read_file`, `fs_canonicalize`, `fs_stat`) and the control steps of a
+/// copy (folders, publish, cleanup, listing). Generous, because a healthy
 /// but slow transfer must not be truncated; it still bounds a wedged host so a
 /// single open can't hang forever. Only the remote path carries this — local FS
 /// ops get no kill-timeout (they just run off the main thread).
@@ -1270,7 +1271,7 @@ enum Upload {
 }
 
 /// Walks the local source once before any remote call, so an item that cannot
-/// be uploaded fails without touching the host. `check_source` judged the root.
+/// be uploaded fails without touching the host. `check_source` judged a plain root.
 fn plan_upload(
     src: &std::path::Path,
     rel: String,
@@ -1324,21 +1325,38 @@ fn plan_upload(
     Ok(())
 }
 
+/// Every upload gets this long on top of its transfer time.
+const UPLOAD_BASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// The slowest link an upload is still allowed to crawl over.
+const UPLOAD_MIN_BYTES_PER_SEC: u64 = 256 * 1024;
+
+fn upload_timeout(sent_bytes: usize) -> std::time::Duration {
+    let transfer = (sent_bytes as u64).div_ceil(UPLOAD_MIN_BYTES_PER_SEC);
+    UPLOAD_BASE_TIMEOUT.saturating_add(std::time::Duration::from_secs(transfer))
+}
+
+// A killed step only leaves a half-written item in the hidden staging.
 fn upload(run: &mut RemoteRun, plan: &[Upload], item: &str) -> Result<(), RemoteError> {
     for step in plan {
-        let request = match step {
-            Upload::Dir(rel) => serde_json::json!({
-                "op": "create_dir", "path": format!("{item}{rel}"), "parents": false,
-            }),
+        let (request, budget) = match step {
+            Upload::Dir(rel) => (
+                serde_json::json!({
+                    "op": "create_dir", "path": format!("{item}{rel}"), "parents": false,
+                }),
+                REMOTE_FS_TIMEOUT,
+            ),
             Upload::File { src, rel, mode } => {
                 let bytes = std::fs::read(src).map_err(|e| RemoteError::Failed(e.to_string()))?;
-                serde_json::json!({
+                let b64 = b64encode(&bytes);
+                let budget = upload_timeout(b64.len());
+                let request = serde_json::json!({
                     "op": "write_bytes", "path": format!("{item}{rel}"),
-                    "b64": b64encode(&bytes), "mode": mode,
-                })
+                    "b64": b64, "mode": mode,
+                });
+                (request, budget)
             }
         };
-        run(&request, None)?;
+        run(&request, Some(budget))?;
     }
     Ok(())
 }
@@ -1437,6 +1455,7 @@ fn copy_with(
                 result
                     .failed
                     .extend(rest.map(|source| failure(source, &message)));
+                result.aborted = Some(message);
                 break;
             }
             Err(ItemError::PublishLost(message)) => {
@@ -1446,6 +1465,7 @@ fn copy_with(
                 result
                     .failed
                     .extend(rest.map(|source| failure(source, &message)));
+                result.aborted = Some(message);
                 break;
             }
         }
@@ -1503,7 +1523,7 @@ fn copy_one(
     // returns here, before the cleanup below could delete someone else's dir.
     run(
         &serde_json::json!({ "op": "create_dir", "path": staging, "parents": false }),
-        None,
+        Some(REMOTE_FS_TIMEOUT),
     )?;
     let outcome = match upload(run, &plan, &format!("{staging}/{}", copy::STAGED_ITEM)) {
         Ok(()) => publish_staged(
@@ -1522,7 +1542,7 @@ fn copy_one(
     if matches!(outcome, Err(ItemError::Remote(RemoteError::Failed(_)))) {
         if let Err(error) = run(
             &serde_json::json!({ "op": "delete", "path": staging }),
-            None,
+            Some(REMOTE_FS_TIMEOUT),
         ) {
             log::warn!(
                 "ssh copy: could not remove staging {staging}: {}",
@@ -1555,7 +1575,7 @@ fn publish_staged(
             "op": "publish", "from": staged, "to": format!("{dest}/{candidate}"),
             "staging": staging,
         });
-        match run(&request, None) {
+        match run(&request, Some(REMOTE_FS_TIMEOUT)) {
             Ok(_) => {
                 taken.insert(candidate.clone());
                 return Ok(candidate);
@@ -2181,6 +2201,7 @@ Host !secret prod
                 (sources[2].clone(), LOST.to_string()),
             ]
         );
+        assert_eq!(result.aborted.as_deref(), Some(LOST));
 
         let (result, requests) = stub_copy(&sources, drop_on_staging(1));
         assert_eq!(result.unwrap_err(), LOST);
@@ -2193,6 +2214,7 @@ Host !secret prod
         ];
         let result = stub_copy(&mixed, drop_on_staging(1)).0.unwrap();
         assert!(result.created.is_empty());
+        assert_eq!(result.aborted.as_deref(), Some(LOST));
         assert_eq!(
             failures(&result),
             [
@@ -2378,6 +2400,57 @@ Host !secret prod
     }
 
     #[test]
+    fn an_upload_gets_a_minute_plus_its_time_at_256_kib_per_second() {
+        use std::time::Duration;
+        assert_eq!(upload_timeout(0), Duration::from_secs(60));
+        assert_eq!(upload_timeout(1), Duration::from_secs(61));
+        assert_eq!(upload_timeout(256 * 1024), Duration::from_secs(61));
+        assert_eq!(upload_timeout(256 * 1024 + 1), Duration::from_secs(62));
+        assert_eq!(upload_timeout(100 * 1024 * 1024), Duration::from_secs(460));
+        assert!(upload_timeout(usize::MAX) > Duration::from_secs(60));
+    }
+
+    #[test]
+    fn every_copy_step_runs_on_a_budget() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::create_dir(src.path().join("pkg")).unwrap();
+        std::fs::write(src.path().join("pkg/a.txt"), b"a").unwrap();
+        let pkg = src.path().join("pkg").to_string_lossy().into_owned();
+        let mut budgets = Vec::new();
+        let result = copy_with(
+            &mut |request, timeout| {
+                budgets.push((request["op"].as_str().unwrap().to_string(), timeout));
+                if request["op"] == "publish" {
+                    return Err(RemoteError::Failed("Permission denied".into()));
+                }
+                healthy(request)
+            },
+            "stub",
+            &[pkg],
+            "/remote",
+            false,
+            &crate::modules::workspace::WorkspaceRegistry::default(),
+        )
+        .unwrap();
+        assert_eq!(result.failed[0].message, "Permission denied");
+        let control = Some(REMOTE_FS_TIMEOUT);
+        let write = Some(upload_timeout(b64encode(b"a").len()));
+        let expected = [
+            ("read_dir", control),
+            ("create_dir", control),
+            ("create_dir", control),
+            ("write_bytes", write),
+            ("publish", control),
+            ("delete", control),
+        ];
+        let expected: Vec<(String, _)> = expected
+            .into_iter()
+            .map(|(op, budget)| (op.to_string(), budget))
+            .collect();
+        assert_eq!(budgets, expected);
+    }
+
+    #[test]
     fn only_ssh_failures_count_as_transport() {
         let transport =
             |code, stderr| matches!(exit_error(code, stderr), RemoteError::Transport(_));
@@ -2424,6 +2497,7 @@ Host !secret prod
                 "remote helper exited with status 137".to_string()
             )]
         );
+        assert_eq!(result.aborted, None);
         assert_eq!(requests.iter().filter(|r| r["op"] == "delete").count(), 1);
     }
 
@@ -2482,6 +2556,7 @@ Host !secret prod
             let mut expected = vec![(sources[nth - 1].clone(), PUBLISH_LOST.to_string())];
             expected.extend(sources[nth..].iter().map(|s| (s.clone(), LOST.to_string())));
             assert_eq!(failures(&result), expected);
+            assert_eq!(result.aborted.as_deref(), Some(LOST));
             assert_eq!(requests.last().unwrap()["op"], "publish");
             assert!(!requests.iter().any(|r| r["op"] == "delete"));
         }
