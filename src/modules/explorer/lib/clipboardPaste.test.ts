@@ -157,15 +157,42 @@ describe("reportCopyFailures", () => {
       failed: [
         {
           source: "/x/a.txt",
-          message:
-            "connection lost while publishing; the item may already be in place",
+          message: "connection lost while publishing",
+          maybePlaced: true,
         },
-        { source: "/x/b.txt", message: lost },
+        { source: "/x/b.txt", message: lost, maybePlaced: false },
       ],
       aborted: lost,
     });
     expect(toast.error).toHaveBeenCalledWith("Could not copy 2 items", {
       description: "ssh: Connection timed out. a.txt may already be in place.",
+    });
+  });
+
+  it("says so for a stopped helper too, where the batch went on", () => {
+    const stopped = "remote helper stopped while publishing";
+    reportCopyFailures({
+      created: ["/ws/c.txt"],
+      failed: [
+        { source: "/x/a.txt", message: stopped, maybePlaced: true },
+        { source: "/x/b.txt", message: "Permission denied" },
+      ],
+      aborted: null,
+    });
+    expect(toast.error).toHaveBeenLastCalledWith("Could not copy 2 items", {
+      description: `/x/a.txt: ${stopped}. a.txt may already be in place.`,
+    });
+
+    reportCopyFailures({
+      created: [],
+      failed: ["a.txt", "b.txt", "c.txt"].map((name) => ({
+        source: `/x/${name}`,
+        message: stopped,
+        maybePlaced: true,
+      })),
+    });
+    expect(toast.error).toHaveBeenLastCalledWith("Could not copy 3 items", {
+      description: `/x/a.txt: ${stopped}. a.txt and 2 more may already be in place.`,
     });
   });
 

@@ -49,9 +49,12 @@ pub struct CopyResult {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CopyFailure {
     pub source: String,
     pub message: String,
+    /// Cut off while publishing: the item may be in place after all.
+    pub maybe_placed: bool,
 }
 
 /// Failures stay per item so one bad source never sinks the batch. Sources skip
@@ -110,6 +113,7 @@ fn copy_batch(
                 result.failed.push(CopyFailure {
                     source,
                     message: error.to_string(),
+                    maybe_placed: false,
                 });
             }
         }

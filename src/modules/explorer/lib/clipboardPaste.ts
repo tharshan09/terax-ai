@@ -43,7 +43,8 @@ export function pasteKeyAction(
 
 export type CopyResult = {
   created: string[];
-  failed: { source: string; message: string }[];
+  // `maybePlaced`: cut off while publishing, so the item may be in place.
+  failed: { source: string; message: string; maybePlaced?: boolean }[];
   aborted?: string | null;
 };
 
@@ -75,9 +76,12 @@ function missingItems(unresolved: number): string {
     : `${unresolved} copied items no longer exist`;
 }
 
-// Mirrors ssh.rs PUBLISH_LOST: that item's fate is unknown, not failed.
-const PUBLISH_LOST =
-  "connection lost while publishing; the item may already be in place";
+function maybePlacedNote(failed: CopyResult["failed"]): string | null {
+  const placed = failed.filter((f) => f.maybePlaced);
+  if (placed.length === 0) return null;
+  const more = placed.length > 1 ? ` and ${placed.length - 1} more` : "";
+  return `${basename(placed[0].source)}${more} may already be in place.`;
+}
 
 // A lost connection explains every failure after it, so it beats the first one.
 export function reportCopyFailures(result: CopyResult, unresolved = 0): void {
@@ -87,12 +91,9 @@ export function reportCopyFailures(result: CopyResult, unresolved = 0): void {
   const reason =
     result.aborted ??
     (first ? `${first.source}: ${first.message}` : missingItems(unresolved));
-  const lost = result.failed.find((f) => f.message === PUBLISH_LOST);
+  const note = maybePlacedNote(result.failed);
   toast.error(`Could not copy ${count} ${count === 1 ? "item" : "items"}`, {
-    description:
-      lost && result.aborted
-        ? `${reason.replace(/\.$/, "")}. ${basename(lost.source)} may already be in place.`
-        : reason,
+    description: note ? `${reason.replace(/\.$/, "")}. ${note}` : reason,
   });
 }
 

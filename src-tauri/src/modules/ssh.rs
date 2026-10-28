@@ -930,12 +930,13 @@ const SSH_OWN_FAILURE_EXIT: i32 = 255;
 const COMMAND_NOT_FOUND_EXIT: i32 = 127;
 
 /// Last stderr line, where Python puts a start failure (SyntaxError, ImportError).
+/// A shell reporting a killed helper echoes our whole command; that line says nothing.
 fn stderr_excerpt(stderr: &str) -> String {
     let line = stderr
         .lines()
         .rev()
         .map(str::trim)
-        .find(|line| !line.is_empty());
+        .find(|line| !line.is_empty() && !line.contains(HELPER_DECODE));
     line.unwrap_or_default().chars().take(200).collect()
 }
 
@@ -975,12 +976,20 @@ fn exit_error(code: Option<i32>, stderr: &str) -> RemoteError {
     }
 }
 
+const HELPER_DECODE: &str = "| base64 -d)";
+
+// sh, bash and zsh exec a lone command, so a killed helper reaches ssh as exit-signal
+// (255); a trailing `exit`, which fish parses too, keeps the shell to report 128+N.
+fn shell_command(program: &str) -> String {
+    format!("{program}; exit")
+}
+
 /// The helper as one shell-safe argument; it never changes, so it is encoded once.
 fn remote_command() -> &'static str {
     static COMMAND: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     COMMAND.get_or_init(|| {
         let b64 = b64encode(REMOTE_PYTHON.as_bytes());
-        format!("python3 -c \"$(printf %s {b64} | base64 -d)\"")
+        shell_command(&format!("python3 -c \"$(printf %s {b64} {HELPER_DECODE}\""))
     })
 }
 
@@ -1575,7 +1584,8 @@ pub fn copy(
     )
 }
 
-const PUBLISH_LOST: &str = "connection lost while publishing; the item may already be in place";
+const PUBLISH_LOST: &str = "connection lost while publishing";
+const PUBLISH_KILLED: &str = "remote helper stopped while publishing";
 
 /// A publish cut off leaves its item's fate unknown, so it neither rejects the
 /// batch nor counts as created. Only a lost connection also stops the batch.
@@ -1606,6 +1616,11 @@ fn copy_with(
     let failure = |source: &String, message: &str| CopyFailure {
         source: source.clone(),
         message: message.to_string(),
+        maybe_placed: false,
+    };
+    let maybe_placed = |source: &String, message: &str| CopyFailure {
+        maybe_placed: true,
+        ..failure(source, message)
     };
     for (index, source) in sources.iter().enumerate() {
         let item = copy_one(
@@ -1635,7 +1650,7 @@ fn copy_with(
             }
             Err(ItemError::PublishLost(message)) => {
                 log::warn!("ssh copy({source} -> {host}:{dest}) lost while publishing: {message}");
-                result.failed.push(failure(source, PUBLISH_LOST));
+                result.failed.push(maybe_placed(source, PUBLISH_LOST));
                 let rest = sources[index + 1..].iter();
                 result
                     .failed
@@ -1647,7 +1662,7 @@ fn copy_with(
                 log::warn!(
                     "ssh copy({source} -> {host}:{dest}) killed while publishing: {message}"
                 );
-                result.failed.push(failure(source, PUBLISH_LOST));
+                result.failed.push(maybe_placed(source, PUBLISH_KILLED));
             }
         }
     }
@@ -1681,13 +1696,14 @@ fn copy_one(
         Ok(()) => publish_staged(run, &staging, dest, name, source.is_dir, rename_on_conflict),
         Err(error) => Err(error.into()),
     };
-    // A successful publish already removed the staging dir; without a
-    // connection the cleanup cannot run either, the rest stays hidden.
+    // A placed item has left the staging (a clean publish removed it too), so this
+    // never takes the item; without a connection it cannot run, the rest stays hidden.
     if matches!(
         outcome,
-        Err(ItemError::Remote(
-            RemoteError::Failed(_) | RemoteError::Killed(_)
-        ))
+        Err(
+            ItemError::Remote(RemoteError::Failed(_) | RemoteError::Killed(_))
+                | ItemError::PublishKilled(_)
+        )
     ) {
         if let Err(error) = run(
             &serde_json::json!({ "op": "delete", "path": staging }),
@@ -2989,10 +3005,69 @@ Host !secret prod
     }
 
     #[test]
+    fn the_remote_shell_stays_the_parent_of_the_helper() {
+        let command = remote_command();
+        assert!(
+            command.starts_with("python3 -c \"$(printf %s "),
+            "{command}"
+        );
+        assert!(command.ends_with(" | base64 -d)\"; exit"), "{command}");
+
+        let echo = format!("bash: line 1: 4242 Killed: 9  {command}");
+        match exit_error(Some(137), &format!("MemoryError\n{echo}")) {
+            RemoteError::Killed(message) => assert_eq!(
+                message,
+                "remote helper exited with status 137 (stderr: MemoryError)"
+            ),
+            other => panic!("137 is a killed helper: {other:?}"),
+        }
+    }
+
+    // A signal must come back as 128+N from the shell, not kill the shell
+    // itself, in every login shell the host may run.
+    #[cfg(unix)]
+    #[test]
+    fn a_killed_program_returns_128_plus_the_signal_through_each_shell() {
+        use std::os::unix::process::ExitStatusExt;
+        let python_ok = std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !python_ok {
+            return;
+        }
+        let killed =
+            shell_command("python3 -c 'import os, signal; os.kill(os.getpid(), signal.SIGKILL)'");
+        let shells = [
+            "/bin/sh",
+            "/bin/bash",
+            "/bin/zsh",
+            "/bin/dash",
+            "/usr/bin/fish",
+            "/opt/homebrew/bin/fish",
+            "/usr/local/bin/fish",
+        ];
+        for shell in shells {
+            if !std::path::Path::new(shell).exists() {
+                continue;
+            }
+            let status = std::process::Command::new(shell)
+                .arg("-c")
+                .arg(&killed)
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert_eq!(status.signal(), None, "{shell} was replaced by the helper");
+            assert_eq!(status.code(), Some(137), "{shell}");
+        }
+    }
+
+    #[test]
     fn ssh_and_start_failures_count_as_transport() {
         let transport =
             |code, stderr| matches!(exit_error(code, stderr), RemoteError::Transport(_));
         assert!(transport(Some(255), ""));
+        assert!(transport(Some(255), "Killed: 9"));
         assert!(transport(None, ""));
         assert!(transport(Some(127), "bash: python3: command not found"));
         assert!(transport(Some(127), "sh: python3: nicht gefunden"));
@@ -3188,16 +3263,14 @@ Host !secret prod
             let mut expected = vec![(sources[nth - 1].clone(), PUBLISH_LOST.to_string())];
             expected.extend(sources[nth..].iter().map(|s| (s.clone(), LOST.to_string())));
             assert_eq!(failures(&result), expected);
+            let placed: Vec<bool> = result.failed.iter().map(|f| f.maybe_placed).collect();
+            let mut flags = vec![true];
+            flags.resize(expected.len(), false);
+            assert_eq!(placed, flags);
             assert_eq!(result.aborted.as_deref(), Some(LOST));
             assert_eq!(requests.last().unwrap()["op"], "publish");
             assert!(!requests.iter().any(|r| r["op"] == "delete"));
         }
-    }
-
-    #[test]
-    fn the_paste_toast_knows_the_publish_lost_message() {
-        let toast = include_str!("../../../src/modules/explorer/lib/clipboardPaste.ts");
-        assert!(toast.contains(&format!("\"{PUBLISH_LOST}\"")));
     }
 
     #[test]
@@ -3218,11 +3291,31 @@ Host !secret prod
         assert_eq!(result.created, ["/remote/b.txt"]);
         assert_eq!(
             failures(&result),
-            [(sources[0].clone(), PUBLISH_LOST.to_string())]
+            [(sources[0].clone(), PUBLISH_KILLED.to_string())]
         );
+        assert!(result.failed[0].maybe_placed);
         assert_eq!(result.aborted, None);
         assert_eq!(publishes(&requests).len(), 2);
-        assert!(deletes(&requests).is_empty(), "the item may be in place");
+        // The staging is gone either way: a placed item already left it.
+        assert_eq!(
+            deletes(&requests),
+            [&serde_json::json!("/remote/.terax-copy-stub_9Xk")]
+        );
+    }
+
+    #[test]
+    fn a_failure_is_sent_with_its_maybe_placed_flag_in_camel_case() {
+        let failure = crate::modules::fs::copy::CopyFailure {
+            source: "/x/a.txt".into(),
+            message: PUBLISH_KILLED.into(),
+            maybe_placed: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&failure).unwrap(),
+            serde_json::json!({
+                "source": "/x/a.txt", "message": PUBLISH_KILLED, "maybePlaced": true,
+            })
+        );
     }
 
     #[test]
