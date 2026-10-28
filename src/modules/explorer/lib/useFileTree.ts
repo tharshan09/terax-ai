@@ -397,15 +397,17 @@ export function useFileTree(rootPath: string | null, options?: Options) {
         pendingCreate.kind === "dir" ? "fs_create_dir" : "fs_create_file";
       try {
         await invoke(cmd, { path, workspace: currentWorkspaceEnv() });
-        await refresh(pendingCreate.parentPath);
       } catch (e) {
         console.error(`${cmd} failed:`, e);
         toast.error(
           `Couldn’t create ${pendingCreate.kind === "dir" ? "folder" : "file"} “${trimmed}”: ${String(e)}`,
         );
+        return;
       } finally {
+        // Freed before the re-read, so a slow host never holds the keyboard.
         setPendingCreate(null);
       }
+      await refresh(pendingCreate.parentPath);
     },
     [pendingCreate, refresh],
   );
@@ -435,13 +437,14 @@ export function useFileTree(rootPath: string | null, options?: Options) {
           workspace: currentWorkspaceEnv(),
         });
         options?.onPathRenamed?.(renaming, to);
-        await refresh(parent);
       } catch (e) {
         console.error("fs_rename failed:", e);
         toast.error(`Couldn’t rename to “${trimmed}”: ${String(e)}`);
+        return;
       } finally {
         setRenaming(null);
       }
+      await refresh(parent);
     },
     [renaming, refresh, options],
   );

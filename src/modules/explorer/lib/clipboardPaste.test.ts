@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type CopyResult,
   type ExplorerScope,
-  isPasteShortcut,
   pasteClipboardFiles,
   pasteExclusively,
   pasteKeyAction,
@@ -68,7 +67,7 @@ describe("pasteExclusively", () => {
   });
 });
 
-describe("isPasteShortcut", () => {
+describe("pasteKeyAction", () => {
   const key = (k: Partial<KeyboardEvent>) => ({
     key: "v",
     code: "KeyV",
@@ -78,43 +77,39 @@ describe("isPasteShortcut", () => {
     shiftKey: false,
     ...k,
   });
+  const pastes = (e: ReturnType<typeof key>, isMac: boolean) =>
+    pasteKeyAction({ ...e, repeat: false }, isMac) === "paste";
 
   it("matches the physical V key on non-Latin layouts", () => {
-    expect(isPasteShortcut(key({ key: "м", metaKey: true }), true)).toBe(true);
-    expect(
-      isPasteShortcut(key({ key: "м", code: "KeyM", metaKey: true }), true),
-    ).toBe(false);
+    expect(pastes(key({ key: "м", metaKey: true }), true)).toBe(true);
+    expect(pastes(key({ key: "м", code: "KeyM", metaKey: true }), true)).toBe(
+      false,
+    );
   });
 
   it("goes by the letter on Latin layouts, so Dvorak Cmd+K is no paste", () => {
-    expect(isPasteShortcut(key({ key: "k", metaKey: true }), true)).toBe(false);
-    expect(
-      isPasteShortcut(key({ key: "v", code: "Period", metaKey: true }), true),
-    ).toBe(true);
-    expect(isPasteShortcut(key({ metaKey: true }), true)).toBe(true);
+    expect(pastes(key({ key: "k", metaKey: true }), true)).toBe(false);
+    expect(pastes(key({ key: "v", code: "Period", metaKey: true }), true)).toBe(
+      true,
+    );
+    expect(pastes(key({ metaKey: true }), true)).toBe(true);
   });
 
   it("offers no shortcut off macOS, where files cannot be read", () => {
-    expect(isPasteShortcut(key({ ctrlKey: true }), false)).toBe(false);
-    expect(isPasteShortcut(key({ metaKey: true }), false)).toBe(false);
+    expect(pastes(key({ ctrlKey: true }), false)).toBe(false);
+    expect(pastes(key({ metaKey: true }), false)).toBe(false);
   });
 
   it("accepts only Cmd+V on macOS", () => {
-    expect(isPasteShortcut(key({ metaKey: true }), true)).toBe(true);
-    expect(isPasteShortcut(key({ key: "V", metaKey: true }), true)).toBe(true);
-    expect(isPasteShortcut(key({ metaKey: true, shiftKey: true }), true)).toBe(
+    expect(pastes(key({ metaKey: true }), true)).toBe(true);
+    expect(pastes(key({ key: "V", metaKey: true }), true)).toBe(true);
+    expect(pastes(key({ metaKey: true, shiftKey: true }), true)).toBe(false);
+    expect(pastes(key({ metaKey: true, altKey: true }), true)).toBe(false);
+    expect(pastes(key({ ctrlKey: true }), true)).toBe(false);
+    expect(pastes(key({ metaKey: true, ctrlKey: true }), true)).toBe(false);
+    expect(pastes(key({ key: "c", code: "KeyC", metaKey: true }), true)).toBe(
       false,
     );
-    expect(isPasteShortcut(key({ metaKey: true, altKey: true }), true)).toBe(
-      false,
-    );
-    expect(isPasteShortcut(key({ ctrlKey: true }), true)).toBe(false);
-    expect(isPasteShortcut(key({ metaKey: true, ctrlKey: true }), true)).toBe(
-      false,
-    );
-    expect(
-      isPasteShortcut(key({ key: "c", code: "KeyC", metaKey: true }), true),
-    ).toBe(false);
   });
 
   it("pastes on the first Cmd+V and swallows the repeats of a held key", () => {

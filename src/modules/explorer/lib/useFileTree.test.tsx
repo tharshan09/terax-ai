@@ -271,41 +271,47 @@ describe("useFileTree read promises", () => {
 });
 
 describe("useFileTree mutations", () => {
-  it("keeps the create row until a watcher read that overtook the re-read has rendered", async () => {
+  it("frees the create row once the file exists, and its re-read beats a stale watcher read", async () => {
     const pending = reads();
-    const frames: { creating: boolean; rows: ReturnType<typeof listing> }[] =
-      [];
-    const { result } = renderHook(() => {
-      const tree = useFileTree("/mk");
-      frames.push({
-        creating: tree.pendingCreate !== null,
-        rows: listing(tree, "/mk"),
-      });
-      return tree;
-    });
+    const create = deferred();
+    const answer = invoke.getMockImplementation();
+    invoke.mockImplementation((cmd: string, args: { path: string }) =>
+      cmd === "fs_create_file" ? create.promise : answer?.(cmd, args),
+    );
+    const { result } = renderHook(() => useFileTree("/mk"));
     await act(async () => pending[0].resolve([entry("a")]));
 
     act(() => result.current.beginCreate("/mk", "file"));
-    const opened = frames.length;
     let creating: Promise<void> | undefined;
     act(() => {
       creating = result.current.commitCreate("b");
     });
-    await vi.waitFor(() => expect(pending).toHaveLength(2));
     act(() => watcher.changed(["/mk/b"]));
-    expect(pending.map((r) => r.path)).toEqual(["/mk", "/mk", "/mk"]);
-    const [reread, watched] = pending.slice(1);
-
-    await act(async () => reread.resolve([entry("a"), entry("b")]));
     expect(result.current.pendingCreate).not.toBeNull();
-    expect(listing(result.current, "/mk")).toEqual(["a"]);
 
-    await act(async () => watched.resolve([entry("a"), entry("b")]));
+    let settled = false;
     await act(async () => {
-      await creating;
+      void creating?.then(() => {
+        settled = true;
+      });
+      create.resolve();
     });
     expect(result.current.pendingCreate).toBeNull();
-    const closed = frames.slice(opened).find((frame) => !frame.creating);
-    expect(closed?.rows).toEqual(["a", "b"]);
+    expect(settled).toBe(false);
+    expect(pending.map((r) => r.path)).toEqual(["/mk", "/mk", "/mk"]);
+    const [stale, reread] = pending.slice(1);
+
+    await act(async () => reread.resolve([entry("a"), entry("b")]));
+    await act(async () => stale.resolve([entry("a")]));
+    expect(listing(result.current, "/mk")).toEqual(["a", "b"]);
+    await vi.waitFor(() => expect(settled).toBe(true));
   });
 });
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}

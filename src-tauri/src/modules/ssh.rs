@@ -847,12 +847,17 @@ fn timed_out_msg(host: &str, what: &str, budget_secs: u64) -> String {
 enum RemoteError {
     Transport(String),
     Failed(String),
+    /// The helper died by a signal before it answered: like `Failed` on a
+    /// reachable host, but what the op already did is unknown.
+    Killed(String),
 }
 
 impl From<RemoteError> for String {
     fn from(error: RemoteError) -> Self {
         match error {
-            RemoteError::Transport(message) | RemoteError::Failed(message) => message,
+            RemoteError::Transport(message)
+            | RemoteError::Failed(message)
+            | RemoteError::Killed(message) => message,
         }
     }
 }
@@ -888,10 +893,6 @@ fn exit_error(code: Option<i32>, stderr: &str) -> RemoteError {
         Some(COMMAND_NOT_FOUND_EXIT) if stderr.contains("python3") => RemoteError::Transport(
             "python3 isn't installed on the host; the remote file browser requires it.".to_string(),
         ),
-        Some(COMMAND_NOT_FOUND_EXIT) if excerpt.is_empty() => RemoteError::Transport(
-            "the remote helper could not start: command not found on the host (exit 127)"
-                .to_string(),
-        ),
         // The helper answers every request with exit 0; below the signal range
         // it never ran here, so every item would fail the same way.
         Some(code @ 1..=COMMAND_NOT_FOUND_EXIT) => RemoteError::Transport(if excerpt.is_empty() {
@@ -899,7 +900,7 @@ fn exit_error(code: Option<i32>, stderr: &str) -> RemoteError {
         } else {
             format!("the remote helper could not start: {excerpt}")
         }),
-        Some(code @ 128..SSH_OWN_FAILURE_EXIT) => RemoteError::Failed(with_stderr(
+        Some(code @ 128..SSH_OWN_FAILURE_EXIT) => RemoteError::Killed(with_stderr(
             format!("remote helper exited with status {code}"),
             stderr,
         )),
@@ -1532,7 +1533,7 @@ fn copy_with(
         );
         match item {
             Ok(name) => result.created.push(created_path(dest_dir, &name)),
-            Err(ItemError::Remote(RemoteError::Failed(message))) => {
+            Err(ItemError::Remote(RemoteError::Failed(message) | RemoteError::Killed(message))) => {
                 log::warn!("ssh copy({source} -> {host}:{dest}) failed: {message}");
                 result.failed.push(failure(source, &message));
             }
@@ -1592,7 +1593,12 @@ fn copy_one(
     };
     // A successful publish already removed the staging dir; without a
     // connection the cleanup cannot run either, the rest stays hidden.
-    if matches!(outcome, Err(ItemError::Remote(RemoteError::Failed(_)))) {
+    if matches!(
+        outcome,
+        Err(ItemError::Remote(
+            RemoteError::Failed(_) | RemoteError::Killed(_)
+        ))
+    ) {
         if let Err(error) = run(
             &serde_json::json!({ "op": "delete", "path": staging }),
             Some(REMOTE_FS_TIMEOUT),
@@ -1641,7 +1647,10 @@ fn publish_staged(
             Ok(other) => {
                 return Err(RemoteError::Failed(format!("bad publish response: {other}")).into())
             }
-            Err(RemoteError::Transport(message)) => return Err(ItemError::PublishLost(message)),
+            // A helper killed mid-publish may already have placed the item.
+            Err(RemoteError::Transport(message) | RemoteError::Killed(message)) => {
+                return Err(ItemError::PublishLost(message))
+            }
             Err(error) => return Err(error.into()),
         }
     }
@@ -2779,15 +2788,14 @@ Host !secret prod
         assert!(transport(Some(127), "bash: python3: command not found"));
         assert!(transport(Some(127), "sh: python3: nicht gefunden"));
         match exit_error(Some(127), "") {
-            RemoteError::Transport(message) => assert_eq!(
-                message,
-                "the remote helper could not start: command not found on the host (exit 127)"
-            ),
+            RemoteError::Transport(message) => {
+                assert_eq!(message, "the remote helper could not start (exit 127)")
+            }
             other => panic!("127 must stop the batch: {other:?}"),
         }
         assert!(transport(Some(1), "Permission denied (publickey)."));
         match exit_error(Some(137), "") {
-            RemoteError::Failed(message) => {
+            RemoteError::Killed(message) => {
                 assert_eq!(message, "remote helper exited with status 137")
             }
             other => panic!("137 must fail only the item: {other:?}"),
@@ -2819,7 +2827,7 @@ Host !secret prod
             other => panic!("an answered error must fail only the item: {other:?}"),
         }
         match read_envelope(Some(137), b"", false, "Permission denied") {
-            Err(RemoteError::Failed(message)) => assert_eq!(
+            Err(RemoteError::Killed(message)) => assert_eq!(
                 message,
                 "remote helper exited with status 137 (stderr: Permission denied)"
             ),
@@ -2843,7 +2851,7 @@ Host !secret prod
             "x".repeat(4096)
         );
         match exit_error(Some(143), &stderr) {
-            RemoteError::Failed(message) => assert_eq!(
+            RemoteError::Killed(message) => assert_eq!(
                 message,
                 "remote helper exited with status 143 (stderr: Killed)"
             ),
@@ -2975,6 +2983,31 @@ Host !secret prod
             assert_eq!(requests.last().unwrap()["op"], "publish");
             assert!(!requests.iter().any(|r| r["op"] == "delete"));
         }
+    }
+
+    #[test]
+    fn a_helper_killed_while_publishing_leaves_the_item_fate_unknown() {
+        const KILLED: &str = "remote helper exited with status 137";
+        let src = tempfile::tempdir().unwrap();
+        let sources = local_sources(src.path(), &["a.txt", "b.txt"]);
+        let (result, requests) = stub_copy(&sources, |request| {
+            if request["op"] == "publish" {
+                return Err(exit_error(Some(137), ""));
+            }
+            healthy(request)
+        });
+        let result = result.expect("a killed publish must not reject the batch");
+        assert!(result.created.is_empty());
+        assert_eq!(
+            failures(&result),
+            [
+                (sources[0].clone(), PUBLISH_LOST.to_string()),
+                (sources[1].clone(), KILLED.to_string()),
+            ]
+        );
+        assert_eq!(result.aborted.as_deref(), Some(KILLED));
+        assert_eq!(publishes(&requests).len(), 1);
+        assert!(deletes(&requests).is_empty(), "the item may be in place");
     }
 
     #[test]

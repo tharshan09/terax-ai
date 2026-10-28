@@ -30,17 +30,13 @@ export async function pasteExclusively(
   }
 }
 
-// Files come from the macOS pasteboard only, so other platforms get no shortcut.
-export function isPasteShortcut(e: TerminalKeyEvent, isMac: boolean): boolean {
-  return isMac && isTerminalPasteChord(e, { isMac });
-}
-
-// Holding Cmd+V repeats keydown: only the first press pastes.
+// Files come from the macOS pasteboard only, so other platforms get no shortcut;
+// holding Cmd+V repeats keydown, and only the first press pastes.
 export function pasteKeyAction(
   e: TerminalKeyEvent & Pick<KeyboardEvent, "repeat">,
   isMac: boolean,
 ): "paste" | "swallow" | null {
-  if (!isPasteShortcut(e, isMac)) return null;
+  if (!isMac || !isTerminalPasteChord(e, { isMac })) return null;
   return e.repeat ? "swallow" : "paste";
 }
 
