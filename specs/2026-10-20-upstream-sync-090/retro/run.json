@@ -1,0 +1,859 @@
+{
+  "version": 1,
+  "generated_at": "2026-10-28T23:01:46.385Z",
+  "run": {
+    "spec_path": "specs/2026-10-20-upstream-sync-090",
+    "feature": "2026-10-20-upstream-sync-090",
+    "state_file": ".build-state.json",
+    "status": "completed",
+    "current_state": "feature_complete",
+    "started_at": "2026-10-27T13:56:15Z",
+    "ended_at": "2026-10-28T23:01:40Z",
+    "duration_min": 1985
+  },
+  "timeline": {
+    "created_at": "2026-10-27T13:53:40Z",
+    "phases": [
+      {
+        "phase": "build",
+        "status": "in_progress",
+        "started_at": "2026-10-27T13:53:40Z",
+        "ended_at": null,
+        "duration_min": 0
+      },
+      {
+        "phase": "build",
+        "status": "in_progress",
+        "started_at": "2026-10-27T13:53:44Z",
+        "ended_at": null,
+        "duration_min": 1982
+      }
+    ],
+    "active_min": 1982,
+    "lead_time_min": null,
+    "waiting_min": null
+  },
+  "slices": [
+    {
+      "id": "slice-00-core-picks",
+      "status": "merged",
+      "started_at": "2026-10-27T16:17:41Z",
+      "merged_at": "2026-10-27T21:24:08Z",
+      "duration_min": 306
+    },
+    {
+      "id": "slice-01-clipboard-paste",
+      "status": "merged",
+      "started_at": "2026-10-27T21:24:33Z",
+      "merged_at": "2026-10-28T18:56:53Z",
+      "duration_min": 1292
+    },
+    {
+      "id": "slice-02-media-pause",
+      "status": "merged",
+      "started_at": "2026-10-28T18:56:53Z",
+      "merged_at": "2026-10-28T19:28:12Z",
+      "duration_min": 31
+    },
+    {
+      "id": "slice-03-animations",
+      "status": "merged",
+      "started_at": "2026-10-28T19:28:12Z",
+      "merged_at": "2026-10-28T19:42:29Z",
+      "duration_min": 14
+    },
+    {
+      "id": "slice-04-visible-consumers",
+      "status": "merged",
+      "started_at": "2026-10-28T19:43:16Z",
+      "merged_at": "2026-10-28T20:25:38Z",
+      "duration_min": 42
+    },
+    {
+      "id": "slice-05-lazy-start",
+      "status": "merged",
+      "started_at": "2026-10-28T20:26:13Z",
+      "merged_at": "2026-10-28T20:47:32Z",
+      "duration_min": 21
+    },
+    {
+      "id": "slice-06-deps-version",
+      "status": "merged",
+      "started_at": "2026-10-28T20:48:01Z",
+      "merged_at": "2026-10-28T22:06:31Z",
+      "duration_min": 79
+    }
+  ],
+  "gates": {
+    "worktree_rebase": {
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "attempts_max": 1,
+      "findings": 0
+    },
+    "worktree_bootstrap": {
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0,
+      "attempts_max": 1,
+      "findings": 0
+    },
+    "arch_precheck": {
+      "passed": 6,
+      "failed": 1,
+      "skipped": 0,
+      "attempts_max": 7,
+      "findings": 10
+    },
+    "citation_precheck": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 1,
+      "attempts_max": 1,
+      "findings": 0
+    },
+    "architecture_compliance": {
+      "passed": 1,
+      "failed": 4,
+      "skipped": 0,
+      "attempts_max": 5,
+      "findings": 28
+    },
+    "build_plan_precheck": {
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "attempts_max": 1,
+      "findings": 0
+    },
+    "lint": {
+      "passed": 34,
+      "failed": 0,
+      "skipped": 0,
+      "attempts_max": 27,
+      "findings": 0
+    },
+    "typecheck": {
+      "passed": 34,
+      "failed": 0,
+      "skipped": 0,
+      "attempts_max": 27,
+      "findings": 0
+    },
+    "tests": {
+      "passed": 60,
+      "failed": 3,
+      "skipped": 0,
+      "attempts_max": 27,
+      "findings": 2
+    },
+    "code_review": {
+      "passed": 6,
+      "failed": 48,
+      "skipped": 0,
+      "attempts_max": 28,
+      "findings": 284
+    },
+    "slice_merge": {
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "attempts_max": 1,
+      "findings": 0
+    },
+    "clippy": {
+      "passed": 19,
+      "failed": 0,
+      "skipped": 0,
+      "attempts_max": 27,
+      "findings": 0
+    },
+    "cargo_test": {
+      "passed": 19,
+      "failed": 0,
+      "skipped": 1,
+      "attempts_max": 27,
+      "findings": 0
+    },
+    "build": {
+      "passed": 15,
+      "failed": 0,
+      "skipped": 0,
+      "attempts_max": 0,
+      "findings": 0
+    },
+    "size": {
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0,
+      "attempts_max": 0,
+      "findings": 0
+    },
+    "malicious_intent_scan": {
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "attempts_max": 0,
+      "findings": 0
+    }
+  },
+  "findings": {
+    "total": 324,
+    "by_class": {
+      "fix": 234,
+      "note": 77,
+      "refuted": 6,
+      "decision": 3,
+      "obligation": 4
+    },
+    "confirmed": 9,
+    "rejected": 0,
+    "unverifiable": 0
+  },
+  "decisions": [
+    {
+      "ts": "2026-10-27T13:56:15Z",
+      "gate": "stack_detection",
+      "slice": "run",
+      "choice": "Detected-Stack nach den Projekt-Gates aus TERAX.md und open-topics statt npm/npx-Defaults (pnpm only): lint=pnpm lint, typecheck=pnpm check-types, tests=pnpm test + cargo test --locked, dazu clippy -D warnings und pnpm build",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T13:56:15Z",
+      "gate": "run_mechanics",
+      "slice": "run",
+      "choice": "Pro Slice (Welle) eigener Branch + PR gegen origin/main, Squash-Merge wie Runde 3; danach git pull origin main in den Feature-Branch statt lokalem --no-ff-Merge",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T13:56:15Z",
+      "gate": "run_mechanics",
+      "slice": "run",
+      "choice": "Review je Slice: zip-beta code-reviewer einmal mit Nachpruefung + ein Fix + Delta, danach /code-review high wiederholt bis keine Befunde mehr",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T13:56:15Z",
+      "gate": "run_mechanics",
+      "slice": "run",
+      "choice": "Ohne Issue (Issues im Fork deaktiviert): Flow C, Meldungen ohne --issue; Installation der App ist User-Gate und wird nicht ausgefuehrt; laufende Terax-App wird nie beendet",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T13:56:15Z",
+      "gate": "run_mechanics",
+      "slice": "run",
+      "choice": "Slices strikt nacheinander in der User-Reihenfolge 1,3,2,5,4,6,7 (parallel_max effektiv 1), gemeinsames CARGO_TARGET_DIR fuer alle Slice-Worktrees",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T14:42:03Z",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "Klammer-Entfernung an beiden Stellen (Aufloesung und Redirect-Pruefung) mit uebernehmen",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T14:42:03Z",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "BR-16 bleibt wie vom PM geschrieben: ip.rs wird ueber Upstream hinaus erweitert, die eingebettete IPv4 auch im lokalen NAT64-Bereich auswerten, gefaehrlichste Klasse gewinnt, mit Test",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T14:42:03Z",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "Slice 6 uebernimmt die Upstream-Chunk-Strategie aus f6f0004 (Startpakete vor Feature-Chunks), damit das AI-SDK wirklich erst bei Bedarf laedt; INV-19 gilt nur noch fuer den Quell-Importgraphen, das gebaute Startpaket sichert der neue Build-Test",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T14:42:14Z",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "Der Explorer blendet .terax-copy-* immer aus, lokal und per SSH, auch bei eingeschalteter Anzeige versteckter Dateien",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T15:04:00Z",
+      "gate": "resolver",
+      "slice": "feature",
+      "choice": "Das Staging-Praefix .terax-copy- gilt in jeder App-Aufzaehlung des Workspace-Inhalts (Explorer-Baum, Explorer-Suche, Unterordner-Menue der Statusleiste, Dateiliste) lokal und SSH als immer verborgen, unabhaengig von showHidden, samt Inhalt; ein Praedikat in Rust mit Helper-Spiegel an jeder show_hidden-Stelle",
+      "decision_doc": "gates/DECISION-gate1-staging-search.md"
+    },
+    {
+      "ts": "2026-10-27T15:17:54Z",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "Der Git-Status blendet Pfade mit einem .terax-copy-*-Segment aus (Parser, lokal und SSH), damit gilt keine halbe Kopie in irgendeiner App-Aufzaehlung, auch nicht im Source-Control-Panel",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T15:38:28Z",
+      "gate": "resolver",
+      "slice": "feature",
+      "choice": "Das Staging-Praedikat is_staging_name ist die einzige Garantie der Staging-Sichtbarkeit und wirkt an jeder Primitive, mit der die App Dateisystem-Inhalt des Workspace aufzaehlt (jeder WalkBuilder inkl. grep.rs und git_non_ignored_names, jedes Verzeichnis-Listing, jede Helper-Listing-Op, der Parser-Pfad fuer ungetrackte Git-Eintraege), ohne Ausnahme und unabhaengig von show_hidden, .hidden(true) und Ignore-Regeln; Geltungsbereich Aufzaehlungen mit Wurzel ausserhalb eines Staging-Ordners; der Git-Status filtert nur ungetrackte Eintraege, Index-Eintraege bleiben sichtbar, damit ein Panel-Commit nie etwas Unsichtbares enthaelt",
+      "decision_doc": "gates/DECISION-gate1-staging-search-2.md"
+    },
+    {
+      "ts": "2026-10-27T15:50:55Z",
+      "gate": "run_mechanics",
+      "slice": "feature",
+      "choice": "Kein eigener Draft-PR fuer den Feature-Branch; die Spec-Dokumente reisen mit dem ersten Slice-PR nach main. Struktur-Anker der Templates mit Gedankenstrich bleiben (Parser-Anker), Prosa bleibt ohne",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:21Z",
+      "gate": "run_boundary",
+      "slice": "feature",
+      "choice": "deferred",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "Standard mit dateigenauer Migration Map",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "konsolidieren wie empfohlen (Anti-Slop #1)",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "nur document.visibilityState; e2e prüft alle drei Fälle, nativer Hinweis bleibt Fallback",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "erstes Element auswählen, Zielordner aufgeklappt (discovery.md FL-4, UI-6, ST-3, TR-3 nachgezogen)",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "beide zählen (discovery.md BR-13 nachgezogen)",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "Sichtbar = Sidebar-Ansicht explorer UND Sidebar nicht eingeklappt; dafür spiegelt useSidebarPanel den eingeklappten Zustand als React-Zustand (Upstream-Muster)",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "Je Element zuerst in einen versteckten Ordner .terax-copy-… im Remote-Zielordner hochladen, dann über eine neue Helper-Operation unter dem freien Namen veröffentlichen, die nie ersetzt (Ordner: Namen exklusiv reservieren und tauschen; Dateien: exklusiv verlinken). Folge für den User: bricht die SSH-Verbindung mitten im Upload ab, kann ein versteckter .terax-copy-…-Ordner auf dem Host liegen bleiben; keine App-Aufzählung, deren Wurzel außerhalb liegt, zeigt ihn (Baum, Suche, Inhaltssuche, Unterordner-Menü, Dateiliste, Source-Control-Panel und Git-Dekoration), auch nicht mit „versteckte Dateien zeigen“ und auch nicht bei einer Whitelist-Regel in .gitignore; wechselt der User selbst hinein, zeigt die App ihn wie das Terminal (Q&A #28), unter dem echten Namen erscheint nie etwas Halbes",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "No-Replace-Rename des Betriebssystems (macOS RENAME_EXCL, Linux RENAME_NOREPLACE), Rückfall auf exklusive Reservierung für Dateisysteme ohne Unterstützung",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "Nach fs/copy.rs verschieben (Upstream-Form) und async mit blockierender Arbeit außerhalb des Main-Threads; Sync-Commands laufen in Tauri auf dem Main-Thread und frieren bei großen Kopien die UI ein",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "Lokal wie der Finder und Upstream: Symlinks als Symlinks kopieren, nie verfolgen (keine Endlosschleifen, kein Mitkopieren fremder Bäume); SSH wie heute (Datei-Symlinks als Inhalt, Ordner-Symlinks scheitern je Element), weil der Helper keine Remote-Links anlegt",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "nur macOS",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "korrigiert nach Q&A #29",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "catalog:-Block neu, den Lezer-Override als weiteren Schlüssel IN den bestehenden overrides:-Block, Kommentarzeile dazu; bestehende Pins unverändert",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "0.12 bleibt",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "Upstream-Lock 640e8b2 als Untergrenze der Bereiche; pnpm/cargo lösen innerhalb der Bereiche auf, minimumReleaseAge bleibt die Bremse",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "Nein: Fork klassifiziert schon über binaryPreview.ts; nur die Wiedergabe-Bindung übernehmen und um „Fenster unsichtbar\" erweitern; ausgeblendet wird nur bei inaktivem Tab",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "Funktion und Enum entfernen (Vorschlag der Linse), alte Assertions als Test behalten, Upstream-Test ergänzen",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "Eine reine Funktion in copy.rs, beide Wege nutzen sie (Vorschlag der Linse)",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "übernommen nach Lesart B, INV-1 bis INV-23",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "Nur bei aktivem Editor-Tab, gleiche Freischaltung wie editor.undo; nutzt den bestehenden Speicherweg",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "nur ci.yml",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "ps-Sampling und Invoke-Zähler über die Test-Bridge, Startbytes aus dist-graph.mjs, Median aus 5 Starts der isolierten Dev-Instanz",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "In Slice 1 als Aufnahme des heutigen Verhaltens, in Slice 6 auf die nachladende API umgeschrieben mit gleichen erwarteten Icons",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "nur CSS",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "Ja, wie Upstream: schützt vor Stapelüberlauf und endlosen Läufen; konkrete Werte über die Gate-1-Auflagen",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "übernommen (Entscheidung des Dirigenten)",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "erweitert (Entscheidung des Dirigenten), Tests 64:ff9b:1::a9fe:a9fe → BlockedMetadata, 64:ff9b:1::7f00:1 → Loopback",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "ausgeblendet an jeder Aufzählungs-Primitive (Entscheidung des Dirigenten, erweitert nach D-1 und F-1; gates/DECISION-gate1-staging-search.md, gates/DECISION-gate1-staging-search-2.md)",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "übernommen (Entscheidung des Dirigenten), MIG-62, SVC-15",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "eingegrenzt (Entscheidung des Dirigenten)",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "ausgeblendet für ungetrackte Einträge (Entscheidung des Dirigenten E-1, eingegrenzt nach F-3), MIG-75",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "slice-00 legt den Getter isWindowHidden als Rumpf in src/lib/windowVisibility.ts an und stellt den tmux-cwd-Poll-Guard (App.tsx:477) schon darauf um; slice-02 berührt App.tsx nicht, slice-04 ist der einzige weitere Bauer",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "slice-00 stellt die zwei Icon-Stellen (:494, :597-598) auf synchrone Rümpfe FileIcon/FolderIcon um und reicht ein neues Prop visible ohne Wirkung an useFileTree durch; danach ändert nur slice-01 die Datei",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "slice-00 ergänzt alle drei Feature-Sätze in src-tauri/Cargo.toml als Vertrag für slice-01",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "alle drei Notizen in slice-06",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "slice-05 legt dist-budget.test.ts gleich mit dem Lezer-Fall aus bf7e03d an, slice-06 nutzt ihn als Vertrag",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "slice-03 legt auch @keyframes terax-icon-in und .terax-icon-in an und liefert die Klasse an slice-05",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "nach dem Merge",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "BR-15 bei slice-03; die Mess-ACs von slice-04 und slice-05 tragen NFR-1 bzw. NFR-2 (dieselbe Messung in Architecture-Fassung) und nennen BR-15 im Text",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "je ID der Slice mit dem Hauptteil oder dem Endzustand: MIG-1 slice-00, MIG-2 slice-06, MIG-9 slice-02, MIG-10 slice-04, MIG-11 slice-05 (Vorher-Aufnahme d766567 als Vertrag aus slice-00), MIG-24 slice-06, MIG-40 slice-03, MIG-64 slice-05, NFR-4 slice-00 (Jail-Teil über VAL-2 in slice-01), NFR-6 slice-01 (⌘S-Teil über BR-17 und VAL-10 in slice-00), FL-6 und FL-7 slice-03 (Media-Teil über BR-12 in slice-02)",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "in der Tabelle beim zuständigen Slice, Nachweis als AC mit [Prüfweg: QA]",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "kein vorsorglicher Fallback; fehlt im e2e von slice-02 einer der drei Unsichtbar-Fälle, meldet der Slice das als Befund, der Plan wird nachgebessert",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "isWindowHidden, subscribeWindowHidden, useWindowHidden, installWindowVisibility, Attribut data-window-hidden, Konstante GIT_STATUS_WIDGET_IDS",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "slice-05 passt nur die Pfade an, Grenzwerte (540 KB Startpaket, 1650 KB gesamt, gzip) bleiben",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "kein check:dist; das Fallback-Script test:dist samt CI-Schritt (Risk-Tabelle, Build-Test über 2 min) gehört bei Bedarf slice-06",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "slice-06 ändert nur Manifeste, Lockfiles, Version, Doku und zwei Tests; braucht ein Update Code in fremden Bereichen, stoppt der Slice mit Befund (Nachbesserung)",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T16:17:23+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "nicht übernommen",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T17:00:22Z",
+      "gate": "decision",
+      "slice": "slice-00-core-picks",
+      "choice": "Der gehaertete Client nutzt keinen Proxy (.no_proxy()); AI-Anfragen gehen direkt, der SSRF-Schutz gilt fuer jede Verbindung",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T17:16:54Z",
+      "gate": "decision",
+      "slice": "slice-00-core-picks",
+      "choice": "Proxy-Variablen werden wieder wie vor dem PR beachtet; die konfigurierten Proxy-Hosts sind vom Resolver-Schutz ausgenommen, das Ziel wird weiter vorab lokal klassifiziert; Restrisiko DNS-Rebinding hinter einem Proxy ist dokumentiert (Bestand vor dem PR)",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T17:16:54Z",
+      "gate": "build_plan",
+      "slice": "slice-00-core-picks",
+      "choice": "Die drei Vertraege werden aus slice-00 entfernt und von den Slices eingefuehrt, die sie nutzen (isWindowHidden slice-02, visible slice-04, FileIcon slice-05); diese Slices duerfen dafuer FileExplorer.tsx, useFileTree.ts, App.tsx und TreeRow.tsx anfassen",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T17:36:48Z",
+      "gate": "decision",
+      "slice": "slice-00-core-picks",
+      "choice": "Proxy wird explizit aus der Umgebung gelesen (gleiche Vorrang- und NO_PROXY-Regeln), der Proxy-Host einmal selbst aufgeloest und als IP gesetzt, und nur fuer oeffentlich klassifizierte Ziele genutzt; private und lokale Ziele gehen direkt; Resolver ohne Namensausnahme",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T18:03:26Z",
+      "gate": "decision",
+      "slice": "slice-00-core-picks",
+      "choice": "Eigener Resolver und Proxy-Code entfallen, Proxies verhalten sich exakt wie vor dem PR und wie upstream; die Luecke Redirect auf Hostname mit Metadaten-Aufloesung wird geschlossen, indem Redirects auf einen anderen Host immer gestoppt werden (ohne Opt-in war das schon bisher so)",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T18:24:39Z",
+      "gate": "decision",
+      "slice": "slice-00-core-picks",
+      "choice": "Speichern bleibt strikt nacheinander ohne Zeitgrenze; dauert das Warten laenger, erscheint ein Hinweis, dass der vorige Speichervorgang noch laeuft",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T18:24:39Z",
+      "gate": "decision",
+      "slice": "slice-00-core-picks",
+      "choice": "Weiterleitung auf einen anderen Host bleibt gesperrt (SSRF-Schutz), der Fehler nennt den Grund und das Ziel klar statt eines rohen Statuscodes; private und lokale Ziele gehen nie ueber einen Umgebungs-Proxy",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T18:46:36Z",
+      "gate": "decision",
+      "slice": "slice-00-core-picks",
+      "choice": "Echte 3xx-Antwort mit Status und Location wie vor dem PR; lm_ping wieder ohne Redirects; ein Redirect-Hop bleibt in der Netzklasse der Herkunft",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T19:07:45Z",
+      "gate": "decision",
+      "slice": "slice-00-core-picks",
+      "choice": "useDocument zurueck auf den Stand vor dem PR; Shortcut-Mechanik auf ein Flag reduziert (Cmd+S beansprucht immer die Standardaktion, speichert nur im Editor-Tab, nicht bei Tastenwiederholung, nicht aus fremden Feldern); der Wettlauf Autosave gegen Cmd+S bleibt Bestand und steht als offener Punkt im PR",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T19:21:41Z",
+      "gate": "run_mechanics",
+      "slice": "slice-00-core-picks",
+      "choice": "Pipeline-State (.build-state.json, .feature-state.json) wird nicht mehr versioniert (gitignore), absolute lokale Pfade aus Spec-Dokumenten entfernt, linguist-generated nur fuer Pipeline-Ausgaben",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T19:30:34Z",
+      "gate": "decision",
+      "slice": "slice-00-core-picks",
+      "choice": "Redirects werden selbst verfolgt: jeder Hop durchlaeuft dieselbe Pruefung wie die erste Anfrage (Shape, DNS-Klassifikation, Pinning, Proxy-Regel nach Zielklasse), reqwest-Semantik (303, POST->GET bei 301/302, 307/308 mit Body, sensible Header bei Hostwechsel entfernt, max. 10 Hops); dazu kleiner begrenzter Client-Cache",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T20:16:04Z",
+      "gate": "decision",
+      "slice": "slice-00-core-picks",
+      "choice": "Tie-Break-Regel: wo Review-Runden sich widersprechen, gilt das Upstream-Verhalten. net.rs folgt der Struktur von 11343a1 (reqwest-Redirect-Policy mit redirect_decision, Klammer-Entfernung, Proxy wie upstream); eigene Redirect-Schleife, Client-Cache, Header-Allowlist und Proxy-Klassenregel entfallen. Die Fork-Erweiterungen der Klassifikation in ip.rs bleiben. Die Hostname-Redirect-Luecke mit Opt-in ist upstream-identisch, im PR dokumentiert und bewusst getragen; das Review gilt als leer, wenn nur noch solche dokumentierten Restrisiken gemeldet werden",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T21:18:47Z",
+      "gate": "run_mechanics",
+      "slice": "slice-00-core-picks",
+      "choice": "/code-review high fuer PR #83 gilt als leer: Runde 16 enthaelt nur upstream-identische, im PR dokumentierte Restrisiken und per Tie-Break entschiedene Punkte, plus einen Kommentar-Fix",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T22:39:07Z",
+      "gate": "decision",
+      "slice": "slice-01-clipboard-paste",
+      "choice": "exakter Vergleich; auf case-insensitiven Hosts faengt das No-Replace-publish den Konflikt und der naechste Name wird versucht",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-27T23:06:42Z",
+      "gate": "decision",
+      "slice": "slice-01-clipboard-paste",
+      "choice": "Kopieren nutzt dieselbe Nutzer-Richtlinie wie Oeffnen/Speichern im Editor (trusted): direkt gewaehlte Pfade erlaubt, Umwege ueber Symlinks zu geheimen Orten abgelehnt",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-28T08:26:17Z",
+      "gate": "decision",
+      "slice": "slice-01-clipboard-paste",
+      "choice": "immer neu lesen und die Auswahl direkt nach dem await setzen; isWatched-Logik und fs_watch_add-Vertragsaenderung zurueck",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-28T13:37:44Z",
+      "gate": "code_review",
+      "slice": "slice-01-clipboard-paste",
+      "choice": "keep_early_clear",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-28T13:50:17Z",
+      "gate": "code_review",
+      "slice": "slice-01-clipboard-paste",
+      "choice": "revisit_upload_timeout",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-28T14:31:15Z",
+      "gate": "code_review",
+      "slice": "slice-01-clipboard-paste",
+      "choice": "tie_break_upstream",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-28T16:29:59Z",
+      "gate": "code_review",
+      "slice": "slice-01-clipboard-paste",
+      "choice": "abort_after_timeout",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-28T00:00:00Z",
+      "gate": "review_stop_criterion",
+      "slice": "slice-01-clipboard-paste",
+      "choice": "user_approved",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-28T20:22:00Z",
+      "gate": "code_review",
+      "slice": "slice-04-visible-consumers",
+      "choice": "fix_two_regressions_then_merge",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-28T21:47:16Z",
+      "gate": "code_review",
+      "slice": "slice-06-deps-version",
+      "choice": "revert_to_minimal_inline_input_guard",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-28T21:59:52Z",
+      "gate": "code_review",
+      "slice": "slice-06-deps-version",
+      "choice": "fix_orphaned_input_at_menu_close_then_merge",
+      "decision_doc": null
+    },
+    {
+      "ts": "2026-10-28T22:09:47Z",
+      "gate": "review_fanout",
+      "slice": "feature",
+      "choice": "skipped",
+      "decision_doc": null
+    }
+  ],
+  "fixes": {
+    "hygiene": 4,
+    "security": 8,
+    "regression": 2,
+    "bug": 15,
+    "systemic": 3,
+    "unknown": 3
+  },
+  "free_zone": {
+    "starts": 0,
+    "by_type": {},
+    "briefs": []
+  },
+  "bindings_exceptions": 0,
+  "skipped_helpers": [
+    {
+      "helper": "citation_precheck",
+      "slice": "feature",
+      "reason": "Modus bindings: reconcile_path null (keine bindings.md)"
+    },
+    {
+      "helper": "cargo_test",
+      "slice": "slice-02-media-pause",
+      "reason": "no src-tauri change"
+    }
+  ],
+  "auffaelligkeiten": [
+    "Gate arch_precheck brauchte 7 Anläufe",
+    "Gate citation_precheck 1× übersprungen",
+    "Gate architecture_compliance brauchte 5 Anläufe",
+    "Gate lint brauchte 27 Anläufe",
+    "Gate typecheck brauchte 27 Anläufe",
+    "Gate tests brauchte 27 Anläufe",
+    "Gate code_review brauchte 28 Anläufe",
+    "Gate clippy brauchte 27 Anläufe",
+    "Gate cargo_test brauchte 27 Anläufe",
+    "Gate cargo_test 1× übersprungen",
+    "86 Entscheidung(en) ohne Mensch: stack_detection, run_mechanics, architecture, resolver, run_boundary, build_plan, decision, code_review, review_stop_criterion, review_fanout",
+    "Slice slice-00-core-picks brauchte 306 min (Median 42)",
+    "Slice slice-01-clipboard-paste brauchte 1292 min (Median 42)"
+  ]
+}
