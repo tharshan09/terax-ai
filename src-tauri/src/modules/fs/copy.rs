@@ -197,6 +197,10 @@ fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
+fn into_itself() -> io::Error {
+    invalid("cannot copy a folder into itself")
+}
+
 /// The name itself, then the Finder-style alternatives in order.
 pub(crate) fn copy_candidates(name: &OsStr, is_dir: bool) -> impl Iterator<Item = OsString> + '_ {
     std::iter::once(name.to_os_string())
@@ -220,7 +224,7 @@ fn copy_item(
         return Err(already_exists(target.display()));
     }
     if is_dir && dest.starts_with(std::fs::canonicalize(src)?) {
-        return Err(invalid("cannot copy a folder into itself"));
+        return Err(into_itself());
     }
 
     // Same-directory staging keeps the publish a single rename on one volume.
@@ -228,7 +232,8 @@ fn copy_item(
         .prefix(STAGING_PREFIX)
         .tempdir_in(dest)?;
     let staged = staging.path().join(STAGED_ITEM);
-    let result = copy_recursive(src, &staged, 0, source.linked, registry).and_then(|()| {
+    let walk = copy_recursive(src, &staged, 0, source.linked, registry, &mut Vec::new());
+    let result = walk.and_then(|()| {
         publish(
             &staged,
             dest,
@@ -379,24 +384,27 @@ fn rename_no_replace(_from: &Path, _to: &Path) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
+/// `followed` holds the canonical folder of each folder link the walk followed
+/// on its way down to `src`.
 fn copy_recursive(
     src: &Path,
     dst: &Path,
     depth: usize,
     linked: bool,
     registry: &WorkspaceRegistry,
+    followed: &mut Vec<PathBuf>,
 ) -> io::Result<()> {
     check_depth(depth)?;
     let kind = std::fs::symlink_metadata(src)?.file_type();
     if kind.is_symlink() {
         match copy_symlink(src, dst) {
             Err(error) if copies_link_content(&error, cfg!(windows)) => {
-                copy_link_content(src, dst, depth, registry)
+                copy_link_content(src, dst, depth, registry, followed)
             }
             other => other,
         }
     } else if kind.is_dir() {
-        copy_dir(src, dst, depth, linked, registry)
+        copy_dir(src, dst, depth, linked, registry, followed)
     } else if kind.is_file() {
         // `dst` sits in our fresh staging dir, so this cannot follow a planted
         // link; std::fs::copy clones on APFS instead of streaming bytes.
@@ -412,13 +420,21 @@ fn copy_dir(
     depth: usize,
     linked: bool,
     registry: &WorkspaceRegistry,
+    followed: &mut Vec<PathBuf>,
 ) -> io::Result<()> {
     std::fs::create_dir(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         guard_entry(registry, &entry, linked)?;
         let target = dst.join(entry.file_name());
-        copy_recursive(&entry.path(), &target, depth + 1, linked, registry)?;
+        copy_recursive(
+            &entry.path(),
+            &target,
+            depth + 1,
+            linked,
+            registry,
+            followed,
+        )?;
     }
     Ok(())
 }
@@ -438,16 +454,37 @@ fn copy_link_content(
     dst: &Path,
     depth: usize,
     registry: &WorkspaceRegistry,
+    followed: &mut Vec<PathBuf>,
 ) -> io::Result<()> {
     guard_read(registry, src)?;
     let target = std::fs::metadata(src)?;
     if target.is_dir() {
-        copy_dir(src, dst, depth, true, registry)
+        let from = std::fs::canonicalize(src.parent().unwrap_or(src))?;
+        check_link_descent(&std::fs::canonicalize(src)?, &from, dst, followed)?;
+        followed.push(from);
+        let result = copy_dir(src, dst, depth, true, registry, followed);
+        followed.pop();
+        result
     } else if target.is_file() {
         std::fs::copy(src, dst).map(|_| ())
     } else {
         Err(unsupported_kind())
     }
+}
+
+/// A folder link whose target holds the link, an earlier followed link or the
+/// copy's own staging would copy itself forever. All paths are canonical.
+fn check_link_descent(
+    target: &Path,
+    from: &Path,
+    staged: &Path,
+    followed: &[PathBuf],
+) -> io::Result<()> {
+    let mut inside = followed.iter().map(PathBuf::as_path).chain([from, staged]);
+    if inside.any(|path| path.starts_with(target)) {
+        return Err(into_itself());
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -473,23 +510,39 @@ fn copy_symlink(_src: &Path, _dst: &Path) -> io::Result<()> {
 
 /// Finder naming: ` copy`, then ` copy n`; only the last extension is kept
 /// apart, folders and extensionless names (dotfiles too) get a plain suffix.
+/// A name that already ends in ` copy` or ` copy n` continues its count.
 fn copy_name(name: &OsStr, n: usize, is_dir: bool) -> OsString {
     let path = Path::new(name);
     let (stem, ext) = match (is_dir, path.file_stem(), path.extension()) {
         (false, Some(stem), Some(ext)) => (stem, Some(ext)),
         _ => (name, None),
     };
-    let mut out = stem.to_os_string();
-    if n == 1 {
-        out.push(" copy");
-    } else {
-        out.push(format!(" copy {n}"));
+    let (base, count) = match stem.to_str().and_then(copy_count) {
+        Some((base, count)) => (OsStr::new(base), count),
+        None => (stem, 0),
+    };
+    let mut out = base.to_os_string();
+    match count.saturating_add(n) {
+        1 => out.push(" copy"),
+        number => out.push(format!(" copy {number}")),
     }
     if let Some(ext) = ext {
         out.push(".");
         out.push(ext);
     }
     out
+}
+
+/// `a copy` is copy 1 of `a`, `a copy 7` copy 7; a count never starts with 0.
+fn copy_count(stem: &str) -> Option<(&str, usize)> {
+    if let Some(base) = stem.strip_suffix(" copy") {
+        return Some((base, 1));
+    }
+    let (base, digits) = stem.rsplit_once(" copy ")?;
+    if digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((base, digits.parse().ok()?))
 }
 
 /// A `git init` repo whose `.gitignore` whitelists every folder and `.txt`
@@ -562,6 +615,30 @@ mod tests {
         assert_eq!(name("report", 1, false), "report copy");
         assert_eq!(name("v1.2", 1, true), "v1.2 copy");
         assert_eq!(name("a.txt", 10_000, false), "a copy 10000.txt");
+    }
+
+    #[test]
+    fn a_copy_of_a_copy_continues_the_count() {
+        let name = |n: &str, i, dir| copy_name(OsStr::new(n), i, dir);
+        assert_eq!(name("a copy.txt", 1, false), "a copy 2.txt");
+        assert_eq!(name("a copy.txt", 2, false), "a copy 3.txt");
+        assert_eq!(name("a copy 2.txt", 1, false), "a copy 3.txt");
+        assert_eq!(name("a copy 9.txt", 3, false), "a copy 12.txt");
+        assert_eq!(name("Makefile copy", 1, false), "Makefile copy 2");
+        assert_eq!(name("Makefile copy 2", 1, false), "Makefile copy 3");
+        assert_eq!(name(".env copy", 1, false), ".env copy 2");
+        assert_eq!(name("v1.2 copy", 1, true), "v1.2 copy 2");
+        assert_eq!(name("v1.2 copy 4", 1, true), "v1.2 copy 5");
+        assert_eq!(name("notes copy.d", 1, true), "notes copy.d copy");
+        assert_eq!(name("a copy.tar.gz", 1, false), "a copy.tar copy.gz");
+        assert_eq!(name("a copy 02.txt", 1, false), "a copy 02 copy.txt");
+        assert_eq!(name("a copy x.txt", 1, false), "a copy x copy.txt");
+        assert_eq!(name("a copy .txt", 1, false), "a copy  copy.txt");
+        assert_eq!(name("copy.txt", 1, false), "copy copy.txt");
+        let first: Vec<OsString> = copy_candidates(OsStr::new("a copy.txt"), false)
+            .take(3)
+            .collect();
+        assert_eq!(first, ["a copy.txt", "a copy 2.txt", "a copy 3.txt"]);
     }
 
     #[test]
@@ -1016,6 +1093,27 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn a_followed_folder_link_never_leads_back_into_the_copy() {
+        let staged = Path::new("/ws/dest/.terax-copy-x/item/lib");
+        let descend = |target: &str, from: &str, followed: &[&str]| {
+            let followed: Vec<PathBuf> = followed.iter().map(PathBuf::from).collect();
+            check_link_descent(Path::new(target), Path::new(from), staged, &followed)
+                .map_err(|e| e.to_string())
+        };
+        let itself = Err("cannot copy a folder into itself".to_string());
+        assert_eq!(descend("/src/lib", "/src/app", &[]), Ok(()));
+        assert_eq!(descend("/src/app", "/src/app", &[]), itself);
+        assert_eq!(descend("/src", "/src/app/sub", &[]), itself);
+        assert_eq!(descend("/", "/src/app", &[]), itself);
+        assert_eq!(descend("/ws/dest", "/src/app", &[]), itself);
+        assert_eq!(descend("/ws", "/src/app", &[]), itself);
+        assert_eq!(descend("/ws/dest/other", "/src/app", &[]), Ok(()));
+        assert_eq!(descend("/src", "/lib/sub", &["/src/app"]), itself);
+        assert_eq!(descend("/lib", "/src/b", &["/src/a"]), Ok(()));
+        assert_eq!(descend("/src/app-old", "/src/app", &[]), Ok(()));
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_link_content_fallback_copies_the_target_and_judges_the_link() {
@@ -1029,9 +1127,13 @@ mod tests {
         std::fs::write(src.path().join("keys/id_ed25519"), b"PRIVATE").unwrap();
         symlink("lib", src.path().join("lib-link")).unwrap();
         symlink("keys/id_ed25519", src.path().join("notes.txt")).unwrap();
+        symlink("..", src.path().join("lib/sub/up")).unwrap();
+        let follow = |link: &str, dst: &Path| {
+            copy_link_content(&src.path().join(link), dst, 0, &reg, &mut Vec::new())
+        };
 
         let copied = dest.path().join("lib-link");
-        copy_link_content(&src.path().join("lib-link"), &copied, 0, &reg).unwrap();
+        follow("lib-link", &copied).unwrap();
         assert!(!std::fs::symlink_metadata(&copied)
             .unwrap()
             .file_type()
@@ -1039,12 +1141,17 @@ mod tests {
         assert_eq!(std::fs::read(copied.join("sub/a.txt")).unwrap(), b"a");
 
         let notes = dest.path().join("notes.txt");
-        let err = copy_link_content(&src.path().join("notes.txt"), &notes, 0, &reg).unwrap_err();
+        let err = follow("notes.txt", &notes).unwrap_err();
         assert_eq!(
             err.to_string(),
             "refused: \"id_ed25519\" matches a sensitive-file pattern"
         );
         assert!(std::fs::symlink_metadata(&notes).is_err());
+
+        let up = dest.path().join("up");
+        let err = follow("lib/sub/up", &up).unwrap_err();
+        assert_eq!(err.to_string(), "cannot copy a folder into itself");
+        assert!(std::fs::symlink_metadata(&up).is_err());
     }
 
     #[test]

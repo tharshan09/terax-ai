@@ -869,12 +869,20 @@ fn run_remote_json(
 /// ssh reports its own failures (connect, auth, a dropped master) as 255; every
 /// other status is the remote command's.
 const SSH_OWN_FAILURE_EXIT: i32 = 255;
+/// The remote shell's "command not found": the helper never ran, so no item can.
+const COMMAND_NOT_FOUND_EXIT: i32 = 127;
 
 fn exit_error(code: Option<i32>, stderr: &str) -> RemoteError {
     if let Some(message) = classify_ssh_error(stderr) {
         return RemoteError::Transport(message);
     }
     match code {
+        Some(COMMAND_NOT_FOUND_EXIT) => RemoteError::Transport(if stderr.is_empty() {
+            "the remote helper could not start: command not found on the host (exit 127)"
+                .to_string()
+        } else {
+            format!("the remote helper could not start: {stderr}")
+        }),
         Some(code) if code != SSH_OWN_FAILURE_EXIT => RemoteError::Failed(if stderr.is_empty() {
             format!("remote helper exited with status {code}")
         } else {
@@ -2376,6 +2384,14 @@ Host !secret prod
         assert!(transport(Some(255), ""));
         assert!(transport(None, ""));
         assert!(transport(Some(127), "bash: python3: command not found"));
+        assert!(transport(Some(127), "sh: python3: nicht gefunden"));
+        match exit_error(Some(127), "") {
+            RemoteError::Transport(message) => assert_eq!(
+                message,
+                "the remote helper could not start: command not found on the host (exit 127)"
+            ),
+            other => panic!("127 must stop the batch: {other:?}"),
+        }
         assert!(transport(Some(1), "Permission denied (publickey)."));
         match exit_error(Some(137), "") {
             RemoteError::Failed(message) => {
@@ -2409,6 +2425,36 @@ Host !secret prod
             )]
         );
         assert_eq!(requests.iter().filter(|r| r["op"] == "delete").count(), 1);
+    }
+
+    #[test]
+    fn a_missing_remote_command_stops_the_batch_at_once() {
+        const MISSING: &str = "the remote helper could not start: sh: 1: python: not found";
+        let src = tempfile::tempdir().unwrap();
+        let sources = local_sources(src.path(), &["a.txt", "b.txt", "c.txt"]);
+
+        let (result, requests) = stub_copy(&sources, |_| {
+            Err(exit_error(Some(127), "sh: 1: python: not found"))
+        });
+        assert_eq!(result.unwrap_err(), MISSING);
+        assert_eq!(requests.iter().filter(|r| creates_staging(r)).count(), 1);
+
+        let (result, requests) = stub_copy(&sources, |request| {
+            if request["op"] == "write_bytes" && request["b64"] == b64encode(b"b.txt") {
+                return Err(exit_error(Some(127), "sh: 1: python: not found"));
+            }
+            healthy(request)
+        });
+        let result = result.unwrap();
+        assert_eq!(result.created, ["/remote/a.txt"]);
+        assert_eq!(
+            failures(&result),
+            [
+                (sources[1].clone(), MISSING.to_string()),
+                (sources[2].clone(), MISSING.to_string()),
+            ]
+        );
+        assert_eq!(requests.iter().filter(|r| creates_staging(r)).count(), 2);
     }
 
     #[test]

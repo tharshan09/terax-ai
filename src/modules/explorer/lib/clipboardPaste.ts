@@ -39,6 +39,15 @@ export function isPasteShortcut(e: TerminalKeyEvent, isMac: boolean): boolean {
   return isMac && isTerminalPasteChord(e, { isMac });
 }
 
+// Holding Cmd+V repeats keydown: only the first press pastes.
+export function pasteKeyAction(
+  e: TerminalKeyEvent & Pick<KeyboardEvent, "repeat">,
+  isMac: boolean,
+): "paste" | "swallow" | null {
+  if (!isPasteShortcut(e, isMac)) return null;
+  return e.repeat ? "swallow" : "paste";
+}
+
 type FolderState = { status: string } | undefined;
 
 export type PendingPaste = "select" | "wait" | "drop";
@@ -70,9 +79,19 @@ type PasteOptions = {
   rootPath: string;
   isCurrent: () => boolean;
   isExpanded: (dir: string) => boolean;
+  isWatched: (dir: string) => boolean;
   refresh: (dir: string) => void;
   expand: (dir: string) => void;
 };
+
+// The local watcher reports a publish into a watched folder; SSH has no watcher.
+export function rereadUnlessWatched(
+  dir: string,
+  isWatched: (dir: string) => boolean,
+  refresh: (dir: string) => void,
+): void {
+  if (!isWatched(dir)) refresh(dir);
+}
 
 export function reportCopyFailures(result: CopyResult): void {
   if (result.failed.length === 0) return;
@@ -87,10 +106,19 @@ export function reportCopyFailures(result: CopyResult): void {
 // paths, or nothing once the explorer has moved to another root or workspace.
 export async function pasteClipboardFiles(
   destDir: string,
-  { workspace, rootPath, isCurrent, isExpanded, refresh, expand }: PasteOptions,
+  {
+    workspace,
+    rootPath,
+    isCurrent,
+    isExpanded,
+    isWatched,
+    refresh,
+    expand,
+  }: PasteOptions,
 ): Promise<string[]> {
   // A collapsed folder is read when it opens, so it gets no extra re-read.
   const isOpen = () => destDir === rootPath || isExpanded(destDir);
+  const reread = () => rereadUnlessWatched(destDir, isWatched, refresh);
   let copyStarted = false;
   try {
     const sources = await invoke<string[]>("fs_clipboard_paths");
@@ -108,12 +136,12 @@ export async function pasteClipboardFiles(
     });
     reportCopyFailures(result);
     if (!isCurrent()) return [];
-    if (isOpen()) refresh(destDir);
+    if (isOpen()) reread();
     else if (result.created.length > 0) expand(destDir);
     return result.created;
   } catch (err) {
     toast.error(`Paste failed: ${String(err)}`);
-    if (copyStarted && isCurrent() && isOpen()) refresh(destDir);
+    if (copyStarted && isCurrent() && isOpen()) reread();
     return [];
   }
 }

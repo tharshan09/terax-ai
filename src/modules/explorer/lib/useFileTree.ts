@@ -1,5 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { currentWorkspaceEnv } from "@/modules/workspace";
 import { usePreferencesStore } from "@/modules/settings/preferences";
@@ -31,8 +37,7 @@ export function joinPath(parent: string, name: string): string {
   return `${parent}/${name}`;
 }
 
-// The explorer's one parent rule: tree keys join with `/`, so a backslash is
-// part of a name (legal on Unix), never a separator.
+// Parent of a tree key: keys join with `/`, so a backslash stays part of a name.
 export function dirname(path: string): string {
   const i = path.lastIndexOf("/");
   if (i <= 0) return "/";
@@ -99,6 +104,10 @@ export function useFileTree(rootPath: string | null, options?: Options) {
   const expandedRef = useRef(expanded);
   const nodesRef = useRef(nodes);
   const watchedRef = useRef<Set<string>>(new Set());
+  // The watched folders whose changes the watcher reports under the tree key.
+  const reportedRef = useRef<Set<string>>(new Set());
+  const fetchSeqRef = useRef(0);
+  const latestFetchRef = useRef(new Map<string, number>());
 
   useEffect(() => {
     showHiddenRef.current = showHidden;
@@ -108,26 +117,45 @@ export function useFileTree(rootPath: string | null, options?: Options) {
     gitDecorationsRef.current = gitDecorations;
   }, [gitDecorations]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     expandedRef.current = expanded;
   }, [expanded]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     nodesRef.current = nodes;
   }, [nodes]);
 
-  const addWatch = useCallback((path: string) => {
-    if (watchedRef.current.has(path)) return;
-    watchedRef.current.add(path);
-    watchAdd([path]);
+  const confirmWatches = useCallback((reported: string[]) => {
+    for (const p of reported) {
+      if (watchedRef.current.has(p)) reportedRef.current.add(p);
+    }
   }, []);
 
+  const addWatch = useCallback(
+    (path: string) => {
+      if (watchedRef.current.has(path)) return;
+      watchedRef.current.add(path);
+      void watchAdd([path]).then(confirmWatches);
+    },
+    [confirmWatches],
+  );
+
   const removeWatch = useCallback((path: string) => {
+    reportedRef.current.delete(path);
     if (!watchedRef.current.delete(path)) return;
     watchRemove([path]);
   }, []);
 
   const fetchChildren = useCallback(async (path: string) => {
+    const seq = ++fetchSeqRef.current;
+    const latest = latestFetchRef.current;
+    latest.set(path, seq);
+    // Reads of one folder can finish out of order; only the newest may land.
+    const isNewest = () => {
+      if (latest.get(path) !== seq) return false;
+      latest.delete(path);
+      return true;
+    };
     if (nodesRef.current[path]?.status !== "loaded") {
       setNodes((s) => ({ ...s, [path]: { status: "loading" } }));
     }
@@ -138,6 +166,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
         gitDecorations: gitDecorationsRef.current,
         workspace: currentWorkspaceEnv(),
       });
+      if (!isNewest()) return;
 
       const prev = nodesRef.current[path];
       if (prev?.status === "loaded" && sameDirListing(prev.entries, entries)) {
@@ -178,10 +207,14 @@ export function useFileTree(rootPath: string | null, options?: Options) {
           return changed ? n : c;
         });
         const toUnwatch: string[] = [];
-        for (const d of dead) if (watchedRef.current.delete(d)) toUnwatch.push(d);
+        for (const d of dead) {
+          reportedRef.current.delete(d);
+          if (watchedRef.current.delete(d)) toUnwatch.push(d);
+        }
         watchRemove(toUnwatch);
       }
     } catch (e) {
+      if (!isNewest()) return;
       setNodes((s) => ({
         ...s,
         [path]: { status: "error", message: String(e) },
@@ -192,6 +225,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
   // Root change → restore the cached expansion for this root, re-scope watches,
   // and persist the outgoing root's expansion on the way out.
   useEffect(() => {
+    latestFetchRef.current.clear();
     if (!rootPath) {
       setNodes({});
       setExpanded(new Set());
@@ -216,16 +250,17 @@ export function useFileTree(rootPath: string | null, options?: Options) {
     void fetchChildren(rootPath);
     for (const d of restored) void fetchChildren(d);
     for (const p of toWatch) watchedRef.current.add(p);
-    watchAdd(toWatch);
+    void watchAdd(toWatch).then(confirmWatches);
 
     return () => {
       rememberExpansion(rootPath, expandedRef.current);
+      reportedRef.current.clear();
       if (watchedRef.current.size > 0) {
         watchRemove([...watchedRef.current]);
         watchedRef.current.clear();
       }
     };
-  }, [rootPath, fetchChildren]);
+  }, [rootPath, fetchChildren, confirmWatches]);
 
   useEffect(() => {
     let alive = true;
@@ -299,6 +334,24 @@ export function useFileTree(rootPath: string | null, options?: Options) {
       void fetchChildren(path);
     },
     [fetchChildren],
+  );
+
+  const isExpanded = useCallback(
+    (dir: string) => expandedRef.current.has(dir),
+    [],
+  );
+
+  const nodeAt = useCallback(
+    (dir: string): ChildrenState | undefined => nodesRef.current[dir],
+    [],
+  );
+
+  // True when a watcher event re-reads `dir` on its own: reported and loaded.
+  const isWatched = useCallback(
+    (dir: string) =>
+      reportedRef.current.has(dir) &&
+      nodesRef.current[dir]?.status === "loaded",
+    [],
   );
 
   // --- mutations ---
@@ -442,6 +495,9 @@ export function useFileTree(rootPath: string | null, options?: Options) {
     toggle,
     expand,
     refresh,
+    isExpanded,
+    nodeAt,
+    isWatched,
     beginCreate,
     cancelCreate,
     commitCreate,

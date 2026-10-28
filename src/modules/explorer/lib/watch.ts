@@ -6,12 +6,13 @@ const FS_CHANGED_EVENT = "fs:changed";
 
 type FsChangedPayload = { paths: string[] };
 
-export function watchAdd(paths: string[]): void {
-  if (paths.length === 0) return;
-  void invoke("fs_watch_add", {
+// Resolves to the paths whose changes the watcher reports under that spelling.
+export function watchAdd(paths: string[]): Promise<string[]> {
+  if (paths.length === 0) return Promise.resolve([]);
+  return invoke<string[]>("fs_watch_add", {
     paths,
     workspace: currentWorkspaceEnv(),
-  }).catch(() => {});
+  }).catch(() => []);
 }
 
 export function watchRemove(paths: string[]): void {

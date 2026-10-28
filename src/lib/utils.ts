@@ -23,10 +23,7 @@ export function basename(path: string): string {
   return parts.length ? parts[parts.length - 1] : path
 }
 
-/**
- * Parent folder, tolerant of both `/` and `\` separators; `/x` and `C:/x` keep
- * their root. Returns the original string when it has no separator.
- */
+/** Parent of a native OS path (`/` or `\`), e.g. the editor's watched folders. */
 export function parentDir(path: string): string {
   const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"))
   if (i < 0) return path

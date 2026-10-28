@@ -39,11 +39,12 @@ import {
   revealInFinder,
 } from "./lib/contextActions";
 import {
-  isPasteShortcut,
   pasteClipboardFiles,
   pasteExclusively,
+  pasteKeyAction,
   pasteTargetDir,
   pendingPasteAction,
+  rereadUnlessWatched,
 } from "@/modules/explorer/lib/clipboardPaste";
 import { fileIconUrl, folderIconUrl } from "./lib/iconResolver";
 import { COMPACT_CONTENT, COMPACT_ITEM } from "./lib/menuItemClass";
@@ -215,8 +216,6 @@ export const FileExplorer = memo(
     const workspace = useWorkspaceEnvStore((s) => s.env);
     const pasteBusyRef = useRef(false);
     const pasteScopeRef = useRef<PasteScope>({ rootPath, workspace });
-    const expandedRef = useRef(tree.expanded);
-    const nodesRef = useRef(tree.nodes);
     // `selection` is the selection the paste started from; once the user picks
     // something else, the pasted item must not take it over.
     const [pastedSelection, setPastedSelection] = useState<{
@@ -224,7 +223,7 @@ export const FileExplorer = memo(
       path: string;
       selection: string | null;
       dir: string;
-      folderAtPaste: (typeof tree.nodes)[string] | undefined;
+      folderAtPaste: ReturnType<typeof tree.nodeAt>;
     } | null>(null);
     useLayoutEffect(() => {
       pasteScopeRef.current = { rootPath, workspace };
@@ -232,10 +231,6 @@ export const FileExplorer = memo(
         pasteScopeRef.current = { rootPath: null, workspace };
       };
     }, [rootPath, workspace]);
-    useLayoutEffect(() => {
-      expandedRef.current = tree.expanded;
-      nodesRef.current = tree.nodes;
-    }, [tree.expanded, tree.nodes]);
 
     // biome-ignore lint/correctness/useExhaustiveDependencies: `tree` is intentionally omitted (its identity changes every render); the listed fields are the only inputs buildRows actually reads.
     const { rows, entryIndexByPath } = useMemo(() => {
@@ -296,7 +291,7 @@ export const FileExplorer = memo(
     const fileDrop = useExplorerFileDrop({
       rootPath,
       isDir: isDirAt,
-      onCopied: tree.refresh,
+      onCopied: (dir) => rereadUnlessWatched(dir, tree.isWatched, tree.refresh),
     });
 
     const dropTargetDir = dnd.dropTargetDir ?? fileDrop.externalTargetDir;
@@ -371,7 +366,8 @@ export const FileExplorer = memo(
             workspace,
             rootPath,
             isCurrent,
-            isExpanded: (dir) => expandedRef.current.has(dir),
+            isExpanded: tree.isExpanded,
+            isWatched: tree.isWatched,
             refresh: tree.refresh,
             expand: tree.expand,
           });
@@ -382,11 +378,20 @@ export const FileExplorer = memo(
             path: first,
             selection: selectedPath,
             dir: destDir,
-            folderAtPaste: nodesRef.current[destDir],
+            folderAtPaste: tree.nodeAt(destDir),
           });
         });
       },
-      [rootPath, workspace, selectedPath, tree.refresh, tree.expand],
+      [
+        rootPath,
+        workspace,
+        selectedPath,
+        tree.refresh,
+        tree.expand,
+        tree.isExpanded,
+        tree.isWatched,
+        tree.nodeAt,
+      ],
     );
 
     const lastSyncedActivePathRef = useRef<string | null>(null);
@@ -466,9 +471,12 @@ export const FileExplorer = memo(
       )
         return;
 
-      if (isPasteShortcut(e, IS_MAC)) {
+      const pasteKey = pasteKeyAction(e, IS_MAC);
+      if (pasteKey) {
         e.preventDefault();
-        void pasteInto(pasteTargetDir(selectedPath, isDirAt, rootPath));
+        if (pasteKey === "paste") {
+          void pasteInto(pasteTargetDir(selectedPath, isDirAt, rootPath));
+        }
         return;
       }
 
@@ -516,8 +524,8 @@ export const FileExplorer = memo(
           if (row.isDir && row.isExpanded) {
             tree.toggle(row.path);
           } else {
-            const parent = row.path.slice(0, row.path.lastIndexOf("/"));
-            if (parent && parent !== rootPath) setSelectedPath(parent);
+            const parent = dirname(row.path);
+            if (parent !== rootPath) setSelectedPath(parent);
           }
           break;
         }

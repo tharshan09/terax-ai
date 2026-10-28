@@ -3,10 +3,13 @@ import {
   isPasteShortcut,
   pasteClipboardFiles,
   pasteExclusively,
+  pasteKeyAction,
   pasteTargetDir,
   pendingPasteAction,
+  rereadUnlessWatched,
 } from "@/modules/explorer/lib/clipboardPaste";
 import { dirname } from "@/modules/explorer/lib/useFileTree";
+import type { WorkspaceEnv } from "@/modules/workspace";
 
 const { invoke, toast } = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -169,6 +172,26 @@ describe("isPasteShortcut", () => {
       isPasteShortcut(key({ key: "c", code: "KeyC", metaKey: true }), true),
     ).toBe(false);
   });
+
+  it("pastes on the first Cmd+V and swallows the repeats of a held key", () => {
+    const cmdV = key({ metaKey: true });
+    expect(pasteKeyAction({ ...cmdV, repeat: false }, true)).toBe("paste");
+    expect(pasteKeyAction({ ...cmdV, repeat: true }, true)).toBe("swallow");
+    expect(pasteKeyAction({ ...cmdV, repeat: true }, false)).toBeNull();
+    expect(
+      pasteKeyAction({ ...key({ ctrlKey: true }), repeat: false }, true),
+    ).toBeNull();
+  });
+});
+
+describe("rereadUnlessWatched", () => {
+  it("leaves a watched folder to the watcher and re-reads any other", () => {
+    const refresh = vi.fn((_dir: string) => {});
+    rereadUnlessWatched("/ws/docs", (dir) => dir === "/ws/docs", refresh);
+    expect(refresh).not.toHaveBeenCalled();
+    rereadUnlessWatched("/ws", (dir) => dir === "/ws/docs", refresh);
+    expect(refresh).toHaveBeenCalledWith("/ws");
+  });
 });
 
 function deferred<T>() {
@@ -179,12 +202,15 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function options() {
+function options(
+  workspace: WorkspaceEnv = { kind: "ssh", host: "litha-claude" },
+) {
   return {
-    workspace: { kind: "ssh" as const, host: "litha-claude" },
+    workspace,
     rootPath: "/ws",
     isCurrent: vi.fn(() => true),
     isExpanded: vi.fn((_dir: string) => false),
+    isWatched: vi.fn((_dir: string) => false),
     refresh: vi.fn((_path: string) => {}),
     expand: vi.fn((_path: string) => {}),
   };
@@ -232,6 +258,43 @@ describe("pasteClipboardFiles", () => {
     await pasteClipboardFiles("/ws/docs", collapsed);
     expect(collapsed.refresh).not.toHaveBeenCalled();
     expect(collapsed.expand).not.toHaveBeenCalled();
+  });
+
+  it("leaves a watched local folder to the watcher but re-reads the rest", async () => {
+    const copied = (dir: string) => ({ created: [`${dir}/a.txt`], failed: [] });
+    const watched = options({ kind: "local" });
+    watched.isExpanded.mockReturnValue(true);
+    watched.isWatched.mockImplementation((dir) => dir === "/ws/docs");
+    invoke
+      .mockResolvedValueOnce(["/tmp/a.txt"])
+      .mockResolvedValueOnce(copied("/ws/docs"));
+    expect(await pasteClipboardFiles("/ws/docs", watched)).toEqual([
+      "/ws/docs/a.txt",
+    ]);
+    expect(watched.isWatched).toHaveBeenCalledWith("/ws/docs");
+    expect(watched.refresh).not.toHaveBeenCalled();
+    expect(watched.expand).not.toHaveBeenCalled();
+
+    invoke
+      .mockResolvedValueOnce(["/tmp/a.txt"])
+      .mockResolvedValueOnce(copied("/ws"));
+    await pasteClipboardFiles("/ws", watched);
+    expect(watched.refresh).toHaveBeenCalledWith("/ws");
+
+    const ssh = options();
+    ssh.isExpanded.mockReturnValue(true);
+    invoke
+      .mockResolvedValueOnce(["/tmp/a.txt"])
+      .mockResolvedValueOnce(copied("/ws/docs"));
+    await pasteClipboardFiles("/ws/docs", ssh);
+    expect(ssh.refresh).toHaveBeenCalledWith("/ws/docs");
+
+    invoke
+      .mockResolvedValueOnce(["/tmp/a.txt"])
+      .mockRejectedValueOnce("copy destination is not a directory");
+    watched.refresh.mockClear();
+    await pasteClipboardFiles("/ws/docs", watched);
+    expect(watched.refresh).not.toHaveBeenCalled();
   });
 
   it("stops with a hint when the clipboard holds no files", async () => {

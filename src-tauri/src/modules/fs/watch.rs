@@ -186,20 +186,32 @@ fn collect(set: &mut HashSet<String>, ev: notify::Result<Event>) {
     }
 }
 
-fn add_paths(inner: &mut WatchInner, paths: Vec<PathBuf>) {
-    for canonical in paths {
+/// Returns the requested spellings now watched whose events carry that same
+/// path: events always name the canonical one.
+fn add_paths(inner: &mut WatchInner, paths: Vec<(String, PathBuf)>) -> Vec<String> {
+    let mut reported = Vec::new();
+    for (raw, canonical) in paths {
         let current = inner.refcounts.get(&canonical).copied().unwrap_or(0);
-        if current == 0 {
+        let watched = if current == 0 {
             match inner.watcher.watch(&canonical, RecursiveMode::NonRecursive) {
-                Ok(()) => {
-                    inner.refcounts.insert(canonical, 1);
+                Ok(()) => true,
+                Err(e) => {
+                    log::debug!("fs_watch add {} failed: {e}", canonical.display());
+                    false
                 }
-                Err(e) => log::debug!("fs_watch add {} failed: {e}", canonical.display()),
             }
         } else {
-            inner.refcounts.insert(canonical, current + 1);
+            true
+        };
+        if !watched {
+            continue;
         }
+        if to_canon(&canonical) == raw {
+            reported.push(raw);
+        }
+        inner.refcounts.insert(canonical, current + 1);
     }
+    reported
 }
 
 fn remove_paths(inner: &mut WatchInner, paths: Vec<PathBuf>) {
@@ -219,7 +231,7 @@ fn prepare_add(
     registry: &WorkspaceRegistry,
     workspace: &WorkspaceEnv,
     paths: Vec<String>,
-) -> Vec<PathBuf> {
+) -> Vec<(String, PathBuf)> {
     paths
         .into_iter()
         .filter_map(|raw| {
@@ -228,7 +240,7 @@ fn prepare_add(
             if !canonical.is_dir() || is_skipped(&canonical) || !registry.is_authorized(&canonical) {
                 return None;
             }
-            Some(canonical)
+            Some((raw, canonical))
         })
         .collect()
 }
@@ -240,24 +252,24 @@ pub fn fs_watch_add(
     app: AppHandle,
     state: State<'_, FsWatchState>,
     registry: State<'_, WorkspaceRegistry>,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     let workspace = WorkspaceEnv::from_option(workspace);
     // No live FS events over ssh — remote watching isn't wired up; the explorer
     // refreshes on navigation instead. (A local watcher can't observe a remote
     // path anyway.)
     if workspace.is_ssh() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let prepared = prepare_add(&registry, &workspace, paths);
     if prepared.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     ensure_started(&state, &app)?;
     let mut guard = state.inner.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(inner) = guard.as_mut() {
-        add_paths(inner, prepared);
-    }
-    Ok(())
+    Ok(guard
+        .as_mut()
+        .map(|inner| add_paths(inner, prepared))
+        .unwrap_or_default())
 }
 
 #[tauri::command]
@@ -322,6 +334,36 @@ mod tests {
         collect(&mut set, modify());
         collect(&mut set, modify());
         assert_eq!(set.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_folder_named_like_its_events_counts_as_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        for dir in ["src", "node_modules"] {
+            std::fs::create_dir(base.join(dir)).unwrap();
+        }
+        std::os::unix::fs::symlink(base.join("src"), base.join("alias")).unwrap();
+        let registry = WorkspaceRegistry::default();
+        registry.authorize(&base).unwrap();
+        let mut inner = WatchInner {
+            watcher: RecommendedWatcher::new(|_: notify::Result<Event>| {}, Config::default())
+                .unwrap(),
+            refcounts: HashMap::new(),
+        };
+        let src = to_canon(base.join("src"));
+        let requested = vec![
+            src.clone(),
+            to_canon(base.join("alias")),
+            format!("{src}/"),
+            to_canon(base.join("node_modules")),
+            to_canon(base.join("gone")),
+        ];
+        let prepared = prepare_add(&registry, &WorkspaceEnv::Local, requested);
+        assert_eq!(add_paths(&mut inner, prepared), [src]);
+        assert_eq!(inner.refcounts.get(&base.join("src")), Some(&3));
+        assert_eq!(inner.refcounts.len(), 1);
     }
 
     #[test]
