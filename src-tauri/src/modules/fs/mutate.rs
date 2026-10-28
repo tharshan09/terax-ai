@@ -18,7 +18,7 @@ fn outside_workspace(p: &Path) -> String {
 /// SSH mutations never reach here: the commands early-return to the remote
 /// helper, whose reach is bounded by the host account, not this registry (an
 /// accepted trust-the-host-account limit — see `workspace_authorize`).
-fn authorize_mutation_dir(
+pub(super) fn authorize_mutation_dir(
     registry: &WorkspaceRegistry,
     dir: Option<&Path>,
     label: &Path,
@@ -192,70 +192,6 @@ fn fs_delete_impl(
     })
 }
 
-fn copy_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    if src.is_dir() {
-        std::fs::create_dir(dst)?;
-        for entry in std::fs::read_dir(src)? {
-            let entry = entry?;
-            copy_recursive(&entry.path(), &dst.join(entry.file_name()))?;
-        }
-        Ok(())
-    } else {
-        std::fs::copy(src, dst).map(|_| ())
-    }
-}
-
-/// Copies external files/dirs into a destination directory, recursively for
-/// dirs. Sources are absolute OS paths (from a drag-drop); only the destination
-/// is workspace-resolved. Refuses to overwrite existing entries.
-#[tauri::command]
-pub fn fs_copy(
-    sources: Vec<String>,
-    dest_dir: String,
-    workspace: Option<WorkspaceEnv>,
-    registry: tauri::State<'_, WorkspaceRegistry>,
-) -> Result<(), String> {
-    fs_copy_impl(sources, dest_dir, workspace, &registry)
-}
-
-fn fs_copy_impl(
-    sources: Vec<String>,
-    dest_dir: String,
-    workspace: Option<WorkspaceEnv>,
-    registry: &WorkspaceRegistry,
-) -> Result<(), String> {
-    let workspace = WorkspaceEnv::from_option(workspace);
-    if let WorkspaceEnv::Ssh { host } = &workspace {
-        return crate::modules::ssh::copy(host, &sources, &dest_dir);
-    }
-    let dest = resolve_path(&dest_dir, &workspace);
-    // Only the destination is jailed; sources are arbitrary local paths the user
-    // picked to bring INTO the workspace (drag-drop), so they stay unconstrained.
-    authorize_mutation_dir(registry, Some(&dest), &dest)?;
-    for source in &sources {
-        let src = std::path::PathBuf::from(source);
-        let name = src
-            .file_name()
-            .ok_or_else(|| format!("invalid source: {source}"))?;
-        let target = dest.join(name);
-        // symlink_metadata (not exists): refuse any pre-existing leaf, including
-        // a dangling symlink that std::fs::copy would otherwise follow to write
-        // outside the destination directory.
-        if std::fs::symlink_metadata(&target).is_ok() {
-            return Err(format!("already exists: {}", target.display()));
-        }
-        copy_recursive(&src, &target).map_err(|e| {
-            log::warn!(
-                "fs_copy({} -> {}) failed: {e}",
-                src.display(),
-                target.display()
-            );
-            e.to_string()
-        })?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,44 +261,6 @@ mod tests {
         assert!(err.contains("already exists"), "got: {err}");
         assert_eq!(std::fs::read(&occupied).unwrap(), b"keep");
         assert!(to.exists());
-    }
-
-    #[test]
-    fn copy_brings_file_and_dir_in_and_refuses_clobber() {
-        let src = tempfile::tempdir().unwrap();
-        let dest = tempfile::tempdir().unwrap();
-        let reg = reg_for(dest.path());
-        std::fs::write(src.path().join("a.txt"), b"payload").unwrap();
-        std::fs::create_dir_all(src.path().join("d/inner")).unwrap();
-        std::fs::write(src.path().join("d/inner/y.txt"), b"y").unwrap();
-
-        fs_copy_impl(
-            vec![s(src.path().join("a.txt")), s(src.path().join("d"))],
-            s(dest.path().to_path_buf()),
-            None,
-            &reg,
-        )
-        .expect("copy");
-
-        assert_eq!(
-            std::fs::read(dest.path().join("a.txt")).unwrap(),
-            b"payload"
-        );
-        assert_eq!(
-            std::fs::read(dest.path().join("d/inner/y.txt")).unwrap(),
-            b"y"
-        );
-        // copy, not move: the source survives.
-        assert!(src.path().join("a.txt").exists());
-
-        let err = fs_copy_impl(
-            vec![s(src.path().join("a.txt"))],
-            s(dest.path().to_path_buf()),
-            None,
-            &reg,
-        )
-        .unwrap_err();
-        assert!(err.contains("already exists"), "got: {err}");
     }
 
     #[test]
@@ -455,24 +353,6 @@ mod tests {
         assert!(victim.exists(), "file outside the jail must survive");
     }
 
-    #[test]
-    fn copy_rejects_unauthorized_dest() {
-        let src = tempfile::tempdir().unwrap();
-        let foreign = tempfile::tempdir().unwrap();
-        let allowed = tempfile::tempdir().unwrap();
-        let reg = reg_for(allowed.path());
-        std::fs::write(src.path().join("a.txt"), b"payload").unwrap();
-        let err = fs_copy_impl(
-            vec![s(src.path().join("a.txt"))],
-            s(foreign.path().to_path_buf()),
-            None,
-            &reg,
-        )
-        .unwrap_err();
-        assert!(err.contains("outside the authorized workspace"), "got: {err}");
-        assert!(!foreign.path().join("a.txt").exists());
-    }
-
     // `..` in the target must be rejected: otherwise create_dir_all would build
     // a real dir inside the root and then traverse out through it.
     #[test]
@@ -511,30 +391,6 @@ mod tests {
         assert!(err.contains("already exists"), "got: {err}");
         // The symlink target must not have been written through.
         assert!(!victim.exists(), "must not create the symlink target");
-    }
-
-    // FS-5: same defense on the copy destination leaf.
-    #[cfg(unix)]
-    #[test]
-    fn copy_refuses_prestaged_dangling_symlink_at_dest() {
-        let src = tempfile::tempdir().unwrap();
-        let dest = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let reg = reg_for(dest.path());
-        std::fs::write(src.path().join("a.txt"), b"payload").unwrap();
-        let victim = outside.path().join("victim.txt"); // does not exist yet
-        let link = dest.path().join("a.txt");
-        std::os::unix::fs::symlink(&victim, &link).unwrap();
-
-        let err = fs_copy_impl(
-            vec![s(src.path().join("a.txt"))],
-            s(dest.path().to_path_buf()),
-            None,
-            &reg,
-        )
-        .unwrap_err();
-        assert!(err.contains("already exists"), "got: {err}");
-        assert!(!victim.exists(), "must not write through the symlink");
     }
 
     // A symlink that lives inside the jail but points outside it can still be

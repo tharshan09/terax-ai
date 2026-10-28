@@ -1,8 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { currentWorkspaceEnv } from "@/modules/workspace";
 import { usePreferencesStore } from "@/modules/settings/preferences";
+import { dirname, joinPath } from "./paths";
 import { listenFsChanged, watchAdd, watchRemove } from "./watch";
 
 export type DirEntry = {
@@ -13,29 +20,43 @@ export type DirEntry = {
   gitignored: boolean;
 };
 
+// `gen` is the read a state came from, so a commit tells which waiters it frees.
 type ChildrenState =
   | { status: "idle" }
   | { status: "loading" }
-  | { status: "loaded"; entries: DirEntry[] }
-  | { status: "error"; message: string };
+  | { status: "loaded"; entries: DirEntry[]; gen: number }
+  | { status: "error"; message: string; gen: number };
 
 type TreeState = Record<string, ChildrenState>;
+
+// A refresh() or expand() waiting for a read at least as new as `gen` to show.
+type Waiter = { gen: number; done: () => void };
+
+function genOf(state: ChildrenState): number {
+  return "gen" in state ? state.gen : 0;
+}
+
+function release(
+  waiters: Map<string, Waiter[]>,
+  path: string,
+  gen: number,
+): void {
+  const list = waiters.get(path);
+  if (!list) return;
+  const rest = list.filter((w) => w.gen > gen);
+  if (rest.length > 0) waiters.set(path, rest);
+  else waiters.delete(path);
+  for (const w of list) if (w.gen <= gen) w.done();
+}
+
+// `keepOnError`: a failing read leaves a loaded listing in place (a host that
+// just dropped the connection), and the caller's toast says what went wrong.
+export type RefreshOptions = { keepOnError?: boolean };
 
 export type PendingCreate = {
   parentPath: string;
   kind: "file" | "dir";
 };
-
-export function joinPath(parent: string, name: string): string {
-  if (parent.endsWith("/")) return `${parent}${name}`;
-  return `${parent}/${name}`;
-}
-
-export function dirname(path: string): string {
-  const i = path.lastIndexOf("/");
-  if (i <= 0) return "/";
-  return path.slice(0, i);
-}
 
 const EXPANSION_CACHE_LIMIT = 8;
 const expansionCache = new Map<string, string[]>();
@@ -97,6 +118,15 @@ export function useFileTree(rootPath: string | null, options?: Options) {
   const expandedRef = useRef(expanded);
   const nodesRef = useRef(nodes);
   const watchedRef = useRef<Set<string>>(new Set());
+  // Reads of one folder can finish out of order: one lands unless a newer one
+  // already did, so a folder under steady change still updates.
+  const readCountRef = useRef(0);
+  const landedRef = useRef(new Map<string, number>());
+  // The newest landed state per folder, which may not have rendered yet.
+  const latestRef = useRef(new Map<string, ChildrenState>());
+  // Reads started before the last root change never land.
+  const floorRef = useRef(0);
+  const waitersRef = useRef(new Map<string, Waiter[]>());
 
   useEffect(() => {
     showHiddenRef.current = showHidden;
@@ -106,12 +136,16 @@ export function useFileTree(rootPath: string | null, options?: Options) {
     gitDecorationsRef.current = gitDecorations;
   }, [gitDecorations]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     expandedRef.current = expanded;
   }, [expanded]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     nodesRef.current = nodes;
+    for (const [path] of waitersRef.current) {
+      const shown = nodes[path];
+      if (shown) release(waitersRef.current, path, genOf(shown));
+    }
   }, [nodes]);
 
   const addWatch = useCallback((path: string) => {
@@ -125,71 +159,131 @@ export function useFileTree(rootPath: string | null, options?: Options) {
     watchRemove([path]);
   }, []);
 
-  const fetchChildren = useCallback(async (path: string) => {
-    if (nodesRef.current[path]?.status !== "loaded") {
-      setNodes((s) => ({ ...s, [path]: { status: "loading" } }));
-    }
-    try {
-      const entries = await invoke<DirEntry[]>("fs_read_dir", {
-        path,
-        showHidden: showHiddenRef.current,
-        gitDecorations: gitDecorationsRef.current,
-        workspace: currentWorkspaceEnv(),
-      });
-
-      const prev = nodesRef.current[path];
-      if (prev?.status === "loaded" && sameDirListing(prev.entries, entries)) {
-        return;
+  const readChildren = useCallback(
+    async (path: string, gen: number, keepOnError = false) => {
+      const landed = landedRef.current;
+      const lands = () => {
+        if (gen <= Math.max(floorRef.current, landed.get(path) ?? 0))
+          return false;
+        landed.set(path, gen);
+        return true;
+      };
+      if (nodesRef.current[path]?.status !== "loaded") {
+        setNodes((s) => ({ ...s, [path]: { status: "loading" } }));
       }
-
-      const liveDirs = new Set(
-        entries.filter((e) => e.kind === "dir").map((e) => joinPath(path, e.name)),
-      );
-      const removedRoots: string[] = [];
-      for (const key of Object.keys(nodesRef.current)) {
-        if (dirname(key) === path && !liveDirs.has(key)) removedRoots.push(key);
-      }
-      const dead = new Set<string>();
-      if (removedRoots.length > 0) {
-        const candidates = new Set<string>([
-          ...Object.keys(nodesRef.current),
-          ...expandedRef.current,
-          ...watchedRef.current,
-        ]);
-        for (const k of candidates) {
-          if (removedRoots.some((r) => isUnder(k, r))) dead.add(k);
-        }
-      }
-
-      setNodes((s) => {
-        const next: TreeState = {};
-        for (const [k, v] of Object.entries(s)) if (!dead.has(k)) next[k] = v;
-        next[path] = { status: "loaded", entries };
-        return next;
-      });
-
-      if (dead.size > 0) {
-        setExpanded((c) => {
-          let changed = false;
-          const n = new Set(c);
-          for (const d of dead) if (n.delete(d)) changed = true;
-          return changed ? n : c;
+      try {
+        const entries = await invoke<DirEntry[]>("fs_read_dir", {
+          path,
+          showHidden: showHiddenRef.current,
+          gitDecorations: gitDecorationsRef.current,
+          workspace: currentWorkspaceEnv(),
         });
-        const toUnwatch: string[] = [];
-        for (const d of dead) if (watchedRef.current.delete(d)) toUnwatch.push(d);
-        watchRemove(toUnwatch);
+        if (!lands()) return;
+
+        // Only a listing that is on screen and not about to be replaced by a
+        // queued older one may stand in for this read.
+        const prev = nodesRef.current[path];
+        if (
+          prev?.status === "loaded" &&
+          latestRef.current.get(path) === prev &&
+          sameDirListing(prev.entries, entries)
+        ) {
+          release(waitersRef.current, path, gen);
+          return;
+        }
+
+        const liveDirs = new Set(
+          entries
+            .filter((e) => e.kind === "dir")
+            .map((e) => joinPath(path, e.name)),
+        );
+        const removedRoots: string[] = [];
+        for (const key of Object.keys(nodesRef.current)) {
+          if (dirname(key) === path && !liveDirs.has(key))
+            removedRoots.push(key);
+        }
+        const dead = new Set<string>();
+        if (removedRoots.length > 0) {
+          const candidates = new Set<string>([
+            ...Object.keys(nodesRef.current),
+            ...expandedRef.current,
+            ...watchedRef.current,
+          ]);
+          for (const k of candidates) {
+            if (removedRoots.some((r) => isUnder(k, r))) dead.add(k);
+          }
+        }
+
+        const node: ChildrenState = { status: "loaded", entries, gen };
+        latestRef.current.set(path, node);
+        setNodes((s) => {
+          const next: TreeState = {};
+          for (const [k, v] of Object.entries(s)) if (!dead.has(k)) next[k] = v;
+          next[path] = node;
+          return next;
+        });
+
+        if (dead.size > 0) {
+          setExpanded((c) => {
+            let changed = false;
+            const n = new Set(c);
+            for (const d of dead) if (n.delete(d)) changed = true;
+            return changed ? n : c;
+          });
+          const toUnwatch: string[] = [];
+          for (const d of dead) {
+            // A removed folder's late answer must not bring it back.
+            landed.set(d, readCountRef.current);
+            latestRef.current.delete(d);
+            release(waitersRef.current, d, Number.POSITIVE_INFINITY);
+            if (watchedRef.current.delete(d)) toUnwatch.push(d);
+          }
+          watchRemove(toUnwatch);
+        }
+      } catch (e) {
+        if (!lands()) return;
+        if (keepOnError && latestRef.current.get(path)?.status === "loaded") {
+          release(waitersRef.current, path, gen);
+          return;
+        }
+        const node: ChildrenState = {
+          status: "error",
+          message: String(e),
+          gen,
+        };
+        latestRef.current.set(path, node);
+        setNodes((s) => ({ ...s, [path]: node }));
       }
-    } catch (e) {
-      setNodes((s) => ({
-        ...s,
-        [path]: { status: "error", message: String(e) },
-      }));
-    }
-  }, []);
+    },
+    [],
+  );
+
+  const fetchChildren = useCallback(
+    (path: string): Promise<void> => readChildren(path, ++readCountRef.current),
+    [readChildren],
+  );
+
+  // Settles once this read, or a newer one, shows in the rendered tree.
+  const refresh = useCallback(
+    (path: string, options?: RefreshOptions): Promise<void> => {
+      const gen = ++readCountRef.current;
+      const shown = new Promise<void>((done) => {
+        const list = waitersRef.current.get(path) ?? [];
+        list.push({ gen, done });
+        waitersRef.current.set(path, list);
+      });
+      void readChildren(path, gen, options?.keepOnError);
+      return shown;
+    },
+    [readChildren],
+  );
 
   // Root change → restore the cached expansion for this root, re-scope watches,
   // and persist the outgoing root's expansion on the way out.
   useEffect(() => {
+    landedRef.current.clear();
+    latestRef.current.clear();
+    floorRef.current = readCountRef.current;
     if (!rootPath) {
       setNodes({});
       setExpanded(new Set());
@@ -218,6 +312,10 @@ export function useFileTree(rootPath: string | null, options?: Options) {
 
     return () => {
       rememberExpansion(rootPath, expandedRef.current);
+      const waiters = waitersRef.current;
+      for (const path of [...waiters.keys()]) {
+        release(waiters, path, Number.POSITIVE_INFINITY);
+      }
       if (watchedRef.current.size > 0) {
         watchRemove([...watchedRef.current]);
         watchedRef.current.clear();
@@ -247,10 +345,10 @@ export function useFileTree(rootPath: string | null, options?: Options) {
     };
   }, [fetchChildren]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: re-list loaded directories only when visibility/git-decoration/root prefs change; `nodes` is intentionally omitted so ordinary tree edits don't refetch every expanded directory.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-list loaded directories only when visibility/git-decoration/root prefs change; the tree is read from the ref, which the root change above has already cleared, so no folder of an old root is read again.
   useEffect(() => {
     if (!rootPath) return;
-    const loadedPaths = Object.entries(nodes)
+    const loadedPaths = Object.entries(nodesRef.current)
       .filter(([, state]) => state.status === "loaded")
       .map(([path]) => path);
     for (const path of loadedPaths) void fetchChildren(path);
@@ -279,24 +377,22 @@ export function useFileTree(rootPath: string | null, options?: Options) {
   );
 
   const expand = useCallback(
-    (path: string) => {
-      if (expandedRef.current.has(path)) return;
+    (path: string): Promise<void> => {
+      if (expandedRef.current.has(path)) return Promise.resolve();
       setExpanded((curr) => {
         const next = new Set(curr);
         next.add(path);
         return next;
       });
       addWatch(path);
-      void fetchChildren(path);
+      return refresh(path);
     },
-    [fetchChildren, addWatch],
+    [refresh, addWatch],
   );
 
-  const refresh = useCallback(
-    (path: string) => {
-      void fetchChildren(path);
-    },
-    [fetchChildren],
+  const isExpanded = useCallback(
+    (dir: string) => expandedRef.current.has(dir),
+    [],
   );
 
   // --- mutations ---
@@ -338,7 +434,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
         pendingCreate.kind === "dir" ? "fs_create_dir" : "fs_create_file";
       try {
         await invoke(cmd, { path, workspace: currentWorkspaceEnv() });
-        await fetchChildren(pendingCreate.parentPath);
+        await refresh(pendingCreate.parentPath);
       } catch (e) {
         console.error(`${cmd} failed:`, e);
         toast.error(
@@ -348,7 +444,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
         setPendingCreate(null);
       }
     },
-    [pendingCreate, fetchChildren],
+    [pendingCreate, refresh],
   );
 
   const beginRename = useCallback((path: string) => {
@@ -376,7 +472,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
           workspace: currentWorkspaceEnv(),
         });
         options?.onPathRenamed?.(renaming, to);
-        await fetchChildren(parent);
+        await refresh(parent);
       } catch (e) {
         console.error("fs_rename failed:", e);
         toast.error(`Couldn’t rename to “${trimmed}”: ${String(e)}`);
@@ -384,7 +480,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
         setRenaming(null);
       }
     },
-    [renaming, fetchChildren, options],
+    [renaming, refresh, options],
   );
 
   const deletePath = useCallback(
@@ -392,7 +488,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
       try {
         await invoke("fs_delete", { path, workspace: currentWorkspaceEnv() });
         options?.onPathDeleted?.(path);
-        await fetchChildren(dirname(path));
+        await refresh(dirname(path));
       } catch (e) {
         console.error("fs_delete failed:", e);
         toast.error(
@@ -400,7 +496,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
         );
       }
     },
-    [fetchChildren, options],
+    [refresh, options],
   );
 
   const movePath = useCallback(
@@ -423,13 +519,13 @@ export function useFileTree(rootPath: string | null, options?: Options) {
           workspace: currentWorkspaceEnv(),
         });
         options?.onPathRenamed?.(from, to);
-        await Promise.all([fetchChildren(dirname(from)), fetchChildren(toDir)]);
+        await Promise.all([refresh(dirname(from)), refresh(toDir)]);
       } catch (e) {
         console.error("fs_rename (move) failed:", e);
         toast.error(`Couldn’t move “${name}”: ${String(e)}`);
       }
     },
-    [fetchChildren, options],
+    [refresh, options],
   );
 
   return {
@@ -440,6 +536,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
     toggle,
     expand,
     refresh,
+    isExpanded,
     beginCreate,
     cancelCreate,
     commitCreate,

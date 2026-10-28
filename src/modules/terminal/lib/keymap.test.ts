@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  isChordLetter,
   isTerminalCopyChord,
   isTerminalPasteChord,
   terminalDeleteSequence,
@@ -199,6 +200,64 @@ describe("isTerminalCopyChord", () => {
       }),
     ).toBe(false);
   });
+
+  it("goes by the letter on Latin layouts, so Dvorak J on the C key is no copy", () => {
+    expect(
+      isTerminalCopyChord(evt({ ctrlKey: true, key: "j", code: "KeyC" }), {
+        isMac: false,
+      }),
+    ).toBe(false);
+    expect(
+      isTerminalCopyChord(evt({ metaKey: true, key: "j", code: "KeyC" }), {
+        isMac: true,
+      }),
+    ).toBe(false);
+    expect(
+      isTerminalCopyChord(evt({ metaKey: true, key: "c", code: "KeyI" }), {
+        isMac: true,
+      }),
+    ).toBe(true);
+    expect(
+      isTerminalCopyChord(evt({ ctrlKey: true, key: "C", code: "KeyI" }), {
+        isMac: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("matches the physical C key on non-Latin layouts", () => {
+    expect(
+      isTerminalCopyChord(evt({ ctrlKey: true, key: "с", code: "KeyC" }), {
+        isMac: false,
+      }),
+    ).toBe(true);
+    expect(
+      isTerminalCopyChord(evt({ metaKey: true, key: "с", code: "KeyC" }), {
+        isMac: true,
+      }),
+    ).toBe(true);
+    expect(
+      isTerminalCopyChord(evt({ metaKey: true, key: "с", code: "KeyS" }), {
+        isMac: true,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("isChordLetter", () => {
+  it("reads Ctrl+Shift+C/V by the shifted letter on Latin layouts", () => {
+    const shifted = (key: string, code: string) =>
+      evt({ ctrlKey: true, shiftKey: true, key, code });
+    expect(isChordLetter(shifted("C", "KeyC"), "c")).toBe(true);
+    expect(isChordLetter(shifted("V", "KeyV"), "v")).toBe(true);
+    expect(isChordLetter(shifted("J", "KeyC"), "c")).toBe(false);
+    expect(isChordLetter(shifted("C", "KeyI"), "c")).toBe(true);
+  });
+
+  it("falls back to the physical key only on non-Latin layouts", () => {
+    expect(isChordLetter(evt({ key: "С", code: "KeyC" }), "c")).toBe(true);
+    expect(isChordLetter(evt({ key: "М", code: "KeyV" }), "v")).toBe(true);
+    expect(isChordLetter(evt({ key: "М", code: "KeyM" }), "v")).toBe(false);
+  });
 });
 
 describe("isTerminalPasteChord", () => {
@@ -232,6 +291,42 @@ describe("isTerminalPasteChord", () => {
         evt({ ctrlKey: true, shiftKey: true, code: "KeyV" }),
         { isMac: false },
       ),
+    ).toBe(false);
+  });
+
+  it("goes by the letter on Latin layouts, so Dvorak K on the V key is no paste", () => {
+    expect(
+      isTerminalPasteChord(evt({ ctrlKey: true, key: "k", code: "KeyV" }), {
+        isMac: false,
+      }),
+    ).toBe(false);
+    expect(
+      isTerminalPasteChord(evt({ metaKey: true, key: "k", code: "KeyV" }), {
+        isMac: true,
+      }),
+    ).toBe(false);
+    expect(
+      isTerminalPasteChord(evt({ ctrlKey: true, key: "v", code: "Period" }), {
+        isMac: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("matches the physical V key on non-Latin layouts", () => {
+    expect(
+      isTerminalPasteChord(evt({ ctrlKey: true, key: "м", code: "KeyV" }), {
+        isMac: false,
+      }),
+    ).toBe(true);
+    expect(
+      isTerminalPasteChord(evt({ metaKey: true, key: "м", code: "KeyV" }), {
+        isMac: true,
+      }),
+    ).toBe(true);
+    expect(
+      isTerminalPasteChord(evt({ ctrlKey: true, key: "м", code: "KeyM" }), {
+        isMac: false,
+      }),
     ).toBe(false);
   });
 });

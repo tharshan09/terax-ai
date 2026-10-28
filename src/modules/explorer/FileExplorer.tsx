@@ -4,6 +4,7 @@ import {
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,
+  ContextMenuShortcut,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import {
@@ -21,11 +22,13 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import { openWithDefaultApp } from "@/lib/openWith";
+import { IS_MAC } from "@/lib/platform";
 import { basename, cn } from "@/lib/utils";
 import { ExplorerSearch, type ExplorerSearchHandle } from "./ExplorerSearch";
 import { EntryRow, PendingRow, StatusRow, type RowActions } from "./TreeRow";
@@ -35,6 +38,13 @@ import {
   relativePath,
   revealInFinder,
 } from "./lib/contextActions";
+import {
+  type ExplorerScope,
+  pasteClipboardFiles,
+  pasteExclusively,
+  pasteKeyAction,
+} from "@/modules/explorer/lib/clipboardPaste";
+import { dirname, targetDirFor } from "@/modules/explorer/lib/paths";
 import { fileIconUrl, folderIconUrl } from "./lib/iconResolver";
 import { COMPACT_CONTENT, COMPACT_ITEM } from "./lib/menuItemClass";
 import { useExplorerDnd } from "./lib/useExplorerDnd";
@@ -45,6 +55,7 @@ import type { GitStatusCode } from "./lib/gitStatusUtils";
 import { useGlobalShortcuts } from "@/modules/shortcuts";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { GitStatusSnapshot } from "@/modules/ai/lib/native";
+import { useWorkspaceEnvStore } from "@/modules/workspace";
 
 export type FileExplorerHandle = {
   focus: () => void;
@@ -90,12 +101,6 @@ type Row =
 
 const ROW_HEIGHT = 24;
 const OVERSCAN = 8;
-
-
-function parentOf(path: string, fallback: string): string {
-  const i = path.lastIndexOf("/");
-  return i > 0 ? path.slice(0, i) : fallback;
-}
 
 function buildRows(
   rootPath: string,
@@ -199,11 +204,35 @@ export const FileExplorer = memo(
       gitDecorations,
     );
     const [selectedPath, setSelectedPath] = useState<string | null>(null);
+    const selectedPathRef = useRef(selectedPath);
+    useLayoutEffect(() => {
+      selectedPathRef.current = selectedPath;
+    }, [selectedPath]);
     const [isSearchOpen, setIsSearchOpen] = useState(false);
     const [isSearchActive, setIsSearchActive] = useState(false);
     const searchRef = useRef<ExplorerSearchHandle>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const scrollRef = useRef<HTMLDivElement>(null);
+    const workspace = useWorkspaceEnvStore((s) => s.env);
+    const pasteBusyRef = useRef(false);
+    // The paste lock frees before the re-read, so only the newest paste or drop
+    // may still move the selection, and only if the user has not moved it since.
+    const transferGenRef = useRef(0);
+    const scope = useMemo<ExplorerScope | null>(
+      () => (rootPath ? { rootPath, workspace } : null),
+      [rootPath, workspace],
+    );
+    const scopeRef = useRef<ExplorerScope | null>(null);
+    useLayoutEffect(() => {
+      scopeRef.current = scope;
+      return () => {
+        scopeRef.current = null;
+      };
+    }, [scope]);
+    const isCurrent = useCallback(
+      (token: ExplorerScope) => scopeRef.current === token,
+      [],
+    );
 
     // biome-ignore lint/correctness/useExhaustiveDependencies: `tree` is intentionally omitted (its identity changes every render); the listed fields are the only inputs buildRows actually reads.
     const { rows, entryIndexByPath } = useMemo(() => {
@@ -217,6 +246,11 @@ export const FileExplorer = memo(
       tree.pendingCreate,
       lookupGitStatus,
     ]);
+    // The rows of the last commit, for code that resumes after an await.
+    const entryIndexRef = useRef(entryIndexByPath);
+    useLayoutEffect(() => {
+      entryIndexRef.current = entryIndexByPath;
+    }, [entryIndexByPath]);
 
     const rowActions = useMemo<RowActions>(
       () => ({
@@ -235,6 +269,8 @@ export const FileExplorer = memo(
       name: string;
       isDir: boolean;
     } | null>(null);
+    // The scope the menu opened in; a later root change voids its actions.
+    const [menuScope, setMenuScope] = useState<ExplorerScope | null>(null);
     const [deleteConfirm, setDeleteConfirm] = useState(false);
     // Bumped on every right-click so the menu content remounts and the popper
     // re-anchors to the new cursor (floating-ui won't reposition on an anchor
@@ -262,8 +298,13 @@ export const FileExplorer = memo(
     });
 
     const fileDrop = useExplorerFileDrop({
-      rootPath,
+      scope,
+      isCurrent,
       isDir: isDirAt,
+      isExpanded: tree.isExpanded,
+      onDrop: () => {
+        transferGenRef.current += 1;
+      },
       onCopied: tree.refresh,
     });
 
@@ -292,11 +333,42 @@ export const FileExplorer = memo(
 
     const scrollEntryIntoView = useCallback(
       (path: string) => {
-        const index = entryIndexByPath.get(path);
+        const index = entryIndexRef.current.get(path);
         if (index === undefined) return;
         virtualizer.scrollToIndex(index, { align: "auto" });
       },
-      [entryIndexByPath, virtualizer],
+      [virtualizer],
+    );
+
+    const pasteInto = useCallback(
+      async (destDir: string, token: ExplorerScope) => {
+        await pasteExclusively(pasteBusyRef, async (release) => {
+          const gen = ++transferGenRef.current;
+          const selectedBefore = selectedPathRef.current;
+          await pasteClipboardFiles(destDir, {
+            scope: token,
+            isCurrent,
+            isExpanded: tree.isExpanded,
+            refresh: tree.refresh,
+            expand: tree.expand,
+            hasRow: (path) => entryIndexRef.current.has(path),
+            select: (path) => {
+              if (transferGenRef.current !== gen) return;
+              if (selectedPathRef.current !== selectedBefore) return;
+              setSelectedPath(path);
+              requestAnimationFrame(() => scrollEntryIntoView(path));
+            },
+            onCopySettled: release,
+          });
+        });
+      },
+      [
+        isCurrent,
+        tree.refresh,
+        tree.expand,
+        tree.isExpanded,
+        scrollEntryIntoView,
+      ],
     );
 
     const lastSyncedActivePathRef = useRef<string | null>(null);
@@ -367,7 +439,7 @@ export const FileExplorer = memo(
       tree.pendingCreate?.parentPath === rootPath ? tree.pendingCreate : null;
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-      if (tree.renaming || tree.pendingCreate || isSearchOpen) return;
+      if (tree.renaming || tree.pendingCreate) return;
       const target = e.target as HTMLElement;
       if (
         target.tagName === "INPUT" ||
@@ -375,7 +447,21 @@ export const FileExplorer = memo(
         target.isContentEditable
       )
         return;
-      if (entryPaths.length === 0) return;
+
+      // Like the menu's Paste, Cmd+V works wherever the tree shows.
+      const pasteKey = isSearchActive ? null : pasteKeyAction(e, IS_MAC);
+      if (pasteKey) {
+        e.preventDefault();
+        if (pasteKey === "paste" && scope) {
+          void pasteInto(
+            targetDirFor(selectedPath, isDirAt, scope.rootPath),
+            scope,
+          );
+        }
+        return;
+      }
+
+      if (isSearchOpen || entryPaths.length === 0) return;
 
       const currentIdx = selectedPath ? entryPaths.indexOf(selectedPath) : -1;
       const move = (next: number) => {
@@ -419,8 +505,8 @@ export const FileExplorer = memo(
           if (row.isDir && row.isExpanded) {
             tree.toggle(row.path);
           } else {
-            const parent = row.path.slice(0, row.path.lastIndexOf("/"));
-            if (parent && parent !== rootPath) setSelectedPath(parent);
+            const parent = dirname(row.path);
+            if (parent !== rootPath) setSelectedPath(parent);
           }
           break;
         }
@@ -477,6 +563,28 @@ export const FileExplorer = memo(
           );
       }
     };
+
+    const renderPasteItem = () =>
+      IS_MAC &&
+      menuScope && (
+        <ContextMenuItem
+          className={COMPACT_ITEM}
+          disabled={renameInProgress}
+          onSelect={() =>
+            void pasteInto(
+              targetDirFor(
+                menuTarget?.path,
+                () => menuTarget?.isDir,
+                menuScope.rootPath,
+              ),
+              menuScope,
+            )
+          }
+        >
+          Paste
+          <ContextMenuShortcut>⌘V</ContextMenuShortcut>
+        </ContextMenuItem>
+      );
 
     return (
       <div
@@ -581,6 +689,7 @@ export const FileExplorer = memo(
                       ? { path: row.path, name: row.name, isDir: row.isDir }
                       : null,
                   );
+                  setMenuScope(scope);
                   setDeleteConfirm(false);
                   setMenuNonce((n) => n + 1);
                 }}
@@ -698,7 +807,7 @@ export const FileExplorer = memo(
                       tree.beginCreate(
                         menuTarget.isDir
                           ? menuTarget.path
-                          : parentOf(menuTarget.path, rootPath),
+                          : dirname(menuTarget.path),
                         "file",
                       )
                     }
@@ -711,13 +820,14 @@ export const FileExplorer = memo(
                       tree.beginCreate(
                         menuTarget.isDir
                           ? menuTarget.path
-                          : parentOf(menuTarget.path, rootPath),
+                          : dirname(menuTarget.path),
                         "dir",
                       )
                     }
                   >
                     New Folder
                   </ContextMenuItem>
+                  {renderPasteItem()}
                   <ContextMenuSeparator />
                   <ContextMenuItem
                     className={COMPACT_ITEM}
@@ -787,6 +897,7 @@ export const FileExplorer = memo(
                   >
                     New Folder
                   </ContextMenuItem>
+                  {renderPasteItem()}
                   <ContextMenuSeparator />
                   <ContextMenuItem
                     className={COMPACT_ITEM}

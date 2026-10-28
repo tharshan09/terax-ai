@@ -2,18 +2,23 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { currentWorkspaceEnv } from "@/modules/workspace";
+import {
+  type CopyResult,
+  type ExplorerScope,
+  reportCopyFailures,
+  rereadAfterCopy,
+} from "@/modules/explorer/lib/clipboardPaste";
+import { targetDirFor } from "@/modules/explorer/lib/paths";
+import type { RefreshOptions } from "@/modules/explorer/lib/useFileTree";
 
 type Options = {
-  rootPath: string | null;
+  scope: ExplorerScope | null;
+  isCurrent: (scope: ExplorerScope) => boolean;
   isDir: (path: string) => boolean | undefined;
-  onCopied: (destDir: string) => void;
+  isExpanded: (dir: string) => boolean;
+  onDrop: () => void;
+  onCopied: (destDir: string, options?: RefreshOptions) => void;
 };
-
-function parentDir(path: string): string {
-  const i = path.lastIndexOf("/");
-  return i > 0 ? path.slice(0, i) : path;
-}
 
 // Tauri reports the drop point in physical pixels on some platforms; scale down
 // only when it overflows the logical viewport (mirrors the terminal drop).
@@ -33,10 +38,8 @@ function dirAt(
   const el = document.elementFromPoint(lx, ly) as HTMLElement | null;
   if (!el) return null;
   const row = el.closest<HTMLElement>("[data-fs-path]");
-  if (row) {
-    const p = row.getAttribute("data-fs-path") as string;
-    return isDir(p) ? p : parentDir(p);
-  }
+  if (row)
+    return targetDirFor(row.getAttribute("data-fs-path"), isDir, rootPath);
   if (el.closest("[data-explorer-drop]")) return rootPath;
   return null;
 }
@@ -44,10 +47,10 @@ function dirAt(
 // Accepts files dropped from the OS onto an explorer folder (copy, not move),
 // via Tauri's native drag-drop. One webview-level listener; ignores drops that
 // land outside the explorer (the terminal handles its own).
-export function useExplorerFileDrop({ rootPath, isDir, onCopied }: Options) {
+export function useExplorerFileDrop(options: Options) {
   const [targetDir, setTargetDir] = useState<string | null>(null);
-  const optsRef = useRef({ rootPath, isDir, onCopied });
-  optsRef.current = { rootPath, isDir, onCopied };
+  const optsRef = useRef(options);
+  optsRef.current = options;
 
   useEffect(() => {
     let disposed = false;
@@ -56,7 +59,9 @@ export function useExplorerFileDrop({ rootPath, isDir, onCopied }: Options) {
     void getCurrentWebview()
       .onDragDropEvent((e) => {
         const p = e.payload;
-        const { rootPath, isDir, onCopied } = optsRef.current;
+        const { scope, isCurrent, isDir, isExpanded, onDrop, onCopied } =
+          optsRef.current;
+        const rootPath = scope?.rootPath ?? null;
         if (p.type === "enter" || p.type === "over") {
           setTargetDir(dirAt(p.position.x, p.position.y, rootPath, isDir));
           return;
@@ -68,14 +73,27 @@ export function useExplorerFileDrop({ rootPath, isDir, onCopied }: Options) {
         if (p.type === "drop") {
           const dir = dirAt(p.position.x, p.position.y, rootPath, isDir);
           setTargetDir(null);
-          if (!dir || p.paths.length === 0) return;
-          void invoke("fs_copy", {
+          if (!scope || !dir || p.paths.length === 0 || !isCurrent(scope))
+            return;
+          onDrop();
+          void invoke<CopyResult>("fs_copy", {
             sources: p.paths,
             destDir: dir,
-            workspace: currentWorkspaceEnv(),
+            workspace: scope.workspace,
+            renameOnConflict: true,
           })
-            .then(() => onCopied(dir))
-            .catch((err) => toast.error(`Copy failed: ${String(err)}`));
+            .then((result): RefreshOptions | null => {
+              reportCopyFailures(result);
+              return rereadAfterCopy(result, dir, scope.rootPath, isExpanded);
+            })
+            .catch((err) => {
+              toast.error(`Copy failed: ${String(err)}`);
+              return null;
+            })
+            .then((reread) => {
+              if (reread && !disposed && isCurrent(scope))
+                onCopied(dir, reread);
+            });
         }
       })
       .then((fn) => {

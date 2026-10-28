@@ -38,20 +38,30 @@ function isNativeChord(event: TerminalKeyEvent, isMac: boolean): boolean {
     : event.ctrlKey && !event.metaKey;
 }
 
+const LATIN_LETTER = /^[a-z]$/i;
+
+// The physical key counts only on a non-Latin layout, so Dvorak Cmd+K stays K.
+export function isChordLetter(
+  event: TerminalKeyEvent,
+  letter: string,
+): boolean {
+  const { key } = event;
+  if (LATIN_LETTER.test(key)) return key.toLowerCase() === letter;
+  return event.code === `Key${letter.toUpperCase()}`;
+}
+
 export function isTerminalCopyChord(
   event: TerminalKeyEvent,
   opts: PlatformOpts,
 ): boolean {
-  if (!isNativeChord(event, opts.isMac)) return false;
-  return event.code === "KeyC" || event.key === "c" || event.key === "C";
+  return isNativeChord(event, opts.isMac) && isChordLetter(event, "c");
 }
 
 export function isTerminalPasteChord(
   event: TerminalKeyEvent,
   opts: PlatformOpts,
 ): boolean {
-  if (!isNativeChord(event, opts.isMac)) return false;
-  return event.code === "KeyV" || event.key === "v" || event.key === "V";
+  return isNativeChord(event, opts.isMac) && isChordLetter(event, "v");
 }
 
 /** Modifier+Backspace deletion:

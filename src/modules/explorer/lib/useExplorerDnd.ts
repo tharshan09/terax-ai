@@ -1,5 +1,6 @@
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { dirname, targetDirFor } from "./paths";
 
 type Options = {
   rootPath: string;
@@ -8,11 +9,6 @@ type Options = {
 };
 
 const THRESHOLD = 5;
-
-function parentDir(path: string): string {
-  const i = path.lastIndexOf("/");
-  return i > 0 ? path.slice(0, i) : path;
-}
 
 // Pointer-based, delegated on the container (no per-row handlers); sidesteps
 // native HTML5 DnD which Tauri intercepts when dragDropEnabled is on. The ghost
@@ -66,10 +62,13 @@ export function useExplorerDnd({ rootPath, isDir, onMove }: Options) {
       const hit = document
         .elementFromPoint(ev.clientX, ev.clientY)
         ?.closest<HTMLElement>("[data-fs-path]");
-      const p = hit?.getAttribute("data-fs-path");
-      const t = p ? (isDir(p) ? p : parentDir(p)) : rootPath;
+      const t = targetDirFor(
+        hit?.getAttribute("data-fs-path"),
+        isDir,
+        rootPath,
+      );
       const valid =
-        t !== source && !t.startsWith(`${source}/`) && parentDir(source) !== t
+        t !== source && !t.startsWith(`${source}/`) && dirname(source) !== t
           ? t
           : null;
       if (dropTargetRef.current !== valid) {
