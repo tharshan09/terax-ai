@@ -7,6 +7,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { scheduleFocusNewTerminalTab } from "@/app/lib/focusNewTerminalTab";
 import { getLaunchDir } from "@/lib/launchDir";
+import { isWindowHidden } from "@/lib/windowVisibility";
 import { usePresence } from "@/lib/usePresence";
 import { quoteShellArg } from "@/lib/shellQuote";
 import { useUiFonts } from "@/lib/useUiFonts";
@@ -475,7 +476,7 @@ export default function App() {
     let cancelled = false;
     let inFlight = false;
     const tick = () => {
-      if (cancelled || inFlight || document.hidden) return;
+      if (cancelled || inFlight || isWindowHidden()) return;
       inFlight = true;
       tmuxPaneCwd(workspace, tmuxPollSession)
         .then((path) => {

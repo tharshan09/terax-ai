@@ -64,6 +64,7 @@ const EditorTabLayer = memo(function EditorTabLayer({
           overrideLanguage={tab.overrideLanguage}
           onDirtyChange={onDirty}
           onClose={onClose}
+          visible={visible}
         />
       </div>
     </div>

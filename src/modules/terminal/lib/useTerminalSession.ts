@@ -1,4 +1,5 @@
 import { ensureMonoFontsLoaded } from "@/lib/fonts";
+import { isWindowHidden, subscribeWindowHidden } from "@/lib/windowVisibility";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { invoke } from "@tauri-apps/api/core";
 import type { SearchAddon } from "@xterm/addon-search";
@@ -548,7 +549,7 @@ function deliverPtyBytes(leafId: number, bytes: Uint8Array): void {
 function syncPtyVisible(leafId: number, force = false): void {
   const s = sessions.get(leafId);
   if (!s?.pty) return;
-  const pageHidden = typeof document !== "undefined" && document.hidden;
+  const pageHidden = isWindowHidden();
   const visible = visibilityHint(s.visibleNow, pageHidden);
   if (!force && s.lastVisibleHint === visible) return;
   s.lastVisibleHint = visible;
@@ -571,11 +572,9 @@ function syncPtyVisible(leafId: number, force = false): void {
 // terminal — even the active tab's — is off screen, so re-push visibility for
 // all live PTYs and let the flusher coalesce hard; re-assert real per-leaf
 // visibility when the window returns. Registered once, for the app's lifetime.
-if (typeof document !== "undefined") {
-  document.addEventListener("visibilitychange", () => {
-    for (const [leafId] of sessions) syncPtyVisible(leafId);
-  });
-}
+subscribeWindowHidden(() => {
+  for (const [leafId] of sessions) syncPtyVisible(leafId);
+});
 
 const SPAWN_RETRY_DELAY_MS = 250;
 

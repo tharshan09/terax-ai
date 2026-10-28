@@ -1,3 +1,4 @@
+import { isWindowHidden } from "@/lib/windowVisibility";
 import { useClaudeStatsStore } from "@/modules/statusbar/lib/claudeStatsStore";
 import type { Tab } from "@/modules/tabs";
 import { invoke } from "@tauri-apps/api/core";
@@ -138,7 +139,7 @@ export function SshAgentActivityPoller({ tabs }: { tabs: Tab[] }) {
     };
 
     const tick = () => {
-      if (cancelled || document.hidden) return;
+      if (cancelled || isWindowHidden()) return;
       const leaves = collectSshAgentLeaves(tabsRef.current);
       const present = new Set(leaves.map((l) => l.leafId));
       applyActions(planDepartedLeaves(present, state));

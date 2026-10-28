@@ -1,3 +1,4 @@
+import { useWindowHidden } from "@/lib/windowVisibility";
 import {
   readBgFastPath,
   usePreferencesStore,
@@ -33,7 +34,7 @@ function BackgroundImage({ fastImageId }: { fastImageId: string | null }) {
   const [visible, setVisible] = useState(false);
   const lastUrlRef = useRef<string | null>(null);
   const resizing = useWindowResizing(RESIZE_IDLE_MS);
-  const docHidden = useDocumentHidden();
+  const windowHidden = useWindowHidden();
 
   useEffect(() => {
     if (!imageId) return;
@@ -74,7 +75,7 @@ function BackgroundImage({ fastImageId }: { fastImageId: string | null }) {
   if (!state || typeof document === "undefined") return null;
   const { url, animated } = state;
 
-  const suspendAnimated = animated && (resizing || docHidden);
+  const suspendAnimated = animated && (resizing || windowHidden);
   const blurActive = !animated && blur > 0 && !resizing;
   const renderedOpacity =
     visible && !suspendAnimated ? opacity * BG_OPACITY_RENDER_FACTOR : 0;
@@ -125,16 +126,4 @@ function useWindowResizing(idleMs: number): boolean {
     };
   }, [idleMs]);
   return resizing;
-}
-
-function useDocumentHidden(): boolean {
-  const [hidden, setHidden] = useState(
-    () => typeof document !== "undefined" && document.hidden,
-  );
-  useEffect(() => {
-    const onChange = () => setHidden(document.hidden);
-    document.addEventListener("visibilitychange", onChange);
-    return () => document.removeEventListener("visibilitychange", onChange);
-  }, []);
-  return hidden;
 }
