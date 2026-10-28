@@ -214,7 +214,11 @@ describe("useFileTree read promises", () => {
         settled = true;
       });
     });
-    await act(async () => pending[1].resolve([entry("a")]));
+    // The expansion cache outlives a test, so the mount may also have re-read
+    // folders an earlier test left open: answer the read this refresh started.
+    const read = pending[pending.length - 1];
+    expect(read.path).toBe("/ws");
+    await act(async () => read.resolve([entry("a")]));
     await vi.waitFor(() => expect(settled).toBe(true));
   });
 
