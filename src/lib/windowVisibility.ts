@@ -1,8 +1,6 @@
 import { useSyncExternalStore } from "react";
 
-// Hidden means minimized, fully occluded or on another Space. Focus is
-// deliberately not part of it: an unfocused window next to a browser is still
-// watched.
+// Focus does not count: an unfocused window next to a browser is still watched.
 export const WINDOW_HIDDEN_ATTR = "data-window-hidden";
 
 type Listener = (hidden: boolean) => void;
@@ -39,7 +37,6 @@ function sync(): void {
   }
 }
 
-/** Idempotent; the first subscription installs it too. */
 export function installWindowVisibility(): void {
   if (installed || typeof document === "undefined") return;
   installed = true;
@@ -52,7 +49,6 @@ export function isWindowHidden(): boolean {
   return installed ? hidden : readDocumentHidden();
 }
 
-/** Notified on every change, not with the current state. */
 export function subscribeWindowHidden(listener: Listener): () => void {
   installWindowVisibility();
   listeners.add(listener);

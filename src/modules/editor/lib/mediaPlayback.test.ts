@@ -3,11 +3,17 @@ import {
   bindMediaPlayback,
   type MediaPlaybackState,
   mediaPlaybackAllowed,
+  type WindowHiddenSource,
 } from "./mediaPlayback";
 
 type WebkitPresentation = {
   webkitDisplayingFullscreen?: boolean;
   webkitPresentationMode?: string;
+};
+
+type PresentationDoc = {
+  fullscreenElement: unknown;
+  pictureInPictureElement: unknown;
 };
 
 function mediaElement(presentation: WebkitPresentation = {}) {
@@ -17,6 +23,8 @@ function mediaElement(presentation: WebkitPresentation = {}) {
     presentation,
   );
 }
+
+type Media = ReturnType<typeof mediaElement>;
 
 type Presented =
   | "fullscreen"
@@ -32,11 +40,51 @@ function presentedMedia(kind: Presented) {
         ? { webkitPresentationMode: "picture-in-picture" }
         : {},
   );
-  const doc = {
+  const doc: PresentationDoc = {
     fullscreenElement: kind === "fullscreen" ? media : null,
     pictureInPictureElement: kind === "picture-in-picture" ? media : null,
   };
   return { media, doc };
+}
+
+function fakeWindow(hidden: boolean) {
+  const listeners = new Set<(hidden: boolean) => void>();
+  const source: WindowHiddenSource = {
+    isHidden: () => hidden,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+  return {
+    source,
+    set(next: boolean) {
+      hidden = next;
+      for (const listener of [...listeners]) listener(next);
+    },
+    listenerCount: () => listeners.size,
+  };
+}
+
+function bind(
+  media: Media,
+  { tabVisible, windowHidden }: MediaPlaybackState,
+  doc: PresentationDoc = {
+    fullscreenElement: null,
+    pictureInPictureElement: null,
+  },
+) {
+  const win = fakeWindow(windowHidden);
+  const onPresentedChange = vi.fn();
+  const dispose = bindMediaPlayback(media, {
+    tabVisible,
+    onPresentedChange,
+    windowVisibility: win.source,
+    doc,
+  });
+  return { dispose, win, onPresentedChange };
 }
 
 function userPlays(media: EventTarget) {
@@ -55,19 +103,27 @@ const hiddenWindow: MediaPlaybackState = {
 
 describe("mediaPlaybackAllowed", () => {
   it.each([
-    [true, false, true],
-    [false, false, false],
-    [true, true, false],
-    [false, true, false],
-  ])("tabVisible=%s windowHidden=%s -> %s", (tabVisible, windowHidden, ok) => {
-    expect(mediaPlaybackAllowed({ tabVisible, windowHidden })).toBe(ok);
-  });
+    [true, false, false, true],
+    [false, false, false, false],
+    [true, true, false, false],
+    [false, true, false, false],
+    [true, true, true, true],
+    [false, false, true, true],
+    [false, true, true, true],
+  ])(
+    "tabVisible=%s windowHidden=%s presentedOutside=%s -> %s",
+    (tabVisible, windowHidden, presentedOutside, ok) => {
+      expect(
+        mediaPlaybackAllowed({ tabVisible, windowHidden }, presentedOutside),
+      ).toBe(ok);
+    },
+  );
 });
 
 describe("bindMediaPlayback", () => {
   it("[AC-6] pauses media of a background tab and takes back every play", () => {
     const media = mediaElement();
-    const dispose = bindMediaPlayback(media, backgroundTab);
+    const { dispose } = bind(media, backgroundTab);
     expect(media.pause).toHaveBeenCalledOnce();
 
     userPlays(media);
@@ -75,24 +131,34 @@ describe("bindMediaPlayback", () => {
     dispose();
   });
 
-  it("[AC-7] pauses media while the window is hidden, also in the active tab", () => {
+  it("[AC-7] pauses media when the window hides, also in the active tab", () => {
     const media = mediaElement();
-    const dispose = bindMediaPlayback(media, hiddenWindow);
-    expect(media.pause).toHaveBeenCalledOnce();
+    const { dispose, win } = bind(media, shown);
+    userPlays(media);
+    expect(media.pause).not.toHaveBeenCalled();
 
+    win.set(true);
+    expect(media.pause).toHaveBeenCalledOnce();
     userPlays(media);
     expect(media.pause).toHaveBeenCalledTimes(2);
+
+    win.set(false);
+    media.pause.mockClear();
+    userPlays(media);
+    expect(media.pause).not.toHaveBeenCalled();
+    expect(media.play).not.toHaveBeenCalled();
     dispose();
   });
 
   it("lets the active tab of a visible window play and pauses on close", () => {
     const media = mediaElement();
-    const dispose = bindMediaPlayback(media, shown);
+    const { dispose, win } = bind(media, shown);
     userPlays(media);
     expect(media.pause).not.toHaveBeenCalled();
 
     dispose();
     expect(media.pause).toHaveBeenCalledOnce();
+    expect(win.listenerCount()).toBe(0);
   });
 
   it.each([
@@ -100,26 +166,27 @@ describe("bindMediaPlayback", () => {
     ["the window", hiddenWindow],
   ])("never resumes on its own when %s comes back", (_, away) => {
     const media = mediaElement();
-    bindMediaPlayback(media, shown)();
-    const leaveAway = bindMediaPlayback(media, away);
+    bind(media, shown).dispose();
+    const leaveAway = bind(media, away).dispose;
     expect(media.pause).toHaveBeenCalled();
     leaveAway();
 
-    const close = bindMediaPlayback(media, shown);
+    const { dispose } = bind(media, shown);
     expect(media.play).not.toHaveBeenCalled();
     media.pause.mockClear();
     userPlays(media);
     expect(media.pause).not.toHaveBeenCalled();
-    close();
+    dispose();
   });
 
   it("drops the play guard once disposed", () => {
     const media = mediaElement();
-    const dispose = bindMediaPlayback(media, hiddenWindow);
+    const { dispose, win } = bind(media, hiddenWindow);
     dispose();
     media.pause.mockClear();
 
     userPlays(media);
+    win.set(true);
     expect(media.pause).not.toHaveBeenCalled();
   });
 
@@ -129,42 +196,58 @@ describe("bindMediaPlayback", () => {
     "webkit fullscreen",
     "webkit picture-in-picture",
   ])(
-    "keeps %s media playing while the window is hidden, not in a background tab",
+    "keeps %s media playing in a background tab and a hidden window",
     (kind) => {
       const { media, doc } = presentedMedia(kind);
-      const dispose = bindMediaPlayback(media, hiddenWindow, doc);
+      const { dispose, win, onPresentedChange } = bind(
+        media,
+        backgroundTab,
+        doc,
+      );
+      expect(onPresentedChange).toHaveBeenLastCalledWith(true);
+      userPlays(media);
+
+      win.set(true);
       userPlays(media);
       dispose();
       expect(media.pause).not.toHaveBeenCalled();
-
-      const background = bindMediaPlayback(media, backgroundTab, doc);
-      expect(media.pause).toHaveBeenCalledOnce();
-      userPlays(media);
-      expect(media.pause).toHaveBeenCalledTimes(2);
-      background();
     },
   );
 
-  it("pauses again when the media leaves fullscreen or picture-in-picture while the window is still hidden", () => {
-    const video = mediaElement({ webkitPresentationMode: "fullscreen" });
-    const disposeVideo = bindMediaPlayback(video, hiddenWindow, undefined);
-    expect(video.pause).not.toHaveBeenCalled();
-    video.webkitPresentationMode = "inline";
-    video.dispatchEvent(new Event("webkitpresentationmodechanged"));
-    expect(video.pause).toHaveBeenCalledOnce();
-    userPlays(video);
-    expect(video.pause).toHaveBeenCalledTimes(2);
-    disposeVideo();
+  it("pauses once the media returns inline in a background tab", () => {
+    const { media, doc } = presentedMedia("picture-in-picture");
+    const { dispose, onPresentedChange } = bind(media, backgroundTab, doc);
+    expect(media.pause).not.toHaveBeenCalled();
 
-    const pip = mediaElement();
-    const doc: { pictureInPictureElement: unknown } = {
-      pictureInPictureElement: pip,
-    };
-    const disposePip = bindMediaPlayback(pip, hiddenWindow, doc);
-    expect(pip.pause).not.toHaveBeenCalled();
     doc.pictureInPictureElement = null;
-    pip.dispatchEvent(new Event("leavepictureinpicture"));
-    expect(pip.pause).toHaveBeenCalledOnce();
-    disposePip();
+    media.dispatchEvent(new Event("leavepictureinpicture"));
+    expect(media.pause).toHaveBeenCalledOnce();
+    expect(onPresentedChange).toHaveBeenLastCalledWith(false);
+    dispose();
+  });
+
+  it("reads the live window state when the media leaves fullscreen", () => {
+    const media = mediaElement({ webkitPresentationMode: "fullscreen" });
+    const { dispose, win } = bind(media, hiddenWindow);
+    expect(media.pause).not.toHaveBeenCalled();
+
+    win.set(false);
+    media.webkitPresentationMode = "inline";
+    media.dispatchEvent(new Event("webkitendfullscreen"));
+    expect(media.pause).not.toHaveBeenCalled();
+    dispose();
+  });
+
+  it("pauses again when the media leaves fullscreen while the window is still hidden", () => {
+    const media = mediaElement({ webkitPresentationMode: "fullscreen" });
+    const { dispose } = bind(media, hiddenWindow);
+    expect(media.pause).not.toHaveBeenCalled();
+
+    media.webkitPresentationMode = "inline";
+    media.dispatchEvent(new Event("webkitpresentationmodechanged"));
+    expect(media.pause).toHaveBeenCalledOnce();
+    userPlays(media);
+    expect(media.pause).toHaveBeenCalledTimes(2);
+    dispose();
   });
 });

@@ -1,7 +1,6 @@
 import { cn } from "@/lib/utils";
-import { useWindowHidden } from "@/lib/windowVisibility";
 import { bindMediaPlayback } from "@/modules/editor/lib/mediaPlayback";
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 
 type Props = {
   kind: "video" | "audio";
@@ -10,12 +9,17 @@ type Props = {
 };
 
 export function MediaPreview({ kind, src, tabVisible }: Props) {
-  const windowHidden = useWindowHidden();
+  const [presented, setPresented] = useState(false);
   const bindMedia = useCallback(
     (media: HTMLMediaElement | null) => {
-      if (media) return bindMediaPlayback(media, { tabVisible, windowHidden });
+      if (media) {
+        return bindMediaPlayback(media, {
+          tabVisible,
+          onPresentedChange: setPresented,
+        });
+      }
     },
-    [tabVisible, windowHidden],
+    [tabVisible],
   );
   const Media = kind;
   // WebKit composites media natively, so an ancestor's visibility:hidden does
@@ -27,7 +31,7 @@ export function MediaPreview({ kind, src, tabVisible }: Props) {
       preload="metadata"
       className={cn(
         kind === "video" ? "max-w-full max-h-full" : "w-full max-w-md",
-        !tabVisible && "hidden",
+        !tabVisible && !presented && "hidden",
       )}
       src={src}
     />

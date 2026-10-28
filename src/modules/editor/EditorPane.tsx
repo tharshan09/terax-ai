@@ -74,7 +74,6 @@ type Props = {
   onDirtyChange?: (dirty: boolean) => void;
   onSaved?: () => void;
   onClose?: () => void;
-  /** False while the tab is in the background. */
   visible?: boolean;
 };
 

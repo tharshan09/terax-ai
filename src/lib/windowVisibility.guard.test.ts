@@ -10,7 +10,6 @@ const SRC = fileURLToPath(new URL("..", import.meta.url));
 
 const VISIBILITY_READ = /document\.hidden|visibilityState|visibilitychange/;
 
-/** File (relative to src/) -> why it may read document visibility itself. */
 const ALLOWED: Record<string, string> = {
   "lib/windowVisibility.ts": "the owner",
   "modules/terminal/lib/rendererPool.ts":

@@ -31,6 +31,14 @@ function userPlays(media: HTMLMediaElement) {
   media.dispatchEvent(new Event("play"));
 }
 
+function present(
+  media: HTMLMediaElement & { webkitPresentationMode?: string },
+  mode: "inline" | "picture-in-picture",
+) {
+  media.webkitPresentationMode = mode;
+  media.dispatchEvent(new Event("webkitpresentationmodechanged"));
+}
+
 let pause: MockInstance<HTMLMediaElement["pause"]>;
 let play: MockInstance<HTMLMediaElement["play"]>;
 
@@ -118,5 +126,26 @@ describe.each(["video", "audio"] as const)("%s preview", (kind) => {
     pause.mockClear();
     userPlays(media);
     expect(pause).not.toHaveBeenCalled();
+  });
+});
+
+describe("video in picture-in-picture", () => {
+  it("stays shown and playing in a background tab and a hidden window, and hides once inline", () => {
+    const { container, rerender } = render(
+      <MediaPreview kind="video" src={SRC} tabVisible />,
+    );
+    const video = mediaIn(container, "video");
+    userPlays(video);
+    act(() => present(video, "picture-in-picture"));
+
+    rerender(<MediaPreview kind="video" src={SRC} tabVisible={false} />);
+    expect(video.classList.contains("hidden")).toBe(false);
+    act(() => setVisibility("hidden"));
+    userPlays(video);
+    expect(pause).not.toHaveBeenCalled();
+
+    act(() => present(video, "inline"));
+    expect(pause).toHaveBeenCalled();
+    expect(video.classList.contains("hidden")).toBe(true);
   });
 });
