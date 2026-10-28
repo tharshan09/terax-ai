@@ -88,7 +88,7 @@ function inView(
 }
 
 // An open folder is re-read after a copy; after a lost connection only if
-// something landed, and then a failing re-read keeps the last good listing.
+// something landed or may have, and then a failing re-read keeps the listing.
 export function rereadAfterCopy(
   result: CopyResult,
   dir: string,
@@ -97,7 +97,9 @@ export function rereadAfterCopy(
 ): RefreshOptions | null {
   if (dir !== root && !isExpanded(dir)) return null;
   if (!result.aborted) return {};
-  return result.created.length > 0 ? { keepOnError: true } : null;
+  const landed =
+    result.created.length > 0 || result.failed.some((f) => f.maybePlaced);
+  return landed ? { keepOnError: true } : null;
 }
 
 function missingItems(unresolved: number): string {

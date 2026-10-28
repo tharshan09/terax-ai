@@ -153,7 +153,7 @@ pub(crate) struct Source<'a> {
     pub(crate) is_dir: bool,
     /// The walk below runs through a symlink, so its entries are judged too.
     pub(crate) linked: bool,
-    kind: std::fs::FileType,
+    checked: Checked,
     /// Where a plain source really is; a link is resolved only where it is read.
     canonical: Option<PathBuf>,
 }
@@ -170,7 +170,8 @@ pub(crate) fn check_source<'a>(
     let name = src
         .file_name()
         .ok_or_else(|| invalid("copy source has no filename"))?;
-    let kind = std::fs::symlink_metadata(src)?.file_type();
+    let meta = std::fs::symlink_metadata(src)?;
+    let kind = meta.file_type();
     if !is_copyable(kind) {
         return Err(unsupported_kind());
     }
@@ -186,9 +187,38 @@ pub(crate) fn check_source<'a>(
         name,
         is_dir: kind.is_dir(),
         linked,
-        kind,
+        checked: Checked::of(&meta),
         canonical,
     })
+}
+
+type FileId = (u64, u64);
+
+/// What a walk saw at a path before reading there; `id` lets the later open tell
+/// that something else took its place since.
+struct Checked {
+    kind: std::fs::FileType,
+    id: Option<FileId>,
+}
+
+impl Checked {
+    fn of(meta: &std::fs::Metadata) -> Self {
+        Checked {
+            kind: meta.file_type(),
+            id: meta_id(meta),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn meta_id(meta: &std::fs::Metadata) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    Some((meta.dev(), meta.ino()))
+}
+
+#[cfg(not(unix))]
+fn meta_id(_meta: &std::fs::Metadata) -> Option<FileId> {
+    None
 }
 
 /// The macOS system links into /private: the only prefix a named path may lack.
@@ -359,7 +389,7 @@ fn copy_item(
     let staged = staging.path().join(STAGED_ITEM);
     let walk = copy_kind(
         src,
-        source.kind,
+        &source.checked,
         &staged,
         0,
         source.linked,
@@ -760,31 +790,18 @@ fn rename_no_replace(_from: &Path, _to: &Path) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
-/// `followed` holds the canonical folder of each folder link the walk followed
-/// on its way down to `src`.
-fn copy_recursive(
-    src: &Path,
-    dst: &Path,
-    depth: usize,
-    linked: bool,
-    registry: &WorkspaceRegistry,
-    followed: &mut Vec<PathBuf>,
-) -> io::Result<()> {
-    check_depth(depth)?;
-    let kind = std::fs::symlink_metadata(src)?.file_type();
-    copy_kind(src, kind, dst, depth, linked, registry, followed)
-}
-
-/// `kind` is the unfollowed type of `src`, already read by the caller.
+/// `checked` is what the caller saw at `src`, unfollowed; `followed` holds the
+/// canonical folder of each folder link the walk followed on its way down.
 fn copy_kind(
     src: &Path,
-    kind: std::fs::FileType,
+    checked: &Checked,
     dst: &Path,
     depth: usize,
     linked: bool,
     registry: &WorkspaceRegistry,
     followed: &mut Vec<PathBuf>,
 ) -> io::Result<()> {
+    let kind = checked.kind;
     if kind.is_symlink() {
         match copy_symlink(src, dst) {
             Err(error) if copies_link_content(&error, cfg!(windows)) => {
@@ -793,9 +810,9 @@ fn copy_kind(
             other => other,
         }
     } else if kind.is_dir() {
-        copy_dir(src, dst, depth, linked, registry, followed)
+        copy_dir(src, checked.id, dst, depth, linked, registry, followed)
     } else if kind.is_file() {
-        copy_file(src, dst)
+        copy_file(src, checked.id, dst)
     } else {
         Err(unsupported_kind())
     }
@@ -829,12 +846,16 @@ pub(crate) fn open_planned(path: &Path, follow: bool) -> io::Result<std::fs::Fil
 
 // `dst` sits in our fresh staging dir, so writing it cannot follow a planted link.
 #[cfg(unix)]
-fn copy_file(src: &Path, dst: &Path) -> io::Result<()> {
-    copy_opened(&open_planned(src, false)?, dst)
+fn copy_file(src: &Path, expected: Option<FileId>, dst: &Path) -> io::Result<()> {
+    let reader = open_planned(src, false)?;
+    if expected.is_some() && meta_id(&reader.metadata()?) != expected {
+        return Err(changed_since_plan());
+    }
+    copy_opened(&reader, dst)
 }
 
 #[cfg(not(unix))]
-fn copy_file(src: &Path, dst: &Path) -> io::Result<()> {
+fn copy_file(src: &Path, _expected: Option<FileId>, dst: &Path) -> io::Result<()> {
     std::fs::copy(src, dst).map(drop)
 }
 
@@ -888,23 +909,34 @@ fn copy_opened(reader: &std::fs::File, dst: &Path) -> io::Result<()> {
 
 fn copy_dir(
     src: &Path,
+    expected: Option<FileId>,
     dst: &Path,
     depth: usize,
     linked: bool,
     registry: &WorkspaceRegistry,
     followed: &mut Vec<PathBuf>,
 ) -> io::Result<()> {
+    let entries = list_dir(src, expected)?;
     std::fs::create_dir(dst)?;
     keep_dir_mode(src, dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        if !is_copyable(entry.file_type()?) || is_staging_entry(&entry) {
+    for (name, id) in entries {
+        if name.to_str().is_some_and(is_staging_name) {
             continue;
         }
-        guard_entry(registry, &entry, linked)?;
-        let target = dst.join(entry.file_name());
-        copy_recursive(
-            &entry.path(),
+        let path = src.join(&name);
+        let kind = std::fs::symlink_metadata(&path)?.file_type();
+        if !is_copyable(kind) {
+            continue;
+        }
+        if linked && !kind.is_symlink() {
+            guard_read(registry, &path)?;
+        }
+        check_depth(depth + 1)?;
+        let checked = Checked { kind, id };
+        let target = dst.join(&name);
+        copy_kind(
+            &path,
+            &checked,
             &target,
             depth + 1,
             linked,
@@ -913,6 +945,87 @@ fn copy_dir(
         )?;
     }
     Ok(())
+}
+
+// The folder is opened without following a link and must still be what the walk
+// checked; its entries' identities come from that handle, not from their paths.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn list_dir(path: &Path, expected: Option<FileId>) -> io::Result<Vec<(OsString, Option<FileId>)>> {
+    use std::os::fd::IntoRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(path)
+        .map_err(|error| match error.raw_os_error() {
+            Some(libc::ELOOP | libc::ENOTDIR) => changed_since_plan(),
+            _ => error,
+        })?;
+    if expected.is_some() && meta_id(&dir.metadata()?) != expected {
+        return Err(changed_since_plan());
+    }
+    let fd = dir.into_raw_fd();
+    let stream = unsafe { libc::fdopendir(fd) };
+    if stream.is_null() {
+        let error = io::Error::last_os_error();
+        unsafe { libc::close(fd) };
+        return Err(error);
+    }
+    let entries = read_stream(stream);
+    unsafe { libc::closedir(stream) };
+    entries
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn read_stream(stream: *mut libc::DIR) -> io::Result<Vec<(OsString, Option<FileId>)>> {
+    use std::os::unix::ffi::OsStrExt;
+    let fd = unsafe { libc::dirfd(stream) };
+    let mut entries = Vec::new();
+    loop {
+        clear_errno();
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            let error = io::Error::last_os_error();
+            return match error.raw_os_error() {
+                Some(0) => Ok(entries),
+                _ => Err(error),
+            };
+        }
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstatat(fd, name.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let name = OsStr::from_bytes(name.to_bytes()).to_os_string();
+        entries.push((name, Some(stat_id(&stat))));
+    }
+}
+
+// dev_t is i32 on macOS and u64 on Linux; std's MetadataExt widens the same way.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[allow(clippy::unnecessary_cast)]
+fn stat_id(stat: &libc::stat) -> FileId {
+    (stat.st_dev as u64, stat.st_ino as u64)
+}
+
+#[cfg(target_os = "macos")]
+fn clear_errno() {
+    unsafe { *libc::__error() = 0 };
+}
+
+#[cfg(target_os = "linux")]
+fn clear_errno() {
+    unsafe { *libc::__errno_location() = 0 };
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn list_dir(path: &Path, _expected: Option<FileId>) -> io::Result<Vec<(OsString, Option<FileId>)>> {
+    std::fs::read_dir(path)?
+        .map(|entry| entry.map(|entry| (entry.file_name(), None)))
+        .collect()
 }
 
 /// Group and other bits follow the source folder; the owner keeps rwx so the
@@ -956,9 +1069,11 @@ fn copy_link_content(
     let target = std::fs::metadata(src)?;
     if target.is_dir() {
         let from = std::fs::canonicalize(src.parent().unwrap_or(src))?;
-        check_link_descent(&std::fs::canonicalize(src)?, &from, dst, followed)?;
+        let real = std::fs::canonicalize(src)?;
+        check_link_descent(&real, &from, dst, followed)?;
         followed.push(from);
-        let result = copy_dir(src, dst, depth, true, registry, followed);
+        // The link was judged above, so the walk reads the folder it resolves to.
+        let result = copy_dir(&real, None, dst, depth, true, registry, followed);
         followed.pop();
         result
     } else if target.is_file() {
@@ -1682,7 +1797,7 @@ mod tests {
         let reg = reg_for(dest.path());
         for swap in ["link", "fifo"] {
             std::fs::write(&file, b"a").unwrap();
-            let kind = std::fs::symlink_metadata(&file).unwrap().file_type();
+            let checked = Checked::of(&std::fs::symlink_metadata(&file).unwrap());
             std::fs::remove_file(&file).unwrap();
             if swap == "link" {
                 std::os::unix::fs::symlink(&secret, &file).unwrap();
@@ -1691,7 +1806,8 @@ mod tests {
                 assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
             }
             let dst = dest.path().join(swap);
-            let error = copy_kind(&file, kind, &dst, 0, false, &reg, &mut Vec::new()).unwrap_err();
+            let error =
+                copy_kind(&file, &checked, &dst, 0, false, &reg, &mut Vec::new()).unwrap_err();
             assert_eq!(
                 error.to_string(),
                 changed_since_plan().to_string(),
@@ -1699,6 +1815,51 @@ mod tests {
             );
             assert!(std::fs::symlink_metadata(&dst).is_err(), "{swap}");
             std::fs::remove_file(&file).unwrap();
+        }
+    }
+
+    // The folder (or file) is checked, then replaced before the walk reads it:
+    // by a link to a secret folder, or by another entry of the same kind.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_swapped_after_it_was_looked_at_is_not_followed() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let secret = src.path().join("secret");
+        std::fs::create_dir(&secret).unwrap();
+        std::fs::write(secret.join("id_ed25519"), b"PRIVATE").unwrap();
+        let reg = reg_for(dest.path());
+        let pkg = src.path().join("pkg");
+        for swap in ["link", "other folder", "other file"] {
+            let is_dir = swap != "other file";
+            if is_dir {
+                std::fs::create_dir(&pkg).unwrap();
+                std::fs::write(pkg.join("a.txt"), b"a").unwrap();
+            } else {
+                std::fs::write(&pkg, b"a").unwrap();
+            }
+            let checked = Checked::of(&std::fs::symlink_metadata(&pkg).unwrap());
+            let old = src.path().join(format!("old {swap}"));
+            std::fs::rename(&pkg, &old).unwrap();
+            match swap {
+                "link" => std::os::unix::fs::symlink(&secret, &pkg).unwrap(),
+                "other folder" => std::fs::create_dir(&pkg).unwrap(),
+                _ => std::fs::write(&pkg, b"b").unwrap(),
+            }
+            let dst = dest.path().join(swap);
+            let error =
+                copy_kind(&pkg, &checked, &dst, 0, false, &reg, &mut Vec::new()).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                changed_since_plan().to_string(),
+                "{swap}"
+            );
+            assert!(std::fs::symlink_metadata(&dst).is_err(), "{swap}");
+            if swap == "link" || !is_dir {
+                std::fs::remove_file(&pkg).unwrap();
+            } else {
+                std::fs::remove_dir(&pkg).unwrap();
+            }
         }
     }
 

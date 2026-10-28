@@ -239,9 +239,19 @@ describe("rereadAfterCopy", () => {
 
   it("after a lost connection re-reads only if something landed, keeping the listing", () => {
     const landed = { created: ["/ws/a"], failed: [], aborted: lost };
-    const nothing = { created: [], failed: [], aborted: lost };
+    const maybe = {
+      created: [],
+      failed: [{ source: "/x/a", message: lost, maybePlaced: true }],
+      aborted: lost,
+    };
+    const nothing = {
+      created: [],
+      failed: [{ source: "/x/a", message: lost, maybePlaced: false }],
+      aborted: lost,
+    };
     expect(reread(landed, "/ws")).toEqual({ keepOnError: true });
     expect(reread(landed, "/ws/open")).toEqual({ keepOnError: true });
+    expect(reread(maybe, "/ws/open")).toEqual({ keepOnError: true });
     expect(reread(landed, "/ws/shut")).toBeNull();
     expect(reread(nothing, "/ws/open")).toBeNull();
   });
