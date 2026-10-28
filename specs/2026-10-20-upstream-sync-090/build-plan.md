@@ -1052,7 +1052,15 @@ Bau-Reihenfolge (PM): slice-00 → slice-01 → slice-02 → slice-03 → slice-
 
 **Wie gebaut**
 
-_(leer bis zum Merge)_
+- Merge: PR #88, Squash-Commit `b2ce98f` auf `main`.
+- Review: `/code-review high` 1 Runde, kein Fehler über upstream-identisches Verhalten hinaus.
+- Startpaket Hauptfenster 2.591.116 B auf 1.680.740 B, Settings 1.251.862 B auf 698.551 B; AI-SDK und Icon-Daten nicht mehr im Startgraph.
+- Abweichungen vom Plan:
+  - Eager-Gruppe `xterm` statt ghostty, keine svelte-Regel.
+  - Icon-Ladefehler: `console.error` einmal je Sitzung (AC6), Retry beim nächsten Bedarf wie upstream.
+  - `dist-graph.mjs` zusätzlich mit verbotenen Quellen (Icon-Daten, OB-5) über die Sourcemap; Lezer-Fall zählt Paket-Wurzeln.
+  - `FileExplorer.tsx` zwei Icon-Stellen angepasst (synchrone API entfällt).
+- QA-Punkte und Grenzen: siehe `evidence/slice-05-lazy-start.json` und PR #88.
 
 ### slice-06-deps-version: Deps auf v0.9.0-Niveau, Lezer-Pin und Version 0.8.7
 

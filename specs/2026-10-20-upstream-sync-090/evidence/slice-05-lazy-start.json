@@ -1,0 +1,18 @@
+{
+  "feature": "upstream-sync-090",
+  "slice": "slice-05-lazy-start",
+  "timestamp": "2026-10-28T20:47:32Z",
+  "status": "passed_with_accepted_findings",
+  "implementation": {"pr": 88, "base": "b6072e2", "head": "8708b46"},
+  "review": {"rounds": 1, "fixed": [], "stop": "round 1 without real bug beyond upstream-identical behaviour"},
+  "deterministic_gate": {"lint": 0, "check_types": 0, "build": 0, "size": 0, "em_dash_added": 0},
+  "tests": {"vitest": {"files": 95, "passed": 890}, "cargo_test": "skipped, no src-tauri change"},
+  "startup_graph_bytes": {"index_before": 2591116, "index_after": 1680740, "settings_before": 1251862, "settings_after": 698551},
+  "open_notes": [
+    "QA: AC8 and AC9 in a measuring instance",
+    "icons fade in on each launch, no idle preload (upstream)",
+    "mounted icons stay placeholders after a failed chunk load (upstream)",
+    "dist guard without katex and without a total byte cap"
+  ],
+  "merge_commit": "b2ce98f"
+}

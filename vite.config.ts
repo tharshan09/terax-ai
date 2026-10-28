@@ -114,7 +114,7 @@ export default defineConfig(async ({ mode }): Promise<UserConfig> => ({
   ],
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "./src"),
+      "@": path.resolve(import.meta.dirname, "./src"),
     },
   },
   build: {
@@ -123,8 +123,8 @@ export default defineConfig(async ({ mode }): Promise<UserConfig> => ({
     chunkSizeWarningLimit: 1500,
     rolldownOptions: {
       input: {
-        main: path.resolve(__dirname, "index.html"),
-        settings: path.resolve(__dirname, "settings.html"),
+        main: path.resolve(import.meta.dirname, "index.html"),
+        settings: path.resolve(import.meta.dirname, "settings.html"),
       },
       // Oxc drops `debugger` by default. These calls return undefined, so
       // marking them pure lets DCE strip them from production builds.
