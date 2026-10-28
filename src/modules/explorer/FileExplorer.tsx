@@ -72,6 +72,8 @@ type Props = {
   onRevealInTerminal?: (path: string) => void;
   onAttachToAgent?: (path: string) => void;
   gitStatus?: GitStatusSnapshot | null;
+  /** Default true. Stays mounted while collapsed; hidden it holds no watchers. */
+  visible?: boolean;
 };
 
 type Row =
@@ -193,10 +195,15 @@ export const FileExplorer = memo(
       onRevealInTerminal,
       onAttachToAgent,
       gitStatus,
+      visible = true,
     },
     ref,
   ) {
-    const tree = useFileTree(rootPath, { onPathRenamed, onPathDeleted });
+    const tree = useFileTree(rootPath, {
+      onPathRenamed,
+      onPathDeleted,
+      visible,
+    });
     const gitDecorations = usePreferencesStore((s) => s.explorerGitDecorations);
     const { lookup: lookupGitStatus } = useGitStatus(
       rootPath,

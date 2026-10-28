@@ -75,6 +75,11 @@ export function useSidebarPanel(
     useState<SidebarViewId>(readSidebarView);
   const [initialSidebarCollapsed] = useState(readSidebarCollapsed);
   const collapsedRef = useRef(initialSidebarCollapsed);
+  // The collapsed panel stays mounted at 0 px; its consumers stop background
+  // work (fs watchers, git status refreshes) while it is not on screen.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    initialSidebarCollapsed,
+  );
 
   const persistSidebarView = useCallback((view: SidebarViewId) => {
     setSidebarViewState(view);
@@ -88,6 +93,7 @@ export function useSidebarPanel(
   const persistSidebarCollapsed = useCallback((collapsed: boolean) => {
     if (collapsedRef.current === collapsed) return;
     collapsedRef.current = collapsed;
+    setSidebarCollapsed(collapsed);
     try {
       window.localStorage.setItem(
         SIDEBAR_COLLAPSED_STORAGE_KEY,
@@ -186,6 +192,7 @@ export function useSidebarPanel(
     sidebarRef,
     sidebarWidthRef,
     sidebarView,
+    sidebarCollapsed,
     initialSidebarCollapsed,
     persistSidebarView,
     persistSidebarCollapsed,

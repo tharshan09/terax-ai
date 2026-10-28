@@ -11,6 +11,7 @@ import { currentWorkspaceEnv } from "@/modules/workspace";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { dirname, joinPath } from "./paths";
 import { listenFsChanged, watchAdd, watchRemove } from "./watch";
+import { createWatchRegistry, planVisibilityEdge } from "./watchRegistry";
 
 export type DirEntry = {
   name: string;
@@ -101,6 +102,11 @@ function sameDirListing(a: DirEntry[], b: DirEntry[]): boolean {
 type Options = {
   onPathRenamed?: (from: string, to: string) => void;
   onPathDeleted?: (path: string) => void;
+  /**
+   * Default true. While false the tree holds no native watchers and ignores
+   * `fs:changed`; showing it re-registers them and reloads every loaded folder.
+   */
+  visible?: boolean;
 };
 
 export function useFileTree(rootPath: string | null, options?: Options) {
@@ -115,9 +121,15 @@ export function useFileTree(rootPath: string | null, options?: Options) {
   );
   const [renaming, setRenaming] = useState<string | null>(null);
 
+  const visible = options?.visible ?? true;
+  const visibleRef = useRef(visible);
+  const staleRef = useRef(false);
+  const rootPathRef = useRef(rootPath);
+  const [watches] = useState(() =>
+    createWatchRegistry({ add: watchAdd, remove: watchRemove }, visible),
+  );
   const expandedRef = useRef(expanded);
   const nodesRef = useRef(nodes);
-  const watchedRef = useRef<Set<string>>(new Set());
   // Reads of one folder can finish out of order: one lands unless a newer one
   // already did, so a folder under steady change still updates.
   const readCountRef = useRef(0);
@@ -137,6 +149,11 @@ export function useFileTree(rootPath: string | null, options?: Options) {
   }, [gitDecorations]);
 
   useLayoutEffect(() => {
+    visibleRef.current = visible;
+    rootPathRef.current = rootPath;
+  }, [visible, rootPath]);
+
+  useLayoutEffect(() => {
     expandedRef.current = expanded;
   }, [expanded]);
 
@@ -148,16 +165,8 @@ export function useFileTree(rootPath: string | null, options?: Options) {
     }
   }, [nodes]);
 
-  const addWatch = useCallback((path: string) => {
-    if (watchedRef.current.has(path)) return;
-    watchedRef.current.add(path);
-    watchAdd([path]);
-  }, []);
-
-  const removeWatch = useCallback((path: string) => {
-    if (!watchedRef.current.delete(path)) return;
-    watchRemove([path]);
-  }, []);
+  const addWatch = watches.add;
+  const removeWatch = watches.remove;
 
   const readChildren = useCallback(
     async (path: string, gen: number, keepOnError = false) => {
@@ -207,7 +216,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
           const candidates = new Set<string>([
             ...Object.keys(nodesRef.current),
             ...expandedRef.current,
-            ...watchedRef.current,
+            ...watches.paths(),
           ]);
           for (const k of candidates) {
             if (removedRoots.some((r) => isUnder(k, r))) dead.add(k);
@@ -230,15 +239,13 @@ export function useFileTree(rootPath: string | null, options?: Options) {
             for (const d of dead) if (n.delete(d)) changed = true;
             return changed ? n : c;
           });
-          const toUnwatch: string[] = [];
           for (const d of dead) {
             // A removed folder's late answer must not bring it back.
             landed.set(d, readCountRef.current);
             latestRef.current.delete(d);
             release(waitersRef.current, d, Number.POSITIVE_INFINITY);
-            if (watchedRef.current.delete(d)) toUnwatch.push(d);
           }
-          watchRemove(toUnwatch);
+          watches.removeMany([...dead]);
         }
       } catch (e) {
         if (!lands()) return;
@@ -255,7 +262,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
         setNodes((s) => ({ ...s, [path]: node }));
       }
     },
-    [],
+    [watches],
   );
 
   const fetchChildren = useCallback(
@@ -304,11 +311,13 @@ export function useFileTree(rootPath: string | null, options?: Options) {
     // changes rapidly (e.g. switching folders in quick succession).
     nodesRef.current = {};
 
-    const toWatch = [rootPath, ...restored];
-    void fetchChildren(rootPath);
-    for (const d of restored) void fetchChildren(d);
-    for (const p of toWatch) watchedRef.current.add(p);
-    watchAdd(toWatch);
+    watches.addMany([rootPath, ...restored]);
+    if (visibleRef.current) {
+      void fetchChildren(rootPath);
+      for (const d of restored) void fetchChildren(d);
+    } else {
+      staleRef.current = true;
+    }
 
     return () => {
       rememberExpansion(rootPath, expandedRef.current);
@@ -316,14 +325,30 @@ export function useFileTree(rootPath: string | null, options?: Options) {
       for (const path of [...waiters.keys()]) {
         release(waiters, path, Number.POSITIVE_INFINITY);
       }
-      if (watchedRef.current.size > 0) {
-        watchRemove([...watchedRef.current]);
-        watchedRef.current.clear();
-      }
+      watches.clear();
     };
-  }, [rootPath, fetchChildren]);
+  }, [rootPath, fetchChildren, watches]);
 
   useEffect(() => {
+    const plan = planVisibilityEdge({
+      visible,
+      stale: staleRef.current,
+      hasRoot: rootPathRef.current !== null,
+    });
+    staleRef.current = plan.stale;
+    if (plan.arm) watches.arm();
+    else watches.disarm();
+    if (!plan.resync) return;
+    const targets = new Set(watches.paths());
+    for (const [path, state] of Object.entries(nodesRef.current)) {
+      if (state.status === "loaded") targets.add(path);
+    }
+    for (const path of targets) void fetchChildren(path);
+  }, [visible, watches, fetchChildren]);
+
+  useEffect(() => {
+    // The show edge above reloads whatever changed while nobody listened.
+    if (!visible) return;
     let alive = true;
     let unlisten: (() => void) | undefined;
     void listenFsChanged((paths) => {
@@ -343,11 +368,15 @@ export function useFileTree(rootPath: string | null, options?: Options) {
       alive = false;
       unlisten?.();
     };
-  }, [fetchChildren]);
+  }, [visible, fetchChildren]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: re-list loaded directories only when visibility/git-decoration/root prefs change; the tree is read from the ref, which the root change above has already cleared, so no folder of an old root is read again.
   useEffect(() => {
     if (!rootPath) return;
+    if (!visibleRef.current) {
+      staleRef.current = true;
+      return;
+    }
     const loadedPaths = Object.entries(nodesRef.current)
       .filter(([, state]) => state.status === "loaded")
       .map(([path]) => path);
