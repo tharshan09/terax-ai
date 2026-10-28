@@ -1,0 +1,19 @@
+{
+  "feature": "upstream-sync-090",
+  "slice": "slice-04-visible-consumers",
+  "timestamp": "2026-10-28T20:25:38Z",
+  "status": "passed_with_accepted_findings",
+  "implementation": {"pr": 87, "base": "ffa6694", "head": "7cf3868"},
+  "review": {"rounds": 3, "fixed": ["in-flight refresh across context switch", "push error cleared by sidebar toggle", "running push reset by clear", "resync of collapsed folders", "stale result after context move", "post-action refresh lost", "dropped refresh counted as fresh"], "stop": "3-round cap; round-3 regressions fixed without a fourth review, gates green"},
+  "deterministic_gate": {"lint": 0, "check_types": 0, "build": 0, "em_dash_added": 0},
+  "tests": {"vitest": {"files": 92, "passed": 830}, "cargo_test": "skipped, no src-tauri change"},
+  "open_notes": [
+    "QA: AC4 and AC8 in the real app (watch counts, git status calls with sidebar collapsed)",
+    "sidebar toggle re-arms watches and re-reads expanded folders",
+    "show plus root change in one commit reads twice",
+    "git tabs count as status consumers",
+    "keyboard explorer focus after hidden root change selects nothing until loaded",
+    "upstream-identical: graph target follows live, listener re-attach window, immediate refresh in non-repo contexts"
+  ],
+  "merge_commit": "535d23a"
+}
