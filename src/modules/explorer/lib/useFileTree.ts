@@ -33,17 +33,14 @@ type FolderRead = { settled: Promise<Landed> };
 const NOTHING_TO_RENDER: Landed = { rendered: Promise.resolve() };
 
 // Reads of one folder can finish out of order: only the newest lands, and an
-// overtaken read settles with it.
+// overtaken read settles once the newest listing has rendered.
 function overtakenBy(
   latest: Map<string, FolderRead>,
   path: string,
   read: FolderRead,
 ): Promise<Landed> | null {
   const newest = latest.get(path);
-  if (newest === read) {
-    latest.delete(path);
-    return null;
-  }
+  if (newest === read) return null;
   return newest?.settled ?? Promise.resolve(NOTHING_TO_RENDER);
 }
 
@@ -235,9 +232,17 @@ export function useFileTree(rootPath: string | null, options?: Options) {
 
   const fetchChildren = useCallback(
     (path: string): Promise<Landed> => {
+      const latest = latestFetchRef.current;
       const read: FolderRead = { settled: Promise.resolve(NOTHING_TO_RENDER) };
-      latestFetchRef.current.set(path, read);
+      latest.set(path, read);
       read.settled = readChildren(path, read);
+      // Stays registered until its listing renders, so an overtaken read
+      // finishing meanwhile waits for that render.
+      void read.settled
+        .then((landed) => landed.rendered)
+        .then(() => {
+          if (latest.get(path) === read) latest.delete(path);
+        });
       return read.settled;
     },
     [readChildren],

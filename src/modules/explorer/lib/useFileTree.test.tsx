@@ -147,6 +147,40 @@ describe("useFileTree read promises", () => {
     expect(listing(result.current, "/ws")).toEqual(["new"]);
   });
 
+  it("settles a read finishing after the newer one landed only once that listing rendered", async () => {
+    const pending = reads();
+    let rendered: string[] | string | undefined;
+    const { result } = renderHook(() => {
+      const tree = useFileTree("/ws");
+      rendered = listing(tree, "/ws");
+      return tree;
+    });
+    await act(async () => pending[0].resolve([entry("a")]));
+    const hasRow = (name: string) =>
+      Array.isArray(rendered) && rendered.includes(name);
+
+    let sawNewRow: boolean | undefined;
+    act(() => {
+      void result.current.refresh("/ws").then(() => {
+        sawNewRow = hasRow("new");
+      });
+      void result.current.refresh("/ws");
+    });
+    const [older, newer] = pending.slice(1);
+    // Inside act React holds the render back, so the newer listing has landed
+    // but is not on screen when the older read answers.
+    const tick = () => new Promise((done) => setTimeout(done, 0));
+    await act(async () => {
+      newer.resolve([entry("a"), entry("new")]);
+      await tick();
+      older.resolve([entry("a"), entry("old")]);
+      await tick();
+      expect(sawNewRow).toBeUndefined();
+    });
+    await vi.waitFor(() => expect(sawNewRow).toBe(true));
+    expect(listing(result.current, "/ws")).toEqual(["a", "new"]);
+  });
+
   it("settles expand once the folder's listing is in the tree", async () => {
     const pending = reads();
     const { result } = renderHook(() => useFileTree("/ws"));

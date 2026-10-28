@@ -417,6 +417,11 @@ def create_dir(req):
     return True
 
 
+def mkstage(req):
+    # mkdtemp picks a free name and creates it 0700 in one step; never the parent.
+    return tempfile.mkdtemp(prefix=STAGING_PREFIX, dir=os.path.expanduser(req["path"]))
+
+
 def rename(req):
     src = os.path.expanduser(req["from"]); dst = os.path.expanduser(req["to"])
     if not os.path.lexists(src):
@@ -616,7 +621,7 @@ def grep(req):
 
 OPS = {"read_dir": read_dir, "list_subdirs": list_subdirs, "stat": stat,
        "realpath": realpath, "read_file": read_file, "write_file": write_file,
-       "create_file": create_file, "create_dir": create_dir,
+       "create_file": create_file, "create_dir": create_dir, "mkstage": mkstage,
        "rename": rename, "delete": delete, "publish": publish,
        "write_bytes": write_bytes, "search": search, "grep": grep}
 
@@ -681,7 +686,7 @@ pub const REMOTE_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 
 /// Per-call budget for **user-triggered remote FS reads** (`fs_read_dir`,
 /// `fs_read_file`, `fs_canonicalize`, `fs_stat`) and the control steps of a
-/// copy (folders, publish, cleanup, listing). Generous, because a healthy
+/// copy (staging, folders, publish, cleanup, listing). Generous, because a healthy
 /// but slow transfer must not be truncated; it still bounds a wedged host so a
 /// single open can't hang forever. Only the remote path carries this — local FS
 /// ops get no kill-timeout (they just run off the main thread).
@@ -1335,16 +1340,6 @@ fn plan_upload(
     Ok(())
 }
 
-/// Every upload gets this long on top of its transfer time.
-const UPLOAD_BASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-/// The slowest link an upload is still allowed to crawl over.
-const UPLOAD_MIN_BYTES_PER_SEC: u64 = 256 * 1024;
-
-fn upload_timeout(sent_bytes: usize) -> std::time::Duration {
-    let transfer = (sent_bytes as u64).div_ceil(UPLOAD_MIN_BYTES_PER_SEC);
-    UPLOAD_BASE_TIMEOUT.saturating_add(std::time::Duration::from_secs(transfer))
-}
-
 // A killed step only leaves a half-written item in the hidden staging.
 fn upload(run: &mut RemoteRun, plan: &[Upload], item: &str) -> Result<(), RemoteError> {
     for step in plan {
@@ -1353,20 +1348,19 @@ fn upload(run: &mut RemoteRun, plan: &[Upload], item: &str) -> Result<(), Remote
                 serde_json::json!({
                     "op": "create_dir", "path": format!("{item}{rel}"), "parents": false,
                 }),
-                REMOTE_FS_TIMEOUT,
+                Some(REMOTE_FS_TIMEOUT),
             ),
             Upload::File { src, rel, mode } => {
                 let bytes = std::fs::read(src).map_err(|e| RemoteError::Failed(e.to_string()))?;
-                let b64 = b64encode(&bytes);
-                let budget = upload_timeout(b64.len());
                 let request = serde_json::json!({
                     "op": "write_bytes", "path": format!("{item}{rel}"),
-                    "b64": b64, "mode": mode,
+                    "b64": b64encode(&bytes), "mode": mode,
                 });
-                (request, budget)
+                // No limit: on a slow but healthy link a file may take any time.
+                (request, None)
             }
         };
-        run(&request, Some(budget))?;
+        run(&request, budget)?;
     }
     Ok(())
 }
@@ -1382,12 +1376,22 @@ fn file_mode(_meta: &std::fs::Metadata) -> Option<u32> {
     None
 }
 
-// Unique per call and random across processes; a clash only fails the item,
-// because create_dir refuses an existing name.
-fn staging_suffix() -> String {
-    use std::hash::{BuildHasher, Hasher};
-    let hasher = std::collections::hash_map::RandomState::new().build_hasher();
-    format!("{:016x}", hasher.finish())
+/// Makes a fresh hidden staging dir in `dest` and returns its path; `dest`
+/// itself is never created. The name check guards the cleanup's recursive delete.
+fn make_staging(run: &mut RemoteRun, dest: &str) -> Result<String, RemoteError> {
+    let request = serde_json::json!({ "op": "mkstage", "path": format!("{dest}/") });
+    let data = run(&request, Some(REMOTE_FS_TIMEOUT))?;
+    match data.as_str() {
+        Some(path)
+            if path
+                .rsplit('/')
+                .next()
+                .is_some_and(crate::modules::fs::copy::is_staging_name) =>
+        {
+            Ok(path.to_string())
+        }
+        _ => Err(RemoteError::Failed(format!("bad mkstage response: {data}"))),
+    }
 }
 
 /// A lost connection rejects the batch only on the first item, before its
@@ -1521,13 +1525,8 @@ fn copy_one(
     let mut plan = Vec::new();
     plan_upload(src, String::new(), 0, source.linked, &mut plan, registry).map_err(failed)?;
 
-    let staging = format!("{dest}/{}{}", copy::STAGING_PREFIX, staging_suffix());
-    // A refused or lost create_dir leaves a name this run does not own, so it
-    // returns here, before the cleanup below could delete someone else's dir.
-    run(
-        &serde_json::json!({ "op": "create_dir", "path": staging, "parents": false }),
-        Some(REMOTE_FS_TIMEOUT),
-    )?;
+    // Without a staging dir of its own the item returns here, before any cleanup.
+    let staging = make_staging(run, dest)?;
     let outcome = match upload(run, &plan, &format!("{staging}/{}", copy::STAGED_ITEM)) {
         Ok(()) => publish_staged(
             run,
@@ -1861,6 +1860,42 @@ Host !secret prod
 
     #[cfg(unix)]
     #[test]
+    fn embedded_helper_mkstage_makes_a_private_staging_dir_in_place() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mkstage = |dest: &std::path::Path| {
+            run_helper(
+                "",
+                &serde_json::json!({ "op": "mkstage", "path": format!("{}/", dest.display()) }),
+            )
+        };
+        let Some(env) = mkstage(dir.path()) else {
+            return;
+        };
+        assert_eq!(env["ok"], true, "{env}");
+        let staging = std::path::PathBuf::from(env["data"].as_str().unwrap());
+        assert_eq!(
+            std::fs::canonicalize(staging.parent().unwrap()).unwrap(),
+            std::fs::canonicalize(dir.path()).unwrap()
+        );
+        let name = staging.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.starts_with(crate::modules::fs::copy::STAGING_PREFIX),
+            "{name}"
+        );
+        let meta = std::fs::metadata(&staging).unwrap();
+        assert!(meta.is_dir());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+        assert_ne!(mkstage(dir.path()).unwrap()["data"], env["data"]);
+
+        let gone = dir.path().join("gone");
+        let env = mkstage(&gone).unwrap();
+        assert_eq!(env["ok"], false, "{env}");
+        assert!(!gone.exists(), "the destination is never created");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn embedded_helper_listings_never_show_staging() {
         let dir = tempfile::tempdir().unwrap();
         for rel in [".terax-copy-x/report", ".hidden/report"] {
@@ -2141,19 +2176,18 @@ Host !secret prod
     }
 
     fn creates_staging(request: &serde_json::Value) -> bool {
-        request["op"] == "create_dir"
-            && request["path"].as_str().is_some_and(|path| {
-                path.rsplit('/')
-                    .next()
-                    .is_some_and(crate::modules::fs::copy::is_staging_name)
-            })
+        request["op"] == "mkstage"
     }
 
     fn healthy(request: &serde_json::Value) -> RemoteReply {
-        Ok(if request["op"] == "read_dir" {
-            serde_json::json!([])
-        } else {
-            serde_json::json!(true)
+        Ok(match request["op"].as_str() {
+            Some("read_dir") => serde_json::json!([]),
+            Some("mkstage") => serde_json::json!(format!(
+                "{}{}stub",
+                request["path"].as_str().unwrap(),
+                crate::modules::fs::copy::STAGING_PREFIX
+            )),
+            _ => serde_json::json!(true),
         })
     }
 
@@ -2337,9 +2371,10 @@ Host !secret prod
         assert_eq!(result.unwrap().failed[0].message, "Permission denied");
         let staging = requests
             .iter()
-            .find(|r| creates_staging(r))
-            .map(|r| r["path"].clone())
+            .find(|r| r["op"] == "publish")
+            .map(|r| r["staging"].clone())
             .unwrap();
+        assert_eq!(staging, "/remote/.terax-copy-stub");
         let deletes: Vec<&serde_json::Value> = requests
             .iter()
             .filter(|r| r["op"] == "delete")
@@ -2350,27 +2385,34 @@ Host !secret prod
 
     #[test]
     fn a_staging_dir_this_run_did_not_create_is_never_deleted() {
+        const GONE: &str = "[Errno 2] No such file or directory: '/remote/.terax-copy-x'";
         let src = tempfile::tempdir().unwrap();
         let sources = local_sources(src.path(), &["a.txt"]);
-        let (result, requests) = stub_copy(&sources, |request| {
-            if creates_staging(request) {
-                let path = request["path"].as_str().unwrap();
-                return Err(RemoteError::Failed(format!("already exists: {path}")));
-            }
-            healthy(request)
-        });
-        let result = result.unwrap();
-        assert!(result.created.is_empty());
-        assert!(
-            result.failed[0]
-                .message
-                .starts_with("already exists: /remote/.terax-copy-"),
-            "{:?}",
-            result.failed
-        );
-        assert!(!requests
-            .iter()
-            .any(|r| r["op"] == "delete" || r["op"] == "write_bytes" || r["op"] == "publish"));
+        type Reply = fn() -> RemoteReply;
+        let replies: [(Reply, &str); 2] = [
+            (|| Err(RemoteError::Failed(GONE.into())), GONE),
+            (
+                || Ok(serde_json::json!("/remote")),
+                "bad mkstage response: \"/remote\"",
+            ),
+        ];
+        for (reply, message) in replies {
+            let (result, requests) = stub_copy(&sources, |request| {
+                if creates_staging(request) {
+                    return reply();
+                }
+                healthy(request)
+            });
+            let result = result.unwrap();
+            assert!(result.created.is_empty());
+            assert_eq!(
+                failures(&result),
+                [(sources[0].clone(), message.to_string())]
+            );
+            assert!(!requests
+                .iter()
+                .any(|r| r["op"] == "delete" || r["op"] == "write_bytes" || r["op"] == "publish"));
+        }
     }
 
     #[test]
@@ -2381,11 +2423,15 @@ Host !secret prod
         let pkg = src.path().join("pkg").to_string_lossy().into_owned();
         let (result, requests) = stub_copy(&[pkg], healthy);
         assert_eq!(result.unwrap().created, ["/remote/pkg"]);
+        let stagings: Vec<&serde_json::Value> =
+            requests.iter().filter(|r| creates_staging(r)).collect();
+        assert_eq!(stagings.len(), 1);
+        assert_eq!(stagings[0]["path"], "/remote/");
         let dirs: Vec<&serde_json::Value> = requests
             .iter()
             .filter(|r| r["op"] == "create_dir")
             .collect();
-        let staging = dirs[0]["path"].as_str().unwrap();
+        let staging = "/remote/.terax-copy-stub";
         let paths: Vec<String> = dirs
             .iter()
             .map(|r| r["path"].as_str().unwrap().to_string())
@@ -2393,7 +2439,6 @@ Host !secret prod
         assert_eq!(
             paths,
             [
-                staging.to_string(),
                 format!("{staging}/item"),
                 format!("{staging}/item/a"),
                 format!("{staging}/item/a/b"),
@@ -2403,18 +2448,7 @@ Host !secret prod
     }
 
     #[test]
-    fn an_upload_gets_a_minute_plus_its_time_at_256_kib_per_second() {
-        use std::time::Duration;
-        assert_eq!(upload_timeout(0), Duration::from_secs(60));
-        assert_eq!(upload_timeout(1), Duration::from_secs(61));
-        assert_eq!(upload_timeout(256 * 1024), Duration::from_secs(61));
-        assert_eq!(upload_timeout(256 * 1024 + 1), Duration::from_secs(62));
-        assert_eq!(upload_timeout(100 * 1024 * 1024), Duration::from_secs(460));
-        assert!(upload_timeout(usize::MAX) > Duration::from_secs(60));
-    }
-
-    #[test]
-    fn every_copy_step_runs_on_a_budget() {
+    fn control_steps_run_on_a_budget_but_uploads_do_not() {
         let src = tempfile::tempdir().unwrap();
         std::fs::create_dir(src.path().join("pkg")).unwrap();
         std::fs::write(src.path().join("pkg/a.txt"), b"a").unwrap();
@@ -2437,12 +2471,11 @@ Host !secret prod
         .unwrap();
         assert_eq!(result.failed[0].message, "Permission denied");
         let control = Some(REMOTE_FS_TIMEOUT);
-        let write = Some(upload_timeout(b64encode(b"a").len()));
         let expected = [
             ("read_dir", control),
+            ("mkstage", control),
             ("create_dir", control),
-            ("create_dir", control),
-            ("write_bytes", write),
+            ("write_bytes", None),
             ("publish", control),
             ("delete", control),
         ];
