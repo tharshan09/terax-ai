@@ -1,12 +1,35 @@
 {
   "feature": "upstream-sync-090",
   "slice": "slice-01-clipboard-paste",
-  "timestamp": "2026-10-28T00:00:00Z",
-  "status": "passed",
-  "implementation": {"pr": 84, "base": "9662e50", "head": "d2ab72b"},
-  "review": {"rounds": 27, "last_round_findings": 10, "fixed_in_last_round": 2, "stop": "user decision: two items fixed, rest documented as known limits in PR #84"},
-  "deterministic_gate": {"lint": 0, "check_types": 0, "clippy": 0, "em_dash_added": 0},
-  "tests": {"vitest": {"files": 83, "passed": 747}, "cargo_test": {"passed": 547, "failed": 0}},
+  "timestamp": "2026-10-28T18:55:53Z",
+  "status": "passed_with_accepted_findings",
+  "implementation": {
+    "pr": 84,
+    "base": "9662e50",
+    "head": "d2ab72b"
+  },
+  "review": {
+    "rounds": 27,
+    "last_round_findings": 10,
+    "fixed_in_last_round": 2,
+    "stop": "user decision: two items fixed, rest documented as known limits in PR #84"
+  },
+  "deterministic_gate": {
+    "lint": 0,
+    "check_types": 0,
+    "clippy": 0,
+    "em_dash_added": 0
+  },
+  "tests": {
+    "vitest": {
+      "files": 83,
+      "passed": 747
+    },
+    "cargo_test": {
+      "passed": 547,
+      "failed": 0
+    }
+  },
   "open_notes": [
     "macOS paste permission prompt may exceed the 5 s pasteboard budget (untested, check in real app)",
     "SSH upload reads planned files by path, parent-swap case not covered",
