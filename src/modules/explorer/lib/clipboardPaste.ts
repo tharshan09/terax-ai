@@ -5,32 +5,28 @@ import {
   type TerminalKeyEvent,
 } from "@/modules/terminal/lib/keymap";
 import type { WorkspaceEnv } from "@/modules/workspace";
-import { dirname } from "./useFileTree";
 
-// The folder a row stands for when something lands on it: paste, drop or move.
-export function pasteTargetDir<Root extends string | null>(
-  selected: string | null | undefined,
-  isDir: (path: string) => boolean | undefined,
-  rootPath: Root,
-): string | Root {
-  if (!selected) return rootPath;
-  return isDir(selected) ? selected : dirname(selected);
-}
-
-// One paste at a time; a second request says so instead of silently doing nothing.
+// One paste at a time; a second request says so instead of silently doing
+// nothing. `release` frees the lock early, never one a later paste took.
 export async function pasteExclusively(
   busy: { current: boolean },
-  paste: () => Promise<void>,
+  paste: (release: () => void) => Promise<void>,
 ): Promise<void> {
   if (busy.current) {
     toast.message("A paste is already running");
     return;
   }
   busy.current = true;
-  try {
-    await paste();
-  } finally {
+  let held = true;
+  const release = () => {
+    if (!held) return;
+    held = false;
     busy.current = false;
+  };
+  try {
+    await paste(release);
+  } finally {
+    release();
   }
 }
 
@@ -54,6 +50,9 @@ export type CopyResult = {
   aborted?: string | null;
 };
 
+// `unresolved` counts file URLs whose file is gone (deleted since the copy).
+type ClipboardFiles = { paths: string[]; unresolved: number };
+
 type PasteOptions = {
   workspace: WorkspaceEnv;
   rootPath: string;
@@ -64,15 +63,27 @@ type PasteOptions = {
   expand: (dir: string) => Promise<void>;
   hasRow: (path: string) => boolean;
   select: (path: string) => void;
+  // Called once fs_copy returns: only the copy itself needs the paste lock.
+  onCopySettled: () => void;
 };
 
+function unresolvedHint(unresolved: number): string {
+  return unresolved === 1
+    ? "A copied item no longer exists"
+    : `${unresolved} copied items no longer exist`;
+}
+
 // A lost connection explains every failure after it, so it beats the first one.
-export function reportCopyFailures(result: CopyResult): void {
-  if (result.failed.length === 0) return;
+export function reportCopyFailures(result: CopyResult, unresolved = 0): void {
+  const count = result.failed.length + unresolved;
+  if (count === 0) return;
   const first = result.failed[0];
-  const count = result.failed.length;
   toast.error(`Could not copy ${count} ${count === 1 ? "item" : "items"}`, {
-    description: result.aborted ?? `${first.source}: ${first.message}`,
+    description:
+      result.aborted ??
+      (first
+        ? `${first.source}: ${first.message}`
+        : unresolvedHint(unresolved)),
   });
 }
 
@@ -90,26 +101,35 @@ export async function pasteClipboardFiles(
     expand,
     hasRow,
     select,
+    onCopySettled,
   }: PasteOptions,
 ): Promise<string[]> {
   // A collapsed folder is read when it opens, so it gets no extra re-read.
   const isOpen = () => destDir === rootPath || isExpanded(destDir);
   let copyStarted = false;
   try {
-    const sources = await invoke<string[]>("fs_clipboard_paths");
+    const { paths: sources, unresolved } =
+      await invoke<ClipboardFiles>("fs_clipboard_paths");
     if (!isCurrent()) return [];
     if (sources.length === 0) {
-      toast.message("No files on the clipboard");
+      if (unresolved > 0)
+        reportCopyFailures({ created: [], failed: [] }, unresolved);
+      else toast.message("No files on the clipboard");
       return [];
     }
     copyStarted = true;
-    const result = await invoke<CopyResult>("fs_copy", {
-      sources,
-      destDir,
-      workspace,
-      renameOnConflict: true,
-    });
-    reportCopyFailures(result);
+    let result: CopyResult;
+    try {
+      result = await invoke<CopyResult>("fs_copy", {
+        sources,
+        destDir,
+        workspace,
+        renameOnConflict: true,
+      });
+    } finally {
+      onCopySettled();
+    }
+    reportCopyFailures(result, unresolved);
     if (!isCurrent()) return [];
     if (isOpen()) await refresh(destDir);
     else if (result.created.length > 0) await expand(destDir);

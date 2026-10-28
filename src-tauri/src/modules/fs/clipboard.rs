@@ -1,7 +1,15 @@
+/// The clipboard's files. A file URL that no longer leads to a file (its
+/// original was deleted) is counted, so the paste can report it as failed.
+#[derive(Debug, Default, PartialEq, serde::Serialize)]
+pub struct ClipboardFiles {
+    pub paths: Vec<String>,
+    pub unresolved: usize,
+}
+
 /// File and folder paths the OS clipboard holds (Finder copy). Only file URLs
 /// are read, never text or images, and only on an explicit paste.
 #[tauri::command]
-pub async fn fs_clipboard_paths(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+pub async fn fs_clipboard_paths(app: tauri::AppHandle) -> Result<ClipboardFiles, String> {
     #[cfg(target_os = "macos")]
     {
         // AppKit expects pasteboard access on the main thread; awaiting its
@@ -9,7 +17,7 @@ pub async fn fs_clipboard_paths(app: tauri::AppHandle) -> Result<Vec<String>, St
         let (tx, rx) = tokio::sync::oneshot::channel();
         app.run_on_main_thread(move || {
             let pasteboard = objc2_app_kit::NSPasteboard::generalPasteboard();
-            let _ = tx.send(read_file_paths(&pasteboard));
+            let _ = tx.send(read_files(&pasteboard));
         })
         .map_err(|e| e.to_string())?;
         receive_paths(rx, MAIN_THREAD_BUDGET).await
@@ -26,37 +34,45 @@ const MAIN_THREAD_BUDGET: std::time::Duration = std::time::Duration::from_secs(5
 
 #[cfg(target_os = "macos")]
 async fn receive_paths(
-    rx: tokio::sync::oneshot::Receiver<Vec<String>>,
+    rx: tokio::sync::oneshot::Receiver<ClipboardFiles>,
     budget: std::time::Duration,
-) -> Result<Vec<String>, String> {
+) -> Result<ClipboardFiles, String> {
     match tokio::time::timeout(budget, rx).await {
-        Ok(Ok(paths)) => Ok(paths),
+        Ok(Ok(files)) => Ok(files),
         _ => Err("clipboard read timed out or was cancelled".to_string()),
     }
 }
 
-/// Absolute paths of every pasteboard item carrying a file URL. Finder writes
-/// file-reference URLs (`file:///.file/id=…`); `filePathURL` resolves them.
+/// Every pasteboard item carrying a file URL, as an absolute path or counted
+/// as unresolved. Finder writes file-reference URLs (`file:///.file/id=…`).
 #[cfg(target_os = "macos")]
-fn read_file_paths(pasteboard: &objc2_app_kit::NSPasteboard) -> Vec<String> {
+fn read_files(pasteboard: &objc2_app_kit::NSPasteboard) -> ClipboardFiles {
     use objc2_app_kit::NSPasteboardTypeFileURL;
-    use objc2_foundation::NSURL;
 
+    let mut files = ClipboardFiles::default();
     let Some(items) = pasteboard.pasteboardItems() else {
-        return Vec::new();
+        return files;
     };
     let file_type = unsafe { NSPasteboardTypeFileURL };
-    items
-        .iter()
-        .filter_map(|item| {
-            let raw = item.stringForType(file_type)?;
-            let path = NSURL::URLWithString(&raw)?
-                .filePathURL()?
-                .path()?
-                .to_string();
-            (!path.is_empty()).then(|| super::to_canon(path))
-        })
-        .collect()
+    for item in items.iter() {
+        let Some(raw) = item.stringForType(file_type) else {
+            continue;
+        };
+        match file_path(&raw) {
+            Some(path) => files.paths.push(super::to_canon(path)),
+            None => files.unresolved += 1,
+        }
+    }
+    files
+}
+
+#[cfg(target_os = "macos")]
+fn file_path(raw: &objc2_foundation::NSString) -> Option<String> {
+    let path = objc2_foundation::NSURL::URLWithString(raw)?
+        .filePathURL()?
+        .path()?
+        .to_string();
+    (!path.is_empty()).then_some(path)
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -123,6 +139,14 @@ mod tests {
         };
         items.push(reference_to(&folder));
         items.push(reference_to(&referenced));
+        let deleted = root.join("deleted.txt");
+        std::fs::write(&deleted, b"x").unwrap();
+        items.push(reference_to(&deleted));
+        std::fs::remove_file(&deleted).unwrap();
+        let web = NSPasteboardItem::new();
+        let not_a_file = NSString::from_str("https://example.com/a.txt");
+        assert!(web.setString_forType(&not_a_file, unsafe { NSPasteboardTypeFileURL }));
+        items.push(web);
         let text = NSPasteboardItem::new();
         assert!(
             text.setString_forType(&NSString::from_str("hello"), unsafe {
@@ -138,8 +162,12 @@ mod tests {
             .chain([&folder, &folder, &referenced])
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
-        let got = read_file_paths(&pasteboard);
+        let ClipboardFiles {
+            paths: got,
+            unresolved,
+        } = read_files(&pasteboard);
         assert_eq!(got.len(), expected.len(), "{got:?}");
+        assert_eq!(unresolved, 2, "the deleted file and the web URL");
         // fileURLWithPath spells the folder decomposed (NFD), so that item is
         // compared by file identity; every other item must match exactly.
         use std::os::unix::fs::MetadataExt;
@@ -155,7 +183,7 @@ mod tests {
         }
 
         pasteboard.clearContents();
-        assert!(read_file_paths(&pasteboard).is_empty());
+        assert_eq!(read_files(&pasteboard), ClipboardFiles::default());
         let _: () = unsafe { objc2::msg_send![&*pasteboard, releaseGlobally] };
     }
 
@@ -168,15 +196,20 @@ mod tests {
         let message = "clipboard read timed out or was cancelled";
         let budget = std::time::Duration::from_millis(20);
         runtime.block_on(async {
-            let (silent, rx) = tokio::sync::oneshot::channel::<Vec<String>>();
+            let (silent, rx) = tokio::sync::oneshot::channel::<ClipboardFiles>();
             assert_eq!(receive_paths(rx, budget).await.unwrap_err(), message);
             drop(silent);
-            let (gone, rx) = tokio::sync::oneshot::channel::<Vec<String>>();
+            let (gone, rx) = tokio::sync::oneshot::channel::<ClipboardFiles>();
             drop(gone);
             assert_eq!(receive_paths(rx, budget).await.unwrap_err(), message);
             let (tx, rx) = tokio::sync::oneshot::channel();
-            tx.send(vec!["/a".to_string()]).unwrap();
-            assert_eq!(receive_paths(rx, budget).await.unwrap(), ["/a"]);
+            let files = ClipboardFiles {
+                paths: vec!["/a".to_string()],
+                unresolved: 1,
+            };
+            tx.send(files).unwrap();
+            let got = receive_paths(rx, budget).await.unwrap();
+            assert_eq!((got.paths, got.unresolved), (vec!["/a".to_string()], 1));
         });
     }
 }

@@ -11,15 +11,28 @@ use super::mutate::authorize_mutation_dir;
 use crate::modules::workspace::{resolve_path, WorkspaceEnv, WorkspaceRegistry};
 
 pub(crate) const STAGING_PREFIX: &str = ".terax-copy-";
+/// Python's mkdtemp on an SSH host always draws 8; tempfile here is told to.
+pub(crate) const STAGING_RANDOM_LEN: usize = 8;
 const MAX_COPY_SOURCES: usize = 1024;
 const MAX_COPY_SUFFIX: usize = 10_000;
 const MAX_COPY_DEPTH: usize = 128;
 pub(crate) const STAGED_ITEM: &str = "item";
 
-/// Half-finished copies live under this prefix; every listing primitive of the
-/// app hides such names, whatever `show_hidden` or ignore rules say.
+/// Exactly the names `staging_dir_in` and the helper's mkdtemp make: every
+/// listing of the app hides them, whatever `show_hidden` or ignore rules say.
 pub(crate) fn is_staging_name(name: &str) -> bool {
-    name.starts_with(STAGING_PREFIX)
+    name.strip_prefix(STAGING_PREFIX).is_some_and(|tail| {
+        tail.len() == STAGING_RANDOM_LEN
+            && tail.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    })
+}
+
+/// A fresh private staging dir in `dest`; tempfile draws from [A-Za-z0-9].
+pub(crate) fn staging_dir_in(dest: &Path) -> io::Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix(STAGING_PREFIX)
+        .rand_bytes(STAGING_RANDOM_LEN)
+        .tempdir_in(dest)
 }
 
 /// Walker `filter_entry`: `.hidden(true)` yields to whitelist rules in
@@ -127,6 +140,9 @@ pub(crate) struct Source<'a> {
     pub(crate) is_dir: bool,
     /// The walk below runs through a symlink, so its entries are judged too.
     pub(crate) linked: bool,
+    kind: std::fs::FileType,
+    /// Where a plain source really is; a link is resolved only where it is read.
+    canonical: Option<PathBuf>,
 }
 
 /// The kind is unfollowed, so each branch decides what a symlink source means.
@@ -145,11 +161,20 @@ pub(crate) fn check_source<'a>(
     if !(kind.is_file() || kind.is_dir() || kind.is_symlink()) {
         return Err(unsupported_kind());
     }
-    let linked = kind.is_symlink() || behind_link(src, &guard_read(registry, src)?);
+    let canonical = if kind.is_symlink() {
+        None
+    } else {
+        Some(guard_read(registry, src)?)
+    };
+    let linked = canonical
+        .as_deref()
+        .is_none_or(|canonical| behind_link(src, canonical));
     Ok(Source {
         name,
         is_dir: kind.is_dir(),
         linked,
+        kind,
+        canonical,
     })
 }
 
@@ -261,16 +286,27 @@ fn copy_item(
     if !rename_on_conflict && std::fs::symlink_metadata(&target).is_ok() {
         return Err(already_exists(target.display()));
     }
-    if is_dir && dest.starts_with(std::fs::canonicalize(src)?) {
+    if is_dir
+        && source
+            .canonical
+            .as_deref()
+            .is_some_and(|real| dest.starts_with(real))
+    {
         return Err(into_itself());
     }
 
     // Same-directory staging keeps the publish a single rename on one volume.
-    let staging = tempfile::Builder::new()
-        .prefix(STAGING_PREFIX)
-        .tempdir_in(dest)?;
+    let staging = staging_dir_in(dest)?;
     let staged = staging.path().join(STAGED_ITEM);
-    let walk = copy_recursive(src, &staged, 0, source.linked, registry, &mut Vec::new());
+    let walk = copy_kind(
+        src,
+        source.kind,
+        &staged,
+        0,
+        source.linked,
+        registry,
+        &mut Vec::new(),
+    );
     let result = walk.and_then(|()| {
         publish(
             &staged,
@@ -279,6 +315,7 @@ fn copy_item(
             is_dir,
             rename_on_conflict,
             rename_no_replace,
+            swap_onto_claim,
         )
     });
     if let Err(error) = staging.close() {
@@ -290,6 +327,7 @@ fn copy_item(
     result
 }
 
+/// `rename` must never replace; `swap` only ever replaces our own placeholder.
 fn publish(
     staged: &Path,
     dest: &Path,
@@ -297,20 +335,33 @@ fn publish(
     is_dir: bool,
     rename_on_conflict: bool,
     rename: impl Fn(&Path, &Path) -> io::Result<()>,
+    swap: impl Fn(&Path, &Path) -> io::Result<()>,
 ) -> io::Result<OsString> {
     for candidate in copy_candidates(name, is_dir) {
         let target = dest.join(&candidate);
-        match place(staged, &target, is_dir, &rename) {
+        match place(staged, &target, is_dir, &rename, &swap) {
             Ok(()) => return Ok(candidate),
-            Err(error) if is_taken(&error, &target) => {
-                if !rename_on_conflict {
-                    return Err(already_exists(target.display()));
-                }
-            }
-            Err(error) => return Err(error),
+            Err(Refused::Taken) if rename_on_conflict => {}
+            Err(Refused::Taken) => return Err(already_exists(target.display())),
+            Err(Refused::Failed(error)) => return Err(error),
         }
     }
     Err(no_free_copy_name())
+}
+
+/// Only `Taken` lets the publish move on to the next candidate name.
+#[derive(Debug)]
+enum Refused {
+    Taken,
+    Failed(io::Error),
+}
+
+fn refusal(error: io::Error, target: &Path) -> Refused {
+    if is_taken(&error, target) {
+        Refused::Taken
+    } else {
+        Refused::Failed(error)
+    }
 }
 
 fn place(
@@ -318,31 +369,46 @@ fn place(
     target: &Path,
     is_dir: bool,
     rename: &impl Fn(&Path, &Path) -> io::Result<()>,
-) -> io::Result<()> {
+    swap: &impl Fn(&Path, &Path) -> io::Result<()>,
+) -> Result<(), Refused> {
     match rename(staged, target) {
-        Err(error) if is_unsupported(&error) => place_reserved(staged, target, is_dir),
-        other => other,
+        Ok(()) => Ok(()),
+        Err(error) if is_unsupported(&error) => place_reserved(staged, target, is_dir, swap),
+        Err(error) => Err(refusal(error, target)),
     }
 }
 
 // Filesystems without a no-replace rename (exFAT, SMB): claim the name
-// exclusively first, then rename over our own empty placeholder.
-fn place_reserved(staged: &Path, target: &Path, is_dir: bool) -> io::Result<()> {
-    if is_dir {
-        std::fs::create_dir(target)?;
+// exclusively first, then rename over our own empty placeholder. Only the
+// claim can find the name taken; whatever the swap reports fails the item.
+fn place_reserved(
+    staged: &Path,
+    target: &Path,
+    is_dir: bool,
+    swap: &impl Fn(&Path, &Path) -> io::Result<()>,
+) -> Result<(), Refused> {
+    let claimed = if is_dir {
+        std::fs::create_dir(target)
     } else {
         std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(target)?;
-    }
-    std::fs::rename(staged, target).inspect_err(|_| {
+            .open(target)
+            .map(drop)
+    };
+    claimed.map_err(|error| refusal(error, target))?;
+    swap(staged, target).map_err(|error| {
         let _ = if is_dir {
             std::fs::remove_dir(target)
         } else {
             std::fs::remove_file(target)
         };
+        Refused::Failed(error)
     })
+}
+
+fn swap_onto_claim(staged: &Path, target: &Path) -> io::Result<()> {
+    std::fs::rename(staged, target)
 }
 
 fn is_taken(error: &io::Error, target: &Path) -> bool {
@@ -466,6 +532,19 @@ fn copy_recursive(
 ) -> io::Result<()> {
     check_depth(depth)?;
     let kind = std::fs::symlink_metadata(src)?.file_type();
+    copy_kind(src, kind, dst, depth, linked, registry, followed)
+}
+
+/// `kind` is the unfollowed type of `src`, already read by the caller.
+fn copy_kind(
+    src: &Path,
+    kind: std::fs::FileType,
+    dst: &Path,
+    depth: usize,
+    linked: bool,
+    registry: &WorkspaceRegistry,
+    followed: &mut Vec<PathBuf>,
+) -> io::Result<()> {
     if kind.is_symlink() {
         match copy_symlink(src, dst) {
             Err(error) if copies_link_content(&error, cfg!(windows)) => {
@@ -627,7 +706,7 @@ pub(crate) fn whitelist_repo_with_staging_rest() -> tempfile::TempDir {
         .expect("git is required for the whitelist fixture");
     assert!(status.success(), "git init failed");
     std::fs::write(repo.path().join(".gitignore"), "*\n!*/\n!*.txt\n").unwrap();
-    for rel in [".terax-copy-x/src/report.txt", "src/other.txt"] {
+    for rel in [".terax-copy-x9Kq2_Lm/src/report.txt", "src/other.txt"] {
         let path = repo.path().join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, "needle\n").unwrap();
@@ -734,12 +813,44 @@ mod tests {
         assert_eq!(first, ["a copy.txt", "a copy 2.txt", "a copy 3.txt"]);
     }
 
+    fn staged_in(dir: &Path) -> PathBuf {
+        dir.join(format!(
+            "{STAGING_PREFIX}{}",
+            "t".repeat(STAGING_RANDOM_LEN)
+        ))
+    }
+
     #[test]
-    fn staging_predicate_matches_only_the_prefix() {
-        assert!(is_staging_name(".terax-copy-abc"));
-        assert!(is_staging_name(STAGING_PREFIX));
-        assert!(!is_staging_name(".terax-copyright.md"));
-        assert!(!is_staging_name("x.terax-copy-abc"));
+    fn staging_names_are_exactly_what_the_two_makers_create() {
+        let dest = tempfile::tempdir().unwrap();
+        for _ in 0..64 {
+            let staging = staging_dir_in(dest.path()).unwrap();
+            let name = staging.path().file_name().unwrap().to_str().unwrap();
+            assert!(is_staging_name(name), "{name}");
+        }
+        // Python's mkdtemp: eight of [a-z0-9_].
+        for name in [
+            ".terax-copy-k2_9xq0a",
+            ".terax-copy-________",
+            ".terax-copy-a1B2c3D4",
+        ] {
+            assert!(is_staging_name(name), "{name}");
+        }
+        for name in [
+            ".terax-copy-notes.md",
+            ".terax-copy-backup",
+            STAGING_PREFIX,
+            ".terax-copy-abcdefg",
+            ".terax-copy-abcdefghi",
+            ".terax-copy-ab-cd-ef",
+            ".terax-copy-\u{e4}bcdefg",
+            ".terax-copy-abcdefgh/",
+            ".terax-copyright.md",
+            "x.terax-copy-abcdefgh",
+            ".TERAX-COPY-abcdefgh",
+        ] {
+            assert!(!is_staging_name(name), "{name}");
+        }
     }
 
     #[test]
@@ -1407,7 +1518,7 @@ mod tests {
         let dest = tempfile::tempdir().unwrap();
         std::fs::write(dest.path().join("a.txt"), b"old").unwrap();
         let stage = |body: &[u8]| {
-            let staged = dest.path().join(format!("{STAGING_PREFIX}t"));
+            let staged = staged_in(dest.path());
             std::fs::write(&staged, body).unwrap();
             staged
         };
@@ -1420,6 +1531,7 @@ mod tests {
             false,
             true,
             |_, _| Err(io::Error::from_raw_os_error(unsupported)),
+            swap_onto_claim,
         )
         .unwrap();
         assert_eq!(name, "a copy.txt");
@@ -1444,12 +1556,13 @@ mod tests {
                     rename_no_replace(from, to)
                 }
             },
+            swap_onto_claim,
         )
         .unwrap();
         assert_eq!(name, "b copy.txt");
         assert!(!dest.path().join("b.txt").exists());
 
-        let staged_dir = dest.path().join(format!("{STAGING_PREFIX}d"));
+        let staged_dir = staged_in(dest.path());
         std::fs::create_dir(&staged_dir).unwrap();
         std::fs::create_dir(dest.path().join("v")).unwrap();
         std::fs::write(dest.path().join("v/keep"), b"k").unwrap();
@@ -1460,6 +1573,7 @@ mod tests {
             true,
             true,
             |_, _| Err(io::Error::from_raw_os_error(unsupported)),
+            swap_onto_claim,
         )
         .unwrap();
         assert_eq!(name, "v copy");
@@ -1474,7 +1588,7 @@ mod tests {
         let dest = tempfile::tempdir().unwrap();
         std::fs::write(dest.path().join("a.txt"), b"old").unwrap();
         for (code, expected) in [(libc::ENOSYS, "a copy.txt"), (libc::EPERM, "a copy 2.txt")] {
-            let staged = dest.path().join(format!("{STAGING_PREFIX}t"));
+            let staged = staged_in(dest.path());
             std::fs::write(&staged, b"new").unwrap();
             let name = publish(
                 &staged,
@@ -1483,6 +1597,7 @@ mod tests {
                 false,
                 true,
                 |_, _| Err(io::Error::from_raw_os_error(code)),
+                swap_onto_claim,
             )
             .unwrap();
             assert_eq!(name, expected);
@@ -1493,15 +1608,64 @@ mod tests {
 
         let eexist = io::Error::from_raw_os_error(libc::EEXIST);
         assert!(!is_unsupported(&eexist));
-        let staged = dest.path().join(format!("{STAGING_PREFIX}t"));
+        let staged = staged_in(dest.path());
         std::fs::write(&staged, b"new").unwrap();
-        let error = place(&staged, &dest.path().join("free.txt"), false, &|_: &Path, _: &Path| {
-            Err(io::Error::from_raw_os_error(libc::EEXIST))
-        })
-        .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        let refused = place(
+            &staged,
+            &dest.path().join("free.txt"),
+            false,
+            &|_: &Path, _: &Path| Err(io::Error::from_raw_os_error(libc::EEXIST)),
+            &swap_onto_claim,
+        );
+        assert!(matches!(refused, Err(Refused::Taken)), "{refused:?}");
         assert!(!dest.path().join("free.txt").exists());
         assert!(staged.exists());
+    }
+
+    // The placeholder is ours, so a failing swap onto it (even with EEXIST)
+    // fails the item instead of looking like a taken name.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_failed_swap_onto_the_claim_fails_the_item_and_frees_the_name() {
+        let dest = tempfile::tempdir().unwrap();
+        let staged = staged_in(dest.path());
+        let unsupported =
+            |_: &Path, _: &Path| Err(io::Error::from_raw_os_error(NO_REPLACE_UNSUPPORTED[0]));
+        for (is_dir, code) in [
+            (false, libc::EEXIST),
+            (false, libc::EIO),
+            (true, libc::EEXIST),
+            (true, libc::ENOTEMPTY),
+        ] {
+            if is_dir {
+                std::fs::create_dir(&staged).unwrap();
+            } else {
+                std::fs::write(&staged, b"new").unwrap();
+            }
+            let swaps = std::cell::Cell::new(0);
+            let error = publish(
+                &staged,
+                dest.path(),
+                OsStr::new("a"),
+                is_dir,
+                true,
+                unsupported,
+                |_, _| {
+                    swaps.set(swaps.get() + 1);
+                    Err(io::Error::from_raw_os_error(code))
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(code));
+            assert_eq!(swaps.get(), 1, "no further candidate may be tried");
+            let staged_name = staged.file_name().unwrap().to_string_lossy();
+            assert_eq!(names(dest.path()), [&*staged_name]);
+            if is_dir {
+                std::fs::remove_dir(&staged).unwrap();
+            } else {
+                std::fs::remove_file(&staged).unwrap();
+            }
+        }
     }
 
     #[test]

@@ -104,6 +104,24 @@ describe("useFileTree folder reads", () => {
     await act(async () => pending[2].resolve([entry("from-b")]));
     expect(listing(result.current, "/b")).toEqual(["from-b"]);
   });
+
+  it("reads no folder of the old root again after the root changed", async () => {
+    const pending = reads();
+    const { result, rerender } = renderHook(({ root }) => useFileTree(root), {
+      initialProps: { root: "/old-root" },
+    });
+    await act(async () => pending[0].resolve([entry("docs", "dir")]));
+    act(() => {
+      void result.current.expand("/old-root/docs");
+    });
+    await act(async () => pending[1].resolve([entry("a.txt")]));
+    expect(listing(result.current, "/old-root/docs")).toEqual(["a.txt"]);
+
+    rerender({ root: "/new-root" });
+    expect(pending.slice(2).map((r) => r.path)).toEqual(["/new-root"]);
+    await act(async () => pending[2].resolve([entry("b.txt")]));
+    expect(Object.keys(result.current.nodes)).toEqual(["/new-root"]);
+  });
 });
 
 describe("useFileTree read promises", () => {

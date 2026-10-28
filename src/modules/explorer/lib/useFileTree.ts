@@ -9,6 +9,7 @@ import {
 import { toast } from "sonner";
 import { currentWorkspaceEnv } from "@/modules/workspace";
 import { usePreferencesStore } from "@/modules/settings/preferences";
+import { dirname } from "./paths";
 import { listenFsChanged, watchAdd, watchRemove } from "./watch";
 
 export type DirEntry = {
@@ -54,13 +55,6 @@ export type PendingCreate = {
 export function joinPath(parent: string, name: string): string {
   if (parent.endsWith("/")) return `${parent}${name}`;
   return `${parent}/${name}`;
-}
-
-// Parent of a tree key: keys join with `/`, so a backslash stays part of a name.
-export function dirname(path: string): string {
-  const i = path.lastIndexOf("/");
-  if (i <= 0) return "/";
-  return path.slice(0, i);
 }
 
 const EXPANSION_CACHE_LIMIT = 8;
@@ -319,10 +313,10 @@ export function useFileTree(rootPath: string | null, options?: Options) {
     };
   }, [fetchChildren]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: re-list loaded directories only when visibility/git-decoration/root prefs change; `nodes` is intentionally omitted so ordinary tree edits don't refetch every expanded directory.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-list loaded directories only when visibility/git-decoration/root prefs change; the tree is read from the ref, which the root change above has already cleared, so no folder of an old root is read again.
   useEffect(() => {
     if (!rootPath) return;
-    const loadedPaths = Object.entries(nodes)
+    const loadedPaths = Object.entries(nodesRef.current)
       .filter(([, state]) => state.status === "loaded")
       .map(([path]) => path);
     for (const path of loadedPaths) void fetchChildren(path);

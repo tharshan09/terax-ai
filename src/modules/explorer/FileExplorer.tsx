@@ -42,13 +42,13 @@ import {
   pasteClipboardFiles,
   pasteExclusively,
   pasteKeyAction,
-  pasteTargetDir,
 } from "@/modules/explorer/lib/clipboardPaste";
+import { dirname, targetDirFor } from "@/modules/explorer/lib/paths";
 import { fileIconUrl, folderIconUrl } from "./lib/iconResolver";
 import { COMPACT_CONTENT, COMPACT_ITEM } from "./lib/menuItemClass";
 import { useExplorerDnd } from "./lib/useExplorerDnd";
 import { useExplorerFileDrop } from "./lib/useExplorerFileDrop";
-import { dirname, useFileTree } from "./lib/useFileTree";
+import { useFileTree } from "./lib/useFileTree";
 import { useGitStatus } from "./lib/useGitStatus";
 import type { GitStatusCode } from "./lib/gitStatusUtils";
 import { useGlobalShortcuts } from "@/modules/shortcuts";
@@ -322,7 +322,7 @@ export const FileExplorer = memo(
     const pasteInto = useCallback(
       async (destDir: string) => {
         if (!rootPath) return;
-        await pasteExclusively(pasteBusyRef, async () => {
+        await pasteExclusively(pasteBusyRef, async (release) => {
           const scope = pasteScopeRef.current;
           await pasteClipboardFiles(destDir, {
             workspace,
@@ -336,6 +336,7 @@ export const FileExplorer = memo(
               setSelectedPath(path);
               requestAnimationFrame(() => scrollEntryIntoView(path));
             },
+            onCopySettled: release,
           });
         });
       },
@@ -430,7 +431,7 @@ export const FileExplorer = memo(
       if (pasteKey) {
         e.preventDefault();
         if (pasteKey === "paste") {
-          void pasteInto(pasteTargetDir(selectedPath, isDirAt, rootPath));
+          void pasteInto(targetDirFor(selectedPath, isDirAt, rootPath));
         }
         return;
       }
@@ -783,7 +784,7 @@ export const FileExplorer = memo(
                       className={COMPACT_ITEM}
                       onSelect={() =>
                         void pasteInto(
-                          pasteTargetDir(
+                          targetDirFor(
                             menuTarget.path,
                             () => menuTarget.isDir,
                             rootPath,

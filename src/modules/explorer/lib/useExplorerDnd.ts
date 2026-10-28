@@ -1,7 +1,6 @@
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { pasteTargetDir } from "./clipboardPaste";
-import { dirname } from "./useFileTree";
+import { dirname, targetDirFor } from "./paths";
 
 type Options = {
   rootPath: string;
@@ -63,7 +62,7 @@ export function useExplorerDnd({ rootPath, isDir, onMove }: Options) {
       const hit = document
         .elementFromPoint(ev.clientX, ev.clientY)
         ?.closest<HTMLElement>("[data-fs-path]");
-      const t = pasteTargetDir(
+      const t = targetDirFor(
         hit?.getAttribute("data-fs-path"),
         isDir,
         rootPath,

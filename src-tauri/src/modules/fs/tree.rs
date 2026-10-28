@@ -289,16 +289,17 @@ mod tests {
     #[test]
     fn listings_hide_staging_even_when_hidden_entries_are_shown() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".terax-copy-x")).unwrap();
-        std::fs::write(dir.path().join(".terax-copy-x/report.pdf"), b"x").unwrap();
+        std::fs::create_dir_all(dir.path().join(".terax-copy-x9Kq2_Lm")).unwrap();
+        std::fs::write(dir.path().join(".terax-copy-x9Kq2_Lm/report.pdf"), b"x").unwrap();
         std::fs::write(dir.path().join(".env"), b"x").unwrap();
+        std::fs::write(dir.path().join(".terax-copy-notes.md"), b"x").unwrap();
         std::fs::create_dir(dir.path().join(".hidden")).unwrap();
         let root = dir.path().to_string_lossy().into_owned();
 
         let entries = fs_read_dir_blocking(root.clone(), true, None, None).unwrap();
         let mut names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         names.sort_unstable();
-        assert_eq!(names, [".env", ".hidden"]);
+        assert_eq!(names, [".env", ".hidden", ".terax-copy-notes.md"]);
         assert_eq!(list_subdirs(root, true, None).unwrap(), [".hidden"]);
     }
 
@@ -307,7 +308,10 @@ mod tests {
         let repo = whitelist_repo_with_staging_rest();
         for show_hidden in [true, false] {
             let names = git_non_ignored_names(repo.path(), show_hidden);
-            assert!(!names.contains(".terax-copy-x"), "{show_hidden}: {names:?}");
+            assert!(
+                !names.contains(".terax-copy-x9Kq2_Lm"),
+                "{show_hidden}: {names:?}"
+            );
             assert!(names.contains("src"), "{show_hidden}: {names:?}");
         }
         assert!(git_non_ignored_names(repo.path(), true).contains(".hidden"));

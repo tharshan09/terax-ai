@@ -290,9 +290,9 @@ mod tests {
     #[test]
     fn untracked_staging_rests_are_hidden_but_indexed_paths_stay() {
         let stdout = format!(
-            "? .terax-copy-x/report.pdf\0? docs/.terax-copyright.md\0? a/.terax-copy-y/b.txt\0{}{}{}",
-            ordinary("A.", ".terax-copy-x/report.txt"),
-            "2 R. N... 100644 100644 100644 abc def R100 .terax-copy-z/new.rs\0old.rs\0",
+            "? .terax-copy-x9Kq2_Lm/report.pdf\0? docs/.terax-copyright.md\0? a/.terax-copy-y4Tn8_Pw/b.txt\0{}{}{}",
+            ordinary("A.", ".terax-copy-x9Kq2_Lm/report.txt"),
+            "2 R. N... 100644 100644 100644 abc def R100 .terax-copy-z1Rb6_Hc/new.rs\0old.rs\0",
             ordinary(".M", "after.rs"),
         );
         let parsed = parse_porcelain_v2(&stdout);
@@ -301,8 +301,8 @@ mod tests {
             paths,
             [
                 "docs/.terax-copyright.md",
-                ".terax-copy-x/report.txt",
-                ".terax-copy-z/new.rs",
+                ".terax-copy-x9Kq2_Lm/report.txt",
+                ".terax-copy-z1Rb6_Hc/new.rs",
                 "after.rs",
             ]
         );

@@ -1,13 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  type CopyResult,
   isPasteShortcut,
   pasteClipboardFiles,
   pasteExclusively,
   pasteKeyAction,
-  pasteTargetDir,
   reportCopyFailures,
 } from "@/modules/explorer/lib/clipboardPaste";
-import { dirname } from "@/modules/explorer/lib/useFileTree";
 import type { WorkspaceEnv } from "@/modules/workspace";
 
 const { invoke, toast } = vi.hoisted(() => ({
@@ -18,53 +17,6 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("sonner", () => ({ toast }));
 
 beforeEach(() => vi.resetAllMocks());
-
-describe("pasteTargetDir", () => {
-  const dirs = new Set(["/ws/docs", "/ws/b"]);
-  const isDir = (p: string) => dirs.has(p);
-
-  it("pastes into a selected folder, beside a selected file, else at the root", () => {
-    expect(pasteTargetDir("/ws/docs", isDir, "/ws")).toBe("/ws/docs");
-    expect(pasteTargetDir("/ws/docs/x.md", isDir, "/ws")).toBe("/ws/docs");
-    expect(pasteTargetDir(null, isDir, "/ws")).toBe("/ws");
-  });
-
-  it("uses the right-clicked row, not the selection, for the row menu", () => {
-    const selected = "/ws/a.md";
-    expect(pasteTargetDir(selected, isDir, "/ws")).toBe("/ws");
-    expect(pasteTargetDir("/ws/b", () => true, "/ws")).toBe("/ws/b");
-  });
-
-  it("gives drop and move the same folder for a row, the root without one", () => {
-    expect(pasteTargetDir("/ws/docs/x.md", isDir, null)).toBe("/ws/docs");
-    expect(pasteTargetDir(undefined, isDir, "/ws")).toBe("/ws");
-    expect(pasteTargetDir("", isDir, null)).toBeNull();
-  });
-
-  it.each([
-    ["/a.txt", "/"],
-    ["/ws/a\\b.txt", "/ws"],
-    ["C:/repo/a.txt", "C:/repo"],
-  ])("uses the tree parent rule beside a file %s", (path, parent) => {
-    expect(pasteTargetDir(path, () => false, "/ws")).toBe(parent);
-  });
-});
-
-describe("dirname", () => {
-  it.each([
-    ["/ws/docs/a.txt", "/ws/docs"],
-    ["/ws/a.txt", "/ws"],
-    ["~/a.txt", "~"],
-    ["/a.txt", "/"],
-    ["/", "/"],
-    ["a.txt", "/"],
-    ["/ws/a\\b.txt", "/ws"],
-    ["C:/repo/a.txt", "C:/repo"],
-    ["C:/a.txt", "C:"],
-  ])("%s -> %s", (path, parent) => {
-    expect(dirname(path)).toBe(parent);
-  });
-});
 
 describe("pasteExclusively", () => {
   it("says a paste is running instead of starting a second one", async () => {
@@ -90,6 +42,26 @@ describe("pasteExclusively", () => {
     const paste = vi.fn(async () => {});
     await pasteExclusively(busy, paste);
     expect(paste).toHaveBeenCalledTimes(1);
+    expect(toast.message).not.toHaveBeenCalled();
+  });
+
+  it("lets the next paste start once released, and never frees that paste's lock", async () => {
+    const busy = { current: false };
+    const tail = deferred<void>();
+    const first = pasteExclusively(busy, async (release) => {
+      release();
+      await tail.promise;
+    });
+    expect(busy.current).toBe(false);
+    const second = deferred<void>();
+    const running = pasteExclusively(busy, () => second.promise);
+    expect(busy.current).toBe(true);
+    tail.resolve();
+    await first;
+    expect(busy.current).toBe(true);
+    second.resolve();
+    await running;
+    expect(busy.current).toBe(false);
     expect(toast.message).not.toHaveBeenCalled();
   });
 });
@@ -180,6 +152,27 @@ describe("reportCopyFailures", () => {
       description: "/x/b: Permission denied",
     });
   });
+
+  it("counts clipboard items that no longer resolve as failed copies", () => {
+    reportCopyFailures({ created: ["/ws/a"], failed: [] }, 1);
+    expect(toast.error).toHaveBeenLastCalledWith("Could not copy 1 item", {
+      description: "A copied item no longer exists",
+    });
+
+    reportCopyFailures(
+      {
+        created: [],
+        failed: [{ source: "/x/b", message: "Permission denied" }],
+      },
+      2,
+    );
+    expect(toast.error).toHaveBeenLastCalledWith("Could not copy 3 items", {
+      description: "/x/b: Permission denied",
+    });
+
+    reportCopyFailures({ created: [], failed: [] }, 0);
+    expect(toast.error).toHaveBeenCalledTimes(2);
+  });
 });
 
 function deferred<T>() {
@@ -188,6 +181,10 @@ function deferred<T>() {
     resolve = done;
   });
   return { promise, resolve };
+}
+
+function clip(paths: string[], unresolved = 0) {
+  return { paths, unresolved };
 }
 
 function options(
@@ -202,13 +199,14 @@ function options(
     expand: vi.fn((_path: string) => Promise.resolve()),
     hasRow: vi.fn((_path: string) => true),
     select: vi.fn((_path: string) => {}),
+    onCopySettled: vi.fn(() => {}),
   };
 }
 
 describe("pasteClipboardFiles", () => {
   it("copies with Finder naming in the captured workspace", async () => {
     invoke
-      .mockResolvedValueOnce(["/tmp/a.txt", "/tmp/b.txt"])
+      .mockResolvedValueOnce(clip(["/tmp/a.txt", "/tmp/b.txt"]))
       .mockResolvedValueOnce({
         created: ["/ws/docs/a.txt", "/ws/docs/b.txt"],
         failed: [],
@@ -232,14 +230,16 @@ describe("pasteClipboardFiles", () => {
 
   it("re-reads an open folder and leaves a collapsed one alone when nothing landed", async () => {
     const copied = { created: ["/ws/docs/a.txt"], failed: [] };
-    invoke.mockResolvedValueOnce(["/tmp/a.txt"]).mockResolvedValueOnce(copied);
+    invoke
+      .mockResolvedValueOnce(clip(["/tmp/a.txt"]))
+      .mockResolvedValueOnce(copied);
     const open = options();
     open.isExpanded.mockReturnValue(true);
     await pasteClipboardFiles("/ws/docs", open);
     expect(open.refresh).toHaveBeenCalledWith("/ws/docs");
     expect(open.expand).not.toHaveBeenCalled();
 
-    invoke.mockResolvedValueOnce(["/tmp/a.txt"]).mockResolvedValueOnce({
+    invoke.mockResolvedValueOnce(clip(["/tmp/a.txt"])).mockResolvedValueOnce({
       created: [],
       failed: [{ source: "/tmp/a.txt", message: "Permission denied" }],
     });
@@ -254,7 +254,7 @@ describe("pasteClipboardFiles", () => {
       { kind: "local" },
       { kind: "ssh", host: "litha-claude" },
     ] as WorkspaceEnv[]) {
-      invoke.mockResolvedValueOnce(["/tmp/a.txt"]).mockResolvedValueOnce({
+      invoke.mockResolvedValueOnce(clip(["/tmp/a.txt"])).mockResolvedValueOnce({
         created: ["/ws/docs/a.txt", "/ws/docs/b.txt"],
         failed: [],
       });
@@ -270,7 +270,7 @@ describe("pasteClipboardFiles", () => {
   it("selects only after the re-read has landed", async () => {
     const reread = deferred<void>();
     invoke
-      .mockResolvedValueOnce(["/tmp/a.txt"])
+      .mockResolvedValueOnce(clip(["/tmp/a.txt"]))
       .mockResolvedValueOnce({ created: ["/ws/a.txt"], failed: [] });
     const opts = options();
     opts.refresh.mockReturnValueOnce(reread.promise);
@@ -285,7 +285,7 @@ describe("pasteClipboardFiles", () => {
 
   it("selects nothing when the new row is not in the tree", async () => {
     invoke
-      .mockResolvedValueOnce(["/tmp/.env"])
+      .mockResolvedValueOnce(clip(["/tmp/.env"]))
       .mockResolvedValueOnce({ created: ["/ws/.env"], failed: [] });
     const opts = options();
     opts.hasRow.mockReturnValue(false);
@@ -296,7 +296,7 @@ describe("pasteClipboardFiles", () => {
   it("selects nothing after a root change during the re-read", async () => {
     const reread = deferred<void>();
     invoke
-      .mockResolvedValueOnce(["/tmp/a.txt"])
+      .mockResolvedValueOnce(clip(["/tmp/a.txt"]))
       .mockResolvedValueOnce({ created: ["/ws/a.txt"], failed: [] });
     const opts = options();
     opts.refresh.mockReturnValueOnce(reread.promise);
@@ -309,7 +309,7 @@ describe("pasteClipboardFiles", () => {
   });
 
   it("stops with a hint when the clipboard holds no files", async () => {
-    invoke.mockResolvedValueOnce([]);
+    invoke.mockResolvedValueOnce(clip([]));
     const opts = options();
     expect(await pasteClipboardFiles("/ws", opts)).toEqual([]);
     expect(toast.message).toHaveBeenCalledWith("No files on the clipboard");
@@ -317,9 +317,37 @@ describe("pasteClipboardFiles", () => {
     expect(opts.refresh).not.toHaveBeenCalled();
   });
 
+  it("fails clearly when no file on the clipboard resolves", async () => {
+    invoke.mockResolvedValueOnce(clip([], 2));
+    const opts = options();
+    expect(await pasteClipboardFiles("/ws", opts)).toEqual([]);
+    expect(toast.error).toHaveBeenCalledWith("Could not copy 2 items", {
+      description: "2 copied items no longer exist",
+    });
+    expect(toast.message).not.toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(opts.refresh).not.toHaveBeenCalled();
+  });
+
+  it("copies what resolves and counts the rest as failed", async () => {
+    invoke
+      .mockResolvedValueOnce(clip(["/x/a"], 1))
+      .mockResolvedValueOnce({ created: ["/ws/a"], failed: [] });
+    const opts = options();
+    expect(await pasteClipboardFiles("/ws", opts)).toEqual(["/ws/a"]);
+    expect(invoke).toHaveBeenLastCalledWith(
+      "fs_copy",
+      expect.objectContaining({ sources: ["/x/a"] }),
+    );
+    expect(toast.error).toHaveBeenCalledWith("Could not copy 1 item", {
+      description: "A copied item no longer exists",
+    });
+    expect(opts.select).toHaveBeenCalledWith("/ws/a");
+  });
+
   it("reports partial failures with the first reason and keeps the rest", async () => {
     invoke
-      .mockResolvedValueOnce(["/x/gone.txt", "/x/b", "/x/ok"])
+      .mockResolvedValueOnce(clip(["/x/gone.txt", "/x/b", "/x/ok"]))
       .mockResolvedValueOnce({
         created: ["/ws/ok"],
         failed: [
@@ -336,7 +364,7 @@ describe("pasteClipboardFiles", () => {
   });
 
   it("uses the singular for one failed item and selects nothing when all fail", async () => {
-    invoke.mockResolvedValueOnce(["/x/gone.txt"]).mockResolvedValueOnce({
+    invoke.mockResolvedValueOnce(clip(["/x/gone.txt"])).mockResolvedValueOnce({
       created: [],
       failed: [{ source: "/x/gone.txt", message: "No such file or directory" }],
     });
@@ -350,7 +378,7 @@ describe("pasteClipboardFiles", () => {
 
   it("re-reads the folder after a whole-call copy failure", async () => {
     invoke
-      .mockResolvedValueOnce(["/x/a"])
+      .mockResolvedValueOnce(clip(["/x/a"]))
       .mockRejectedValueOnce("copy at most 1024 items at a time");
     const opts = options();
     expect(await pasteClipboardFiles("/ws", opts)).toEqual([]);
@@ -373,12 +401,12 @@ describe("pasteClipboardFiles", () => {
   });
 
   it("cancels before copying when the root changed during the clipboard read", async () => {
-    const clipboard = deferred<string[]>();
+    const clipboard = deferred<ReturnType<typeof clip>>();
     invoke.mockReturnValueOnce(clipboard.promise);
     const opts = options();
     const paste = pasteClipboardFiles("/ws-a", opts);
     opts.isCurrent.mockReturnValue(false);
-    clipboard.resolve(["/x/a"]);
+    clipboard.resolve(clip(["/x/a"]));
     expect(await paste).toEqual([]);
     expect(invoke).toHaveBeenCalledTimes(1);
   });
@@ -386,7 +414,7 @@ describe("pasteClipboardFiles", () => {
   it("returns nothing after a root change during the copy, but still reports failures", async () => {
     const copy = deferred<unknown>();
     invoke
-      .mockResolvedValueOnce(["/x/a", "/x/b"])
+      .mockResolvedValueOnce(clip(["/x/a", "/x/b"]))
       .mockReturnValueOnce(copy.promise);
     const opts = options();
     const paste = pasteClipboardFiles("/ws-a", opts);
@@ -402,5 +430,64 @@ describe("pasteClipboardFiles", () => {
     });
     expect(opts.refresh).not.toHaveBeenCalled();
     expect(opts.expand).not.toHaveBeenCalled();
+  });
+
+  it("settles the copy once fs_copy returns, before the re-read and on failure", async () => {
+    const copy = deferred<CopyResult>();
+    invoke
+      .mockResolvedValueOnce(clip(["/x/a"]))
+      .mockReturnValueOnce(copy.promise);
+    const opts = options();
+    opts.isExpanded.mockReturnValue(true);
+    let settledBeforeReread: boolean | undefined;
+    opts.refresh.mockImplementation(async () => {
+      settledBeforeReread = opts.onCopySettled.mock.calls.length === 1;
+    });
+    const paste = pasteClipboardFiles("/ws/docs", opts);
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+    expect(opts.onCopySettled).not.toHaveBeenCalled();
+    copy.resolve({ created: ["/ws/docs/a"], failed: [] });
+    await paste;
+    expect(settledBeforeReread).toBe(true);
+    expect(opts.onCopySettled).toHaveBeenCalledTimes(1);
+
+    invoke
+      .mockResolvedValueOnce(clip(["/x/a"]))
+      .mockRejectedValueOnce("copy at most 1024 items at a time");
+    const failing = options();
+    failing.isExpanded.mockReturnValue(true);
+    await pasteClipboardFiles("/ws/docs", failing);
+    expect(failing.onCopySettled).toHaveBeenCalledTimes(1);
+    expect(failing.refresh).toHaveBeenCalledWith("/ws/docs");
+
+    invoke.mockResolvedValueOnce(clip([]));
+    const empty = options();
+    await pasteClipboardFiles("/ws", empty);
+    expect(empty.onCopySettled).not.toHaveBeenCalled();
+  });
+
+  it("lets a second paste start while the first one still re-reads", async () => {
+    const busy = { current: false };
+    const reread = deferred<void>();
+    invoke
+      .mockResolvedValueOnce(clip(["/x/a"]))
+      .mockResolvedValueOnce({ created: ["/ws/a"], failed: [] });
+    const opts = options();
+    opts.refresh.mockReturnValueOnce(reread.promise);
+    const first = pasteExclusively(busy, (release) =>
+      pasteClipboardFiles("/ws", { ...opts, onCopySettled: release }).then(
+        () => {},
+      ),
+    );
+    await vi.waitFor(() => expect(opts.refresh).toHaveBeenCalled());
+    expect(busy.current).toBe(false);
+
+    const second = vi.fn(async () => {});
+    await pasteExclusively(busy, second);
+    expect(second).toHaveBeenCalledTimes(1);
+    expect(toast.message).not.toHaveBeenCalled();
+    reread.resolve();
+    await first;
+    expect(opts.select).toHaveBeenCalledWith("/ws/a");
   });
 });

@@ -445,7 +445,7 @@ mod tests {
     #[test]
     fn search_and_listing_hide_staging_even_when_hidden_entries_are_shown() {
         let dir = tempfile::tempdir().unwrap();
-        write_all(dir.path(), &[".terax-copy-x/report.pdf", ".env"]);
+        write_all(dir.path(), &[".terax-copy-x9Kq2_Lm/report.pdf", ".env"]);
         assert!(search_rels(dir.path(), "report", true).is_empty());
         assert_eq!(search_rels(dir.path(), "env", true), [".env"]);
         assert_eq!(listed(dir.path(), true), [".env"]);
@@ -471,7 +471,10 @@ mod tests {
     #[test]
     fn pruning_and_staging_filter_hold_together() {
         let dir = tempfile::tempdir().unwrap();
-        write_all(dir.path(), &["node_modules/x", ".terax-copy-x/x", "keep.txt"]);
+        write_all(
+            dir.path(),
+            &["node_modules/x", ".terax-copy-x9Kq2_Lm/x", "keep.txt"],
+        );
         assert_eq!(search_rels(dir.path(), "x", true), ["keep.txt"]);
         assert_eq!(listed(dir.path(), true), ["keep.txt"]);
     }

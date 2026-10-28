@@ -199,6 +199,47 @@ describe("isTerminalCopyChord", () => {
       }),
     ).toBe(false);
   });
+
+  it("goes by the letter on Latin layouts, so Dvorak J on the C key is no copy", () => {
+    expect(
+      isTerminalCopyChord(evt({ ctrlKey: true, key: "j", code: "KeyC" }), {
+        isMac: false,
+      }),
+    ).toBe(false);
+    expect(
+      isTerminalCopyChord(evt({ metaKey: true, key: "j", code: "KeyC" }), {
+        isMac: true,
+      }),
+    ).toBe(false);
+    expect(
+      isTerminalCopyChord(evt({ metaKey: true, key: "c", code: "KeyI" }), {
+        isMac: true,
+      }),
+    ).toBe(true);
+    expect(
+      isTerminalCopyChord(evt({ ctrlKey: true, key: "C", code: "KeyI" }), {
+        isMac: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("matches the physical C key on non-Latin layouts", () => {
+    expect(
+      isTerminalCopyChord(evt({ ctrlKey: true, key: "с", code: "KeyC" }), {
+        isMac: false,
+      }),
+    ).toBe(true);
+    expect(
+      isTerminalCopyChord(evt({ metaKey: true, key: "с", code: "KeyC" }), {
+        isMac: true,
+      }),
+    ).toBe(true);
+    expect(
+      isTerminalCopyChord(evt({ metaKey: true, key: "с", code: "KeyS" }), {
+        isMac: true,
+      }),
+    ).toBe(false);
+  });
 });
 
 describe("isTerminalPasteChord", () => {

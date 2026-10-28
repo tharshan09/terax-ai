@@ -366,7 +366,7 @@ mod tests {
         use notify::event::{CreateKind, ModifyKind, RemoveKind, RenameMode};
         let watched = watching("/ws");
         let mut set = HashSet::new();
-        let staging = "/ws/.terax-copy-ab12";
+        let staging = "/ws/.terax-copy-ab12Cd34";
         collect(
             &mut set,
             event(EventKind::Create(CreateKind::Folder), &[staging]),
@@ -376,7 +376,7 @@ mod tests {
             &mut set,
             event(
                 EventKind::Create(CreateKind::File),
-                &["/ws/.terax-copy-ab12/item"],
+                &["/ws/.terax-copy-ab12Cd34/item"],
             ),
             &watched,
         );
@@ -391,7 +391,7 @@ mod tests {
             &mut set,
             event(
                 EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
-                &["/ws/.terax-copy-ab12/item", "/ws/a copy.txt"],
+                &["/ws/.terax-copy-ab12Cd34/item", "/ws/a copy.txt"],
             ),
             &watched,
         );
@@ -401,13 +401,13 @@ mod tests {
     #[test]
     fn a_watched_folder_below_a_staging_name_still_reports_its_changes() {
         use notify::event::CreateKind;
-        let root = "/x/.terax-copy-old/proj";
+        let root = "/x/.terax-copy-old7_Mn2/proj";
         let watched = watching(root);
         let mut set = HashSet::new();
         for path in [
-            "/x/.terax-copy-old/proj/a.txt",
-            "/x/.terax-copy-old/proj/.terax-copy-ab12",
-            "/x/.terax-copy-old/proj/.terax-copy-ab12/item",
+            "/x/.terax-copy-old7_Mn2/proj/a.txt",
+            "/x/.terax-copy-old7_Mn2/proj/.terax-copy-ab12Cd34",
+            "/x/.terax-copy-old7_Mn2/proj/.terax-copy-ab12Cd34/item",
         ] {
             collect(
                 &mut set,
@@ -422,7 +422,10 @@ mod tests {
         );
         assert_eq!(
             set,
-            HashSet::from([to_canon("/x/.terax-copy-old/proj/a.txt"), to_canon(root)])
+            HashSet::from([
+                to_canon("/x/.terax-copy-old7_Mn2/proj/a.txt"),
+                to_canon(root)
+            ])
         );
     }
 
@@ -431,7 +434,7 @@ mod tests {
         use notify::event::CreateKind;
         let unwatched = |_: &Path| -> Option<PathBuf> { None };
         let mut set = HashSet::new();
-        let path = "/gone/.terax-copy-ab12/item";
+        let path = "/gone/.terax-copy-ab12Cd34/item";
         collect(
             &mut set,
             event(EventKind::Create(CreateKind::Any), &[path]),
@@ -450,7 +453,11 @@ mod tests {
             inner(path)
         };
         let mut set = HashSet::new();
-        for path in ["/ws/a.txt", "/ws/src/.terax-copyx", "/ws/.terax-copy-ab12/item"] {
+        for path in [
+            "/ws/a.txt",
+            "/ws/src/.terax-copyx",
+            "/ws/.terax-copy-ab12Cd34/item",
+        ] {
             collect(
                 &mut set,
                 event(EventKind::Create(CreateKind::Any), &[path]),
