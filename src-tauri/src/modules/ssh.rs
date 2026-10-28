@@ -901,6 +901,15 @@ fn exit_error(code: Option<i32>, stderr: &str) -> RemoteError {
     }
 }
 
+/// The helper as one shell-safe argument; it never changes, so it is encoded once.
+fn remote_command() -> &'static str {
+    static COMMAND: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    COMMAND.get_or_init(|| {
+        let b64 = b64encode(REMOTE_PYTHON.as_bytes());
+        format!("python3 -c \"$(printf %s {b64} | base64 -d)\"")
+    })
+}
+
 /// Run one remote FS op and return its `data` value (or the remote error).
 ///
 /// `timeout` bounds the whole ssh exec: `Some(_)` (the read commands pass
@@ -919,8 +928,6 @@ fn run_remote_json(
     validate_ssh_host(host).map_err(Transport)?;
     note_connected_host(host);
     let request_json = serde_json::to_string(request).map_err(|e| Transport(e.to_string()))?;
-    let b64 = b64encode(REMOTE_PYTHON.as_bytes());
-    let remote_cmd = format!("python3 -c \"$(printf %s {b64} | base64 -d)\"");
 
     let mut cmd = Command::new("ssh");
     cmd.arg("-T")
@@ -932,7 +939,7 @@ fn run_remote_json(
         cmd.arg(arg);
     }
     cmd.arg(host)
-        .arg(remote_cmd)
+        .arg(remote_command())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

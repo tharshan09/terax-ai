@@ -1,7 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt::Display;
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 
 use serde::Serialize;
 use tauri::Manager;
@@ -178,21 +178,51 @@ pub(crate) fn check_source<'a>(
     })
 }
 
-/// A link on the way renames a folder of `src`. Spelling (case, Unicode form)
-/// and a top-level alias such as /tmp -> /private/tmp keep every name.
+/// The macOS system links into /private: the only prefix a named path may lack.
+const SYSTEM_ALIASES: [(&str, &str); 3] = [
+    ("/tmp", "/private/tmp"),
+    ("/var", "/private/var"),
+    ("/etc", "/private/etc"),
+];
+
+/// A link on the way renames or moves a folder of `src`. Only spelling (case,
+/// Unicode form) and the `SYSTEM_ALIASES` keep it plain.
 fn behind_link(src: &Path, canonical: &Path) -> bool {
-    let mut real = canonical.components().rev();
+    let unaliased = SYSTEM_ALIASES.iter().find_map(|&(named, real)| {
+        let rest = canonical.strip_prefix(real).ok();
+        rest.map(|rest| Path::new(named).join(rest))
+    });
+    differs(src, canonical) && unaliased.is_none_or(|unaliased| differs(src, &unaliased))
+}
+
+fn differs(src: &Path, canonical: &Path) -> bool {
+    let mut real = canonical.components();
     for raw in src.ancestors() {
         match raw.components().next_back() {
-            Some(Component::Normal(name)) => match real.next() {
+            Some(Component::Normal(name)) => match real.next_back() {
                 Some(Component::Normal(real_name)) if same_name(raw, name, real_name) => {}
                 _ => return true,
             },
             Some(Component::ParentDir | Component::CurDir) => return true,
-            _ => return false,
+            _ => return !same_root(raw, real.as_path()),
         }
     }
     false
+}
+
+// Canonical Windows paths spell the drive `\\?\C:`, which moves nothing.
+fn same_root(named: &Path, real: &Path) -> bool {
+    let disk = |path: &Path| match path.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(d) | Prefix::VerbatimDisk(d) => Some(d.to_ascii_uppercase()),
+            _ => None,
+        },
+        _ => None,
+    };
+    let bare = real
+        .components()
+        .all(|c| matches!(c, Component::Prefix(_) | Component::RootDir));
+    named == real || (bare && disk(named).is_some() && disk(named) == disk(real))
 }
 
 // No protected name is non-ASCII, so a real entry under another Unicode form passes.
@@ -1338,6 +1368,33 @@ mod tests {
         }
         assert!(linked(tmp.path().join("alias")));
         assert!(linked(tmp.path().join("alias/sub")));
+    }
+
+    #[test]
+    fn only_the_system_aliases_may_prefix_a_named_path() {
+        let linked = |src: &str, real: &str| behind_link(Path::new(src), Path::new(real));
+        assert!(linked("/data/proj", "/secret/data/proj"));
+        assert!(linked("/tmp/x", "/secret/tmp/x"));
+        assert!(linked("/opt/x", "/private/opt/x"));
+        assert!(linked("/home/tmp/x", "/private/tmp/x"));
+        assert!(linked("/data/proj", "/proj"));
+
+        assert!(!linked("/data/proj", "/data/proj"));
+        assert!(!linked("/tmp/x", "/private/tmp/x"));
+        assert!(!linked("/TMP/x", "/private/tmp/x"));
+        assert!(!linked("/var/folders/x", "/private/var/folders/x"));
+        assert!(!linked("/etc/hosts", "/private/etc/hosts"));
+        assert!(!linked("/private/tmp/x", "/private/tmp/x"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_verbatim_drive_is_the_named_one_but_another_drive_is_a_link() {
+        let linked = |src: &str, real: &str| behind_link(Path::new(src), Path::new(real));
+        assert!(!linked(r"C:\data\x", r"\\?\C:\data\x"));
+        assert!(!linked(r"c:\data\x", r"\\?\C:\data\x"));
+        assert!(linked(r"C:\data\x", r"\\?\D:\data\x"));
+        assert!(linked(r"C:\data\x", r"\\?\C:\secret\data\x"));
     }
 
     #[test]

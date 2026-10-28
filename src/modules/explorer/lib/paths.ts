@@ -11,7 +11,7 @@ export function dirname(path: string): string {
   return path.slice(0, i);
 }
 
-// Name of a tree key, by the same `/` rule as dirname.
+// Not `@/lib/utils` basename: that one also splits at `\`, which a key's name may hold.
 export function basename(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
 }

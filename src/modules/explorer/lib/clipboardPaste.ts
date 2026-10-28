@@ -79,12 +79,6 @@ function missingItems(unresolved: number): string {
     : `${unresolved} copied items no longer exist`;
 }
 
-function unresolvedHint(unresolved: number): string {
-  return unresolved === 1
-    ? "A copied item no longer exists"
-    : missingItems(unresolved);
-}
-
 // A lost connection explains every failure after it, so it beats the first one.
 export function reportCopyFailures(result: CopyResult, unresolved = 0): void {
   const count = result.failed.length + unresolved;
@@ -93,9 +87,7 @@ export function reportCopyFailures(result: CopyResult, unresolved = 0): void {
   toast.error(`Could not copy ${count} ${count === 1 ? "item" : "items"}`, {
     description:
       result.aborted ??
-      (first
-        ? `${first.source}: ${first.message}`
-        : unresolvedHint(unresolved)),
+      (first ? `${first.source}: ${first.message}` : missingItems(unresolved)),
   });
 }
 

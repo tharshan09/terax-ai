@@ -52,8 +52,6 @@ export type PendingCreate = {
   kind: "file" | "dir";
 };
 
-export { joinPath };
-
 const EXPANSION_CACHE_LIMIT = 8;
 const expansionCache = new Map<string, string[]>();
 

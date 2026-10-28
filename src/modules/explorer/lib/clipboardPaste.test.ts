@@ -158,7 +158,7 @@ describe("reportCopyFailures", () => {
   it("counts clipboard items that no longer resolve as failed copies", () => {
     reportCopyFailures({ created: ["/ws/a"], failed: [] }, 1);
     expect(toast.error).toHaveBeenLastCalledWith("Could not copy 1 item", {
-      description: "A copied item no longer exists",
+      description: "1 copied item no longer exists",
     });
 
     reportCopyFailures(
@@ -358,7 +358,7 @@ describe("pasteClipboardFiles", () => {
       expect.objectContaining({ sources: ["/x/a"] }),
     );
     expect(toast.error).toHaveBeenCalledWith("Could not copy 1 item", {
-      description: "A copied item no longer exists",
+      description: "1 copied item no longer exists",
     });
     expect(opts.select).toHaveBeenCalledWith("/ws/a");
   });
