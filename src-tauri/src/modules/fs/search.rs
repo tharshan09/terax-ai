@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use tauri::Manager;
 
+use super::copy::is_staging_name;
 use super::to_canon;
 use crate::modules::fs::guard;
 use crate::modules::workspace::{resolve_path, WorkspaceEnv, WorkspaceRegistry};
@@ -51,6 +52,18 @@ const PRUNE_DIRS: &[&str] = &[
     ".venv",
     "__pycache__",
 ];
+
+// Prunes known-heavy dirs even when no .gitignore is present (e.g. searching
+// from $HOME), and staging dirs regardless of hidden or whitelist rules.
+fn keep_entry(dent: &ignore::DirEntry) -> bool {
+    if dent.depth() == 0 {
+        return true;
+    }
+    match dent.file_name().to_str() {
+        Some(name) => !PRUNE_DIRS.contains(&name) && !is_staging_name(name),
+        None => true,
+    }
+}
 
 #[tauri::command]
 pub async fn fs_search(
@@ -108,17 +121,7 @@ pub fn fs_search_impl(
         .ignore(true)
         .parents(true)
         .follow_links(false)
-        .filter_entry(|dent| {
-            // Prune known-heavy dirs even when no .gitignore is present (e.g.
-            // searching from $HOME).
-            if dent.depth() == 0 {
-                return true;
-            }
-            match dent.file_name().to_str() {
-                Some(name) => !PRUNE_DIRS.contains(&name),
-                None => true,
-            }
-        })
+        .filter_entry(keep_entry)
         .build_parallel();
 
     // Score each entry against the query *during* the parallel walk and keep
@@ -304,15 +307,7 @@ pub fn fs_list_files_impl(
         .parents(true)
         .follow_links(false)
         .max_depth(Some(depth))
-        .filter_entry(|dent| {
-            if dent.depth() == 0 {
-                return true;
-            }
-            match dent.file_name().to_str() {
-                Some(name) => !PRUNE_DIRS.contains(&name),
-                None => true,
-            }
-        })
+        .filter_entry(keep_entry)
         .build();
 
     let mut files: Vec<String> = Vec::with_capacity(cap.min(256));
@@ -406,6 +401,91 @@ mod tests {
         let reg = WorkspaceRegistry::default();
         reg.authorize(dir).expect("authorize tempdir root");
         reg
+    }
+
+    fn search_rels(root: &std::path::Path, query: &str, show_hidden: bool) -> Vec<String> {
+        let mut rels: Vec<String> = fs_search_impl(
+            root.to_string_lossy().into_owned(),
+            query.into(),
+            None,
+            None,
+            Some(show_hidden),
+            &reg_for(root),
+        )
+        .unwrap()
+        .hits
+        .into_iter()
+        .map(|h| h.rel)
+        .collect();
+        rels.sort();
+        rels
+    }
+
+    fn listed(root: &std::path::Path, show_hidden: bool) -> Vec<String> {
+        fs_list_files_impl(
+            root.to_string_lossy().into_owned(),
+            None,
+            None,
+            None,
+            Some(show_hidden),
+            &reg_for(root),
+        )
+        .unwrap()
+        .files
+    }
+
+    fn write_all(root: &std::path::Path, rels: &[&str]) {
+        for rel in rels {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"x").unwrap();
+        }
+    }
+
+    #[test]
+    fn search_and_listing_hide_staging_even_when_hidden_entries_are_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        write_all(dir.path(), &[".terax-copy-x9Kq2_Lm/report.pdf", ".env"]);
+        assert!(search_rels(dir.path(), "report", true).is_empty());
+        assert_eq!(search_rels(dir.path(), "env", true), [".env"]);
+        assert_eq!(listed(dir.path(), true), [".env"]);
+    }
+
+    #[test]
+    fn a_root_named_like_staging_is_still_searched_but_staging_below_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".terax-copy-old7_Mn2");
+        write_all(&root, &["report.txt", ".terax-copy-ab12Cd34/report.pdf"]);
+        assert_eq!(search_rels(&root, "report", true), ["report.txt"]);
+        assert_eq!(listed(&root, true), ["report.txt"]);
+    }
+
+    #[test]
+    fn whitelist_rules_cannot_reveal_staging() {
+        let repo = crate::modules::fs::copy::whitelist_repo_with_staging_rest();
+        for show_hidden in [true, false] {
+            assert!(search_rels(repo.path(), "report", show_hidden).is_empty());
+            assert_eq!(
+                search_rels(repo.path(), "other", show_hidden),
+                ["src/other.txt"]
+            );
+            let files = listed(repo.path(), show_hidden);
+            assert!(files.contains(&"src/other.txt".to_string()), "{files:?}");
+            assert!(!files.iter().any(|f| f.contains(".terax-copy-")), "{files:?}");
+        }
+    }
+
+    // One filter_entry carries both rules: a second call would replace the
+    // first and drop the PRUNE_DIRS pruning.
+    #[test]
+    fn pruning_and_staging_filter_hold_together() {
+        let dir = tempfile::tempdir().unwrap();
+        write_all(
+            dir.path(),
+            &["node_modules/x", ".terax-copy-x9Kq2_Lm/x", "keep.txt"],
+        );
+        assert_eq!(search_rels(dir.path(), "x", true), ["keep.txt"]);
+        assert_eq!(listed(dir.path(), true), ["keep.txt"]);
     }
 
     #[test]

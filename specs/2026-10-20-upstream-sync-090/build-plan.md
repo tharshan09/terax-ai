@@ -401,7 +401,13 @@ Bau-Reihenfolge (PM): slice-00 → slice-01 → slice-02 → slice-03 → slice-
 
 **Wie gebaut**
 
-_(leer bis zum Merge)_
+- Merge: PR #83, Squash-Commit `b10bcf9` auf `main`.
+- Review: Pipeline-Reviewer APPROVED ohne Befunde; `/code-review high` 16 Runden. Echte Fixes unter anderem: ISATAP, IANA-Ausnahmen in `2001::/23` und `192.0.0.0/24`, Metadaten Alibaba/Oracle/GCP-IPv6, typisierter Host mit `check_url_shape`, ein Error-Event je Fehlerpfad im Stream, Upstream-Client-Cache aus `net/clients.rs`, gehaltenes ⌘S wird geschluckt.
+- Abweichungen vom Plan:
+  - Netzwerk folgt Upstream `11343a1` (Tie-Break-Regel, Gate-Log Runde 12): `redirect_decision` als reqwest-Policy wie upstream, dazu `net/clients.rs`. Eigene Redirect-Schleife, Resolver und Proxy-Regeln aus Runden 1 bis 11 wieder entfernt.
+  - Verträge vor Nutzung entfernt (Gate-Log Runde 3): `isWindowHidden` kommt mit slice-02, `FileExplorer.visible`/`useFileTree.visible` mit slice-04, `FileIcon`/`FolderIcon` mit slice-05; Cargo-Features fürs Einfügen mit slice-01. Diese Slices dürfen dafür `App.tsx`, `FileExplorer.tsx`, `useFileTree.ts`, `TreeRow.tsx` und `Cargo.toml` anfassen.
+  - ⌘S in Upstream-Form (`4cfc202`), kein zusätzlicher Page-Save-Guard; `useDocument.ts` unverändert.
+- Dokumentierte, upstream-identische Restrisiken: siehe `evidence/slice-00-core-picks.json` und PR #83.
 
 ### slice-01-clipboard-paste: Einfügen aus dem Finder und Finder-Benennung
 

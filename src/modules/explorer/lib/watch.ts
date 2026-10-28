@@ -30,9 +30,3 @@ export function listenFsChanged(
     (e) => handler(e.payload.paths),
   );
 }
-
-export function parentDir(path: string): string {
-  const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  if (i <= 0) return path.slice(0, i + 1) || path;
-  return path.slice(0, i);
-}

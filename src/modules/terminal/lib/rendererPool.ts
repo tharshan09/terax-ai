@@ -11,6 +11,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { type FontWeight, Terminal } from "@xterm/xterm";
 import { shouldCursorBlink } from "./cursorBlink";
 import {
+  isChordLetter,
   isTerminalCopyChord,
   isTerminalPasteChord,
   terminalDeleteSequence,
@@ -1188,7 +1189,7 @@ function isTerminalCopy(e: KeyboardEvent): boolean {
     e.shiftKey &&
     !e.altKey &&
     !e.metaKey &&
-    (e.code === "KeyC" || e.key === "c" || e.key === "C")
+    isChordLetter(e, "c")
   );
 }
 
@@ -1199,7 +1200,7 @@ function isTerminalPaste(e: KeyboardEvent): boolean {
     e.shiftKey &&
     !e.altKey &&
     !e.metaKey &&
-    (e.code === "KeyV" || e.key === "v" || e.key === "V")
+    isChordLetter(e, "v")
   );
 }
 

@@ -1,4 +1,6 @@
 pub mod asset;
+pub mod clipboard;
+pub mod copy;
 pub mod file;
 pub mod grep;
 pub mod guard;

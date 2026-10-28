@@ -1,3 +1,4 @@
+use crate::modules::fs::copy::has_staging_segment;
 use crate::modules::git::types::GitChangedFile;
 
 #[derive(Default)]
@@ -58,8 +59,12 @@ pub fn parse_porcelain_v2(stdout: &str) -> PorcelainV2 {
             }
             continue;
         }
+        // Only untracked entries hide a staging rest: indexed paths stay visible
+        // so a panel commit never includes a path the panel did not show.
         if let Some(rest) = tok.strip_prefix("? ") {
-            out.files.push(make_file('?', '?', rest, None));
+            if !has_staging_segment(std::path::Path::new(rest)) {
+                out.files.push(make_file('?', '?', rest, None));
+            }
             continue;
         }
     }
@@ -280,6 +285,30 @@ mod tests {
         let parsed = parse_porcelain_v2("1 .M\0? ok.rs\0");
         assert_eq!(parsed.files.len(), 1);
         assert_eq!(parsed.files[0].path, "ok.rs");
+    }
+
+    #[test]
+    fn untracked_staging_rests_are_hidden_but_indexed_paths_stay() {
+        let stdout = format!(
+            "? .terax-copy-x9Kq2_Lm/report.pdf\0? docs/.terax-copyright.md\0? a/.terax-copy-y4Tn8_Pw/b.txt\0{}{}{}",
+            ordinary("A.", ".terax-copy-x9Kq2_Lm/report.txt"),
+            "2 R. N... 100644 100644 100644 abc def R100 .terax-copy-z1Rb6_Hc/new.rs\0old.rs\0",
+            ordinary(".M", "after.rs"),
+        );
+        let parsed = parse_porcelain_v2(&stdout);
+        let paths: Vec<&str> = parsed.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "docs/.terax-copyright.md",
+                ".terax-copy-x9Kq2_Lm/report.txt",
+                ".terax-copy-z1Rb6_Hc/new.rs",
+                "after.rs",
+            ]
+        );
+        assert!(parsed.files[1].staged);
+        assert_eq!(parsed.files[2].original_path.as_deref(), Some("old.rs"));
+        assert!(parsed.files[3].original_path.is_none());
     }
 
     #[test]

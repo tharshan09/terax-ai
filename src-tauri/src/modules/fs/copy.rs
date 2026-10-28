@@ -1,0 +1,2604 @@
+use std::ffi::{OsStr, OsString};
+use std::fmt::Display;
+use std::io;
+use std::path::{Component, Path, PathBuf, Prefix};
+
+use serde::Serialize;
+use tauri::Manager;
+
+use super::guard;
+use super::mutate::authorize_mutation_dir;
+use crate::modules::workspace::{resolve_path, WorkspaceEnv, WorkspaceRegistry};
+
+pub(crate) const STAGING_PREFIX: &str = ".terax-copy-";
+/// Python's mkdtemp on an SSH host always draws 8; tempfile here is told to.
+pub(crate) const STAGING_RANDOM_LEN: usize = 8;
+const MAX_COPY_SOURCES: usize = 1024;
+const MAX_COPY_SUFFIX: usize = 10_000;
+const MAX_COPY_DEPTH: usize = 128;
+pub(crate) const STAGED_ITEM: &str = "item";
+
+/// Exactly the names `staging_dir_in` and the helper's mkdtemp make: every
+/// listing of the app hides them, whatever `show_hidden` or ignore rules say.
+pub(crate) fn is_staging_name(name: &str) -> bool {
+    name.strip_prefix(STAGING_PREFIX).is_some_and(|tail| {
+        tail.len() == STAGING_RANDOM_LEN
+            && tail.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    })
+}
+
+/// tempfile draws from [A-Za-z0-9], all inside what `is_staging_name` accepts.
+pub(crate) fn staging_dir_in(dest: &Path) -> io::Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix(STAGING_PREFIX)
+        .rand_bytes(STAGING_RANDOM_LEN)
+        .tempdir_in(dest)
+}
+
+/// Walker `filter_entry`: `.hidden(true)` yields to whitelist rules in .gitignore,
+/// so staging needs this; the walk root is the user's own pick and never counts.
+pub(crate) fn not_staging(dent: &ignore::DirEntry) -> bool {
+    dent.depth() == 0 || !has_staging_segment(Path::new(dent.file_name()))
+}
+
+pub(crate) fn has_staging_segment(path: &Path) -> bool {
+    path.components()
+        .any(|c| c.as_os_str().to_str().is_some_and(is_staging_name))
+}
+
+// A copy's leftover staging inside a source folder is never carried along.
+pub(crate) fn is_staging_entry(entry: &std::fs::DirEntry) -> bool {
+    entry.file_name().to_str().is_some_and(is_staging_name)
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct CopyResult {
+    pub created: Vec<String>,
+    pub failed: Vec<CopyFailure>,
+    pub aborted: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopyFailure {
+    pub source: String,
+    pub message: String,
+    /// Cut off while publishing: the item may be in place after all.
+    pub maybe_placed: bool,
+}
+
+/// Failures stay per item so one bad source never sinks the batch. Sources skip
+/// the workspace jail (the user picked them in the OS), not the user file policy.
+#[tauri::command]
+pub async fn fs_copy(
+    app: tauri::AppHandle,
+    sources: Vec<String>,
+    dest_dir: String,
+    workspace: Option<WorkspaceEnv>,
+    rename_on_conflict: Option<bool>,
+) -> Result<CopyResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        copy_batch(
+            sources,
+            &dest_dir,
+            &WorkspaceEnv::from_option(workspace),
+            &app.state::<WorkspaceRegistry>(),
+            rename_on_conflict.unwrap_or(false),
+        )
+    })
+    .await
+    .map_err(|e| format!("fs_copy task failed: {e}"))?
+}
+
+fn copy_batch(
+    sources: Vec<String>,
+    dest_dir: &str,
+    workspace: &WorkspaceEnv,
+    registry: &WorkspaceRegistry,
+    rename_on_conflict: bool,
+) -> Result<CopyResult, String> {
+    if sources.len() > MAX_COPY_SOURCES {
+        return Err(format!("copy at most {MAX_COPY_SOURCES} items at a time"));
+    }
+    if let WorkspaceEnv::Ssh { host } = workspace {
+        return crate::modules::ssh::copy(host, &sources, dest_dir, rename_on_conflict, registry);
+    }
+    let named_dest = resolve_path(dest_dir, workspace);
+    let dest = copy_destination(&named_dest, registry)?;
+    let mut result = CopyResult::default();
+    for source in sources {
+        let item = copy_item(
+            Path::new(&source),
+            &dest,
+            &named_dest,
+            registry,
+            rename_on_conflict,
+        );
+        match item {
+            Ok(name) => result
+                .created
+                .push(created_path(dest_dir, &name.to_string_lossy())),
+            Err(error) => {
+                log::warn!("fs_copy({source} -> {}) failed: {error}", dest.display());
+                result.failed.push(CopyFailure {
+                    source,
+                    message: error.to_string(),
+                    maybe_placed: false,
+                });
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// A new item as the explorer keys it: the destination as passed, joined with `/`.
+pub(crate) fn created_path(dest_dir: &str, name: &str) -> String {
+    if dest_dir.ends_with('/') {
+        format!("{dest_dir}{name}")
+    } else {
+        format!("{dest_dir}/{name}")
+    }
+}
+
+fn copy_destination(dest: &Path, registry: &WorkspaceRegistry) -> Result<PathBuf, String> {
+    authorize_mutation_dir(registry, Some(dest), dest)?;
+    if !dest.is_dir() {
+        return Err("copy destination is not a directory".into());
+    }
+    std::fs::canonicalize(dest).map_err(|e| e.to_string())
+}
+
+pub(crate) struct Source<'a> {
+    pub(crate) name: &'a OsStr,
+    pub(crate) is_dir: bool,
+    /// The walk below runs through a symlink, so its entries are judged too.
+    pub(crate) linked: bool,
+    checked: Checked,
+    /// Where a plain source really is; a link is resolved only where it is read.
+    canonical: Option<PathBuf>,
+}
+
+/// The kind is unfollowed, so each branch decides what a symlink source means.
+/// A plain source is read, so it is judged here; a link only where it is read.
+pub(crate) fn check_source<'a>(
+    src: &'a Path,
+    registry: &WorkspaceRegistry,
+) -> io::Result<Source<'a>> {
+    if !src.is_absolute() {
+        return Err(invalid("copy source must be absolute"));
+    }
+    let name = src
+        .file_name()
+        .ok_or_else(|| invalid("copy source has no filename"))?;
+    let meta = std::fs::symlink_metadata(src)?;
+    let kind = meta.file_type();
+    if !is_copyable(kind) {
+        return Err(unsupported_kind());
+    }
+    let canonical = if kind.is_symlink() {
+        None
+    } else {
+        Some(guard_read(registry, src)?)
+    };
+    let linked = canonical
+        .as_deref()
+        .is_none_or(|canonical| behind_link(src, canonical));
+    Ok(Source {
+        name,
+        is_dir: kind.is_dir(),
+        linked,
+        checked: Checked::of(&meta),
+        canonical,
+    })
+}
+
+type FileId = (u64, u64);
+
+/// What a walk saw at a path before reading there; `id` lets the later open tell
+/// that something else took its place since.
+struct Checked {
+    kind: std::fs::FileType,
+    id: Option<FileId>,
+}
+
+impl Checked {
+    fn of(meta: &std::fs::Metadata) -> Self {
+        Checked {
+            kind: meta.file_type(),
+            id: meta_id(meta),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn meta_id(meta: &std::fs::Metadata) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    Some((meta.dev(), meta.ino()))
+}
+
+#[cfg(not(unix))]
+fn meta_id(_meta: &std::fs::Metadata) -> Option<FileId> {
+    None
+}
+
+/// The macOS system links into /private: the only prefix a named path may lack.
+const SYSTEM_ALIASES: [(&str, &str); 3] = [
+    ("/tmp", "/private/tmp"),
+    ("/var", "/private/var"),
+    ("/etc", "/private/etc"),
+];
+
+/// A link on the way renames or moves a folder of `src`. Only spelling (case,
+/// Unicode form) and the `SYSTEM_ALIASES` keep it plain.
+fn behind_link(src: &Path, canonical: &Path) -> bool {
+    let unaliased = SYSTEM_ALIASES.iter().find_map(|&(named, real)| {
+        let rest = canonical.strip_prefix(real).ok();
+        rest.map(|rest| Path::new(named).join(rest))
+    });
+    differs(src, canonical) && unaliased.is_none_or(|unaliased| differs(src, &unaliased))
+}
+
+fn differs(src: &Path, canonical: &Path) -> bool {
+    let mut real = canonical.components();
+    for raw in src.ancestors() {
+        match raw.components().next_back() {
+            Some(Component::Normal(name)) => match real.next_back() {
+                Some(Component::Normal(real_name)) if same_name(raw, name, real_name) => {}
+                _ => return true,
+            },
+            Some(Component::ParentDir | Component::CurDir) => return true,
+            _ => return !same_root(raw, real.as_path()),
+        }
+    }
+    false
+}
+
+// Canonical Windows paths spell the drive `\\?\C:`, which moves nothing.
+fn same_root(named: &Path, real: &Path) -> bool {
+    let disk = |path: &Path| match path.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(d) | Prefix::VerbatimDisk(d) => Some(d.to_ascii_uppercase()),
+            _ => None,
+        },
+        _ => None,
+    };
+    let bare = real
+        .components()
+        .all(|c| matches!(c, Component::Prefix(_) | Component::RootDir));
+    named == real || (bare && disk(named).is_some() && disk(named) == disk(real))
+}
+
+// No protected name is non-ASCII, so a real entry under another Unicode form passes.
+fn same_name(raw: &Path, name: &OsStr, real: &OsStr) -> bool {
+    match (name.to_str(), real.to_str()) {
+        (Some(a), Some(b)) if a.to_lowercase() == b.to_lowercase() => true,
+        (Some(a), Some(b)) if !a.is_ascii() && !b.is_ascii() => {
+            std::fs::symlink_metadata(raw).is_ok_and(|m| !m.file_type().is_symlink())
+        }
+        _ => name == real,
+    }
+}
+
+// SECURITY: a paste is an explicit user action, so copies follow the editor's
+// trusted open/save policy: named paths pass, symlink detours to secrets do not.
+pub(crate) fn guard_read(registry: &WorkspaceRegistry, path: &Path) -> io::Result<PathBuf> {
+    guard::enforce_read(registry, path, &path.to_string_lossy(), true).map_err(refused)
+}
+
+// Links in a picked folder may lead outside the workspace, as local copies keep
+// them, but never to a secret; only a root the user named may be one by name.
+pub(crate) fn guard_link(path: &Path, named: bool) -> io::Result<()> {
+    if named && guard::check_read_str(&path.to_string_lossy()).is_err() {
+        return Ok(());
+    }
+    match std::fs::canonicalize(path) {
+        Ok(target) => guard::check_read_str(&target.to_string_lossy()).map_err(refused),
+        Err(_) => Ok(()),
+    }
+}
+
+/// A symlink entry is judged where a walk reads through it, not here.
+pub(crate) fn guard_entry(
+    registry: &WorkspaceRegistry,
+    entry: &std::fs::DirEntry,
+    linked: bool,
+) -> io::Result<()> {
+    if linked && !entry.file_type()?.is_symlink() {
+        guard_read(registry, &entry.path())?;
+    }
+    Ok(())
+}
+
+fn guard_write(registry: &WorkspaceRegistry, path: &Path) -> io::Result<()> {
+    guard::enforce_write(registry, path, &path.to_string_lossy(), true)
+        .map(drop)
+        .map_err(refused)
+}
+
+fn refused(message: String) -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, message)
+}
+
+pub(crate) fn check_depth(depth: usize) -> io::Result<()> {
+    if depth > MAX_COPY_DEPTH {
+        return Err(invalid("folder nesting exceeds the copy limit"));
+    }
+    Ok(())
+}
+
+// Like Finder, a socket or FIFO inside a folder is left out; as the item itself it fails.
+pub(crate) fn is_copyable(kind: std::fs::FileType) -> bool {
+    kind.is_file() || kind.is_dir() || kind.is_symlink()
+}
+
+pub(crate) fn unsupported_kind() -> io::Error {
+    invalid("only files, folders and symbolic links can be copied")
+}
+
+pub(crate) fn already_exists(target: impl Display) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!("already exists: {target}"),
+    )
+}
+
+pub(crate) fn no_free_copy_name() -> io::Error {
+    io::Error::new(io::ErrorKind::AlreadyExists, "no free copy name")
+}
+
+fn invalid(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+fn into_itself() -> io::Error {
+    invalid("cannot copy a folder into itself")
+}
+
+pub(crate) fn copy_candidates(name: &OsStr, is_dir: bool) -> impl Iterator<Item = OsString> + '_ {
+    std::iter::once(name.to_os_string())
+        .chain((1..=MAX_COPY_SUFFIX).map(move |n| copy_name(name, n, is_dir)))
+}
+
+// `named_dest` is the destination as the user named it: the write policy judges
+// that name against where it really lands. Copy names never change the verdict.
+fn copy_item(
+    src: &Path,
+    dest: &Path,
+    named_dest: &Path,
+    registry: &WorkspaceRegistry,
+    rename_on_conflict: bool,
+) -> io::Result<OsString> {
+    let source = check_source(src, registry)?;
+    let (name, is_dir) = (source.name, source.is_dir);
+    guard_write(registry, &named_dest.join(name))?;
+    let target = dest.join(name);
+    if !rename_on_conflict && std::fs::symlink_metadata(&target).is_ok() {
+        return Err(already_exists(target.display()));
+    }
+    if is_dir
+        && source
+            .canonical
+            .as_deref()
+            .is_some_and(|real| dest.starts_with(real))
+    {
+        return Err(into_itself());
+    }
+
+    // Same-directory staging keeps the publish a single rename on one volume.
+    let staging = staging_dir_in(dest)?;
+    let staged = staging.path().join(STAGED_ITEM);
+    let walk = copy_kind(
+        src,
+        &source.checked,
+        &staged,
+        0,
+        source.linked,
+        registry,
+        &mut Vec::new(),
+    );
+    let result = walk.and_then(|()| {
+        let lock = unlock(&staged)?;
+        let published = publish(
+            &staged,
+            dest,
+            name,
+            is_dir,
+            rename_on_conflict,
+            rename_no_replace,
+            swap_onto_claim,
+        )?;
+        relock(&dest.join(&published), lock);
+        Ok(published)
+    });
+    discard_staging(staging);
+    result
+}
+
+// A lock the copy brought along would leave a failed item's rest undeletable.
+fn discard_staging(staging: tempfile::TempDir) {
+    unlock_tree(staging.path());
+    let path = staging.path().to_path_buf();
+    if let Err(error) = staging.close() {
+        log::warn!(
+            "fs_copy: could not remove staging {}: {error}",
+            path.display()
+        );
+    }
+}
+
+// std::fs::copy keeps Finder's lock (uchg) and the append-only flags; each
+// refuses the publish rename and every delete.
+#[cfg(target_os = "macos")]
+const LOCK_FLAGS: u32 = libc::UF_IMMUTABLE | libc::UF_APPEND | libc::SF_IMMUTABLE | libc::SF_APPEND;
+
+// libc offers no lchflags on Apple; unlike chflags it never follows a link.
+#[cfg(target_os = "macos")]
+fn set_flags(path: &Path, flags: u32) -> io::Result<()> {
+    extern "C" {
+        fn lchflags(path: *const libc::c_char, flags: libc::c_uint) -> libc::c_int;
+    }
+    let path = c_path(path)?;
+    if unsafe { lchflags(path.as_ptr(), flags) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Returns the flags to put back: a Finder copy of a locked item is locked too.
+#[cfg(target_os = "macos")]
+fn unlock(path: &Path) -> io::Result<Option<u32>> {
+    use std::os::macos::fs::MetadataExt;
+    let flags = std::fs::symlink_metadata(path)?.st_flags();
+    if flags & LOCK_FLAGS == 0 {
+        return Ok(None);
+    }
+    set_flags(path, flags & !LOCK_FLAGS)?;
+    Ok(Some(flags))
+}
+
+#[cfg(target_os = "macos")]
+fn relock(path: &Path, flags: Option<u32>) {
+    let Some(flags) = flags else { return };
+    if let Err(error) = set_flags(path, flags) {
+        log::warn!("fs_copy: could not lock {} again: {error}", path.display());
+    }
+}
+
+/// Best effort before a removal; a link is never followed out of `dir`.
+#[cfg(target_os = "macos")]
+fn unlock_tree(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let _ = unlock(&path);
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            unlock_tree(&path);
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn unlock(_path: &Path) -> io::Result<Option<u32>> {
+    Ok(None)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn relock(_path: &Path, _flags: Option<u32>) {}
+
+#[cfg(not(target_os = "macos"))]
+fn unlock_tree(_dir: &Path) {}
+
+/// `rename` must never replace; `swap` is aimed at our own placeholder, which on
+/// volumes without a no-replace rename another writer can swap out in between.
+fn publish(
+    staged: &Path,
+    dest: &Path,
+    name: &OsStr,
+    is_dir: bool,
+    rename_on_conflict: bool,
+    rename: impl Fn(&Path, &Path) -> io::Result<()>,
+    swap: impl Fn(&Path, &Path) -> io::Result<()>,
+) -> io::Result<OsString> {
+    for candidate in copy_candidates(name, is_dir) {
+        let target = dest.join(&candidate);
+        match place(staged, &target, is_dir, &rename, &swap) {
+            Ok(()) => return Ok(candidate),
+            Err(Refused::Taken) if rename_on_conflict => {}
+            Err(Refused::Taken) => return Err(already_exists(target.display())),
+            Err(Refused::Failed(error)) => return Err(error),
+        }
+    }
+    Err(no_free_copy_name())
+}
+
+/// Only `Taken` lets the publish move on to the next candidate name.
+#[derive(Debug)]
+enum Refused {
+    Taken,
+    Failed(io::Error),
+}
+
+fn refusal(error: io::Error, target: &Path) -> Refused {
+    if is_taken(&error, target) {
+        Refused::Taken
+    } else {
+        Refused::Failed(error)
+    }
+}
+
+fn place(
+    staged: &Path,
+    target: &Path,
+    is_dir: bool,
+    rename: &impl Fn(&Path, &Path) -> io::Result<()>,
+    swap: &impl Fn(&Path, &Path) -> io::Result<()>,
+) -> Result<(), Refused> {
+    match rename(staged, target) {
+        Ok(()) => Ok(()),
+        Err(error) if is_unsupported(&error) => place_reserved(staged, target, is_dir, swap),
+        Err(error) => Err(refusal(error, target)),
+    }
+}
+
+// exFAT and SMB lack a no-replace rename, so an exclusive placeholder claims the
+// name; another writer can still swap it out before the rename lands on it.
+fn place_reserved(
+    staged: &Path,
+    target: &Path,
+    is_dir: bool,
+    swap: &impl Fn(&Path, &Path) -> io::Result<()>,
+) -> Result<(), Refused> {
+    let claimed = if is_dir {
+        std::fs::create_dir(target)
+    } else {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(target)
+            .map(drop)
+    };
+    claimed.map_err(|error| refusal(error, target))?;
+    let claim = file_id(target);
+    let swapped = match swap(staged, target) {
+        Err(error) if is_dir && refuses_folder_swap(&error) => {
+            // Another writer may have filled the claim since: never mix into or remove it.
+            let empty = std::fs::read_dir(target).map(|mut entries| entries.next().is_none());
+            match empty {
+                Ok(true) => fill_claim(staged, target, swap),
+                Ok(false) => return Err(Refused::Failed(already_exists(target.display()))),
+                Err(error) => Err(error),
+            }
+        }
+        other => other,
+    };
+    swapped.map_err(|error| {
+        if still_ours(target, claim) {
+            let _ = if is_dir {
+                std::fs::remove_dir(target)
+            } else {
+                std::fs::remove_file(target)
+            };
+        }
+        Refused::Failed(error)
+    })
+}
+
+#[cfg(unix)]
+fn file_id(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    Some((meta.dev(), meta.ino()))
+}
+
+#[cfg(unix)]
+fn still_ours(path: &Path, claim: Option<(u64, u64)>) -> bool {
+    claim.is_some() && file_id(path) == claim
+}
+
+#[cfg(not(unix))]
+fn file_id(_path: &Path) -> Option<(u64, u64)> {
+    None
+}
+
+// Without inode numbers the claim is trusted as before.
+#[cfg(not(unix))]
+fn still_ours(_path: &Path, _claim: Option<(u64, u64)>) -> bool {
+    true
+}
+
+fn swap_onto_claim(staged: &Path, target: &Path) -> io::Result<()> {
+    std::fs::rename(staged, target)
+}
+
+// SMB servers refuse a rename onto an existing folder with any of these.
+#[cfg(unix)]
+const FOLDER_SWAP_REFUSED: &[i32] = &[
+    libc::EEXIST,
+    libc::ENOTEMPTY,
+    libc::EACCES,
+    libc::EPERM,
+    libc::EISDIR,
+];
+#[cfg(not(unix))]
+const FOLDER_SWAP_REFUSED: &[i32] = &[];
+
+fn refuses_folder_swap(error: &io::Error) -> bool {
+    error
+        .raw_os_error()
+        .is_some_and(|code| FOLDER_SWAP_REFUSED.contains(&code))
+}
+
+/// A failure takes back what moved, so the caller only removes an empty claim.
+fn fill_claim(
+    staged: &Path,
+    claim: &Path,
+    swap: &impl Fn(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    if let Ok(meta) = std::fs::metadata(staged) {
+        let _ = std::fs::set_permissions(claim, meta.permissions());
+    }
+    let mut moved = Vec::new();
+    if let Err(error) = move_entries(staged, claim, swap, &mut moved) {
+        for path in moved.iter().rev() {
+            if let Err(cleanup) = discard_entry(path) {
+                log::warn!("fs_copy: could not remove {}: {cleanup}", path.display());
+            }
+        }
+        return Err(error);
+    }
+    let _ = std::fs::remove_dir(staged);
+    Ok(())
+}
+
+// Names first: a directory changed while it is read may list an entry twice.
+fn move_entries(
+    staged: &Path,
+    claim: &Path,
+    swap: &impl Fn(&Path, &Path) -> io::Result<()>,
+    moved: &mut Vec<PathBuf>,
+) -> io::Result<()> {
+    let names = std::fs::read_dir(staged)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<io::Result<Vec<_>>>()?;
+    for name in names {
+        let to = claim.join(&name);
+        swap(&staged.join(&name), &to)?;
+        moved.push(to);
+    }
+    Ok(())
+}
+
+fn discard_entry(path: &Path) -> io::Result<()> {
+    let _ = unlock(path);
+    if std::fs::symlink_metadata(path)?.is_dir() {
+        unlock_tree(path);
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
+fn is_taken(error: &io::Error, target: &Path) -> bool {
+    // Windows reports an existing directory target as AccessDenied.
+    error.kind() == io::ErrorKind::AlreadyExists
+        || (cfg!(windows) && std::fs::symlink_metadata(target).is_ok())
+}
+
+// ENOSYS: no renameat2/renamex_np; EPERM: a sandbox or filesystem refusing the
+// flag. EEXIST never counts: that name is taken.
+#[cfg(target_os = "macos")]
+const NO_REPLACE_UNSUPPORTED: &[i32] = &[libc::ENOTSUP, libc::ENOSYS, libc::EPERM];
+#[cfg(target_os = "linux")]
+const NO_REPLACE_UNSUPPORTED: &[i32] = &[libc::EINVAL, libc::ENOSYS, libc::EPERM];
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+const NO_REPLACE_UNSUPPORTED: &[i32] = &[];
+
+fn is_unsupported(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::Unsupported
+        || error
+            .raw_os_error()
+            .is_some_and(|code| NO_REPLACE_UNSUPPORTED.contains(&code))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn c_path(path: &Path) -> io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| invalid("path contains a NUL byte"))
+}
+
+#[cfg(target_os = "macos")]
+fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    let from = c_path(from)?;
+    let to = c_path(to)?;
+    let result = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    let from = c_path(from)?;
+    let to = c_path(to)?;
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+// windows-sys codes, spelled out so the retry decision is testable on any host.
+#[cfg(any(target_os = "windows", test))]
+const ERROR_ACCESS_DENIED: i32 = 5;
+#[cfg(any(target_os = "windows", test))]
+const ERROR_SHARING_VIOLATION: i32 = 32;
+#[cfg(any(target_os = "windows", test))]
+const MOVE_ATTEMPTS: usize = 5;
+#[cfg(target_os = "windows")]
+const MOVE_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// A scanner or indexer briefly holding the fresh copy open denies the move; a
+/// taken target denies it for good (see `is_taken`), so that is not retried.
+#[cfg(any(target_os = "windows", test))]
+fn retries_move(code: Option<i32>, attempts: usize, target_taken: bool) -> bool {
+    attempts < MOVE_ATTEMPTS
+        && !target_taken
+        && matches!(code, Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION))
+}
+
+#[cfg(target_os = "windows")]
+fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+
+    let wide_from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+    let wide_to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let result =
+            unsafe { MoveFileExW(wide_from.as_ptr(), wide_to.as_ptr(), MOVEFILE_WRITE_THROUGH) };
+        if result != 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        let taken = std::fs::symlink_metadata(to).is_ok();
+        if !retries_move(error.raw_os_error(), attempts, taken) {
+            return Err(error);
+        }
+        std::thread::sleep(MOVE_RETRY_PAUSE);
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn rename_no_replace(_from: &Path, _to: &Path) -> io::Result<()> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+/// `checked` is what the caller saw at `src`, unfollowed; `followed` holds the
+/// canonical folder of each folder link the walk followed on its way down.
+fn copy_kind(
+    src: &Path,
+    checked: &Checked,
+    dst: &Path,
+    depth: usize,
+    linked: bool,
+    registry: &WorkspaceRegistry,
+    followed: &mut Vec<PathBuf>,
+) -> io::Result<()> {
+    let kind = checked.kind;
+    if kind.is_symlink() {
+        match copy_symlink(src, dst) {
+            Err(error) if copies_link_content(&error, cfg!(windows)) => {
+                copy_link_content(src, dst, depth, registry, followed)
+            }
+            other => other,
+        }
+    } else if kind.is_dir() {
+        copy_dir(src, checked.id, dst, depth, linked, registry, followed)
+    } else if kind.is_file() {
+        copy_file(src, checked.id, dst)
+    } else {
+        Err(unsupported_kind())
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn changed_since_plan() -> io::Error {
+    io::Error::other("changed during the copy: no longer a regular file")
+}
+
+/// `follow` only for a link the caller already judged; a plain file swapped
+/// for a link or another kind since it was looked at fails the item.
+#[cfg(unix)]
+pub(crate) fn open_planned(path: &Path, follow: bool) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    // O_NONBLOCK: a FIFO swapped in must not hang the open.
+    let flags = libc::O_NONBLOCK | if follow { 0 } else { libc::O_NOFOLLOW };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags)
+        .open(path)
+        .map_err(|error| match error.raw_os_error() {
+            Some(libc::ELOOP) if !follow => changed_since_plan(),
+            _ => error,
+        })?;
+    if !file.metadata()?.is_file() {
+        return Err(changed_since_plan());
+    }
+    Ok(file)
+}
+
+// `dst` sits in our fresh staging dir, so writing it cannot follow a planted link.
+#[cfg(unix)]
+fn copy_file(src: &Path, expected: Option<FileId>, dst: &Path) -> io::Result<()> {
+    let reader = open_planned(src, false)?;
+    if expected.is_some() && meta_id(&reader.metadata()?) != expected {
+        return Err(changed_since_plan());
+    }
+    copy_opened(&reader, dst)
+}
+
+#[cfg(not(unix))]
+fn copy_file(src: &Path, _expected: Option<FileId>, dst: &Path) -> io::Result<()> {
+    std::fs::copy(src, dst).map(drop)
+}
+
+// What std::fs::copy does, from the handle already checked: an APFS clone
+// keeps Finder's lock and xattrs, other volumes get fcopyfile.
+#[cfg(target_os = "macos")]
+fn copy_opened(reader: &std::fs::File, dst: &Path) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let to = c_path(dst)?;
+    if unsafe { libc::fclonefileat(reader.as_raw_fd(), libc::AT_FDCWD, to.as_ptr(), 0) } == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if !matches!(error.raw_os_error(), Some(libc::ENOTSUP | libc::EXDEV)) {
+        return Err(error);
+    }
+    let writer = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(reader.metadata()?.permissions().mode())
+        .open(dst)?;
+    let flags = libc::COPYFILE_METADATA | libc::COPYFILE_DATA;
+    let copied = unsafe {
+        libc::fcopyfile(
+            reader.as_raw_fd(),
+            writer.as_raw_fd(),
+            std::ptr::null_mut(),
+            flags,
+        )
+    };
+    if copied == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn copy_opened(reader: &std::fs::File, dst: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let permissions = reader.metadata()?.permissions();
+    let mut writer = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(permissions.mode())
+        .open(dst)?;
+    io::copy(&mut &*reader, &mut writer)?;
+    writer.set_permissions(permissions)
+}
+
+fn copy_dir(
+    src: &Path,
+    expected: Option<FileId>,
+    dst: &Path,
+    depth: usize,
+    linked: bool,
+    registry: &WorkspaceRegistry,
+    followed: &mut Vec<PathBuf>,
+) -> io::Result<()> {
+    let entries = list_dir(src, expected)?;
+    std::fs::create_dir(dst)?;
+    keep_dir_mode(src, dst)?;
+    for (name, id) in entries {
+        if name.to_str().is_some_and(is_staging_name) {
+            continue;
+        }
+        let path = src.join(&name);
+        let kind = std::fs::symlink_metadata(&path)?.file_type();
+        if !is_copyable(kind) {
+            continue;
+        }
+        if linked && !kind.is_symlink() {
+            guard_read(registry, &path)?;
+        }
+        check_depth(depth + 1)?;
+        let checked = Checked { kind, id };
+        let target = dst.join(&name);
+        copy_kind(
+            &path,
+            &checked,
+            &target,
+            depth + 1,
+            linked,
+            registry,
+            followed,
+        )?;
+    }
+    Ok(())
+}
+
+// The folder is opened without following a link and must still be what the walk
+// checked; its entries' identities come from that handle, not from their paths.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn list_dir(path: &Path, expected: Option<FileId>) -> io::Result<Vec<(OsString, Option<FileId>)>> {
+    use std::os::fd::IntoRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(path)
+        .map_err(|error| match error.raw_os_error() {
+            Some(libc::ELOOP | libc::ENOTDIR) => changed_since_plan(),
+            _ => error,
+        })?;
+    if expected.is_some() && meta_id(&dir.metadata()?) != expected {
+        return Err(changed_since_plan());
+    }
+    let fd = dir.into_raw_fd();
+    let stream = unsafe { libc::fdopendir(fd) };
+    if stream.is_null() {
+        let error = io::Error::last_os_error();
+        unsafe { libc::close(fd) };
+        return Err(error);
+    }
+    let entries = read_stream(stream);
+    unsafe { libc::closedir(stream) };
+    entries
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn read_stream(stream: *mut libc::DIR) -> io::Result<Vec<(OsString, Option<FileId>)>> {
+    use std::os::unix::ffi::OsStrExt;
+    let fd = unsafe { libc::dirfd(stream) };
+    let mut entries = Vec::new();
+    loop {
+        clear_errno();
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            let error = io::Error::last_os_error();
+            return match error.raw_os_error() {
+                Some(0) => Ok(entries),
+                _ => Err(error),
+            };
+        }
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstatat(fd, name.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let name = OsStr::from_bytes(name.to_bytes()).to_os_string();
+        entries.push((name, Some(stat_id(&stat))));
+    }
+}
+
+// dev_t is i32 on macOS and u64 on Linux; std's MetadataExt widens the same way.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[allow(clippy::unnecessary_cast)]
+fn stat_id(stat: &libc::stat) -> FileId {
+    (stat.st_dev as u64, stat.st_ino as u64)
+}
+
+#[cfg(target_os = "macos")]
+fn clear_errno() {
+    unsafe { *libc::__error() = 0 };
+}
+
+#[cfg(target_os = "linux")]
+fn clear_errno() {
+    unsafe { *libc::__errno_location() = 0 };
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn list_dir(path: &Path, _expected: Option<FileId>) -> io::Result<Vec<(OsString, Option<FileId>)>> {
+    std::fs::read_dir(path)?
+        .map(|entry| entry.map(|entry| (entry.file_name(), None)))
+        .collect()
+}
+
+/// Group and other bits follow the source folder; the owner keeps rwx so the
+/// staged tree can still be filled, published and removed.
+pub(crate) fn dir_mode(source_mode: u32) -> u32 {
+    (source_mode & 0o777) | 0o700
+}
+
+// `dst` is fresh in our private staging, so this cannot follow a planted link.
+#[cfg(unix)]
+fn keep_dir_mode(src: &Path, dst: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = dir_mode(std::fs::metadata(src)?.permissions().mode());
+    std::fs::set_permissions(dst, std::fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn keep_dir_mode(_src: &Path, _dst: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+// windows-sys ERROR_PRIVILEGE_NOT_HELD, spelled out so the decision is testable on any host.
+const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
+
+/// Windows without the symlink privilege (no Developer Mode) copies what a
+/// link points at instead, as copies did before links were kept.
+fn copies_link_content(error: &io::Error, windows: bool) -> bool {
+    windows && error.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD)
+}
+
+// The content is read through the link, so the link and all below it are judged.
+fn copy_link_content(
+    src: &Path,
+    dst: &Path,
+    depth: usize,
+    registry: &WorkspaceRegistry,
+    followed: &mut Vec<PathBuf>,
+) -> io::Result<()> {
+    guard_read(registry, src)?;
+    guard_link(src, depth == 0)?;
+    let target = std::fs::metadata(src)?;
+    if target.is_dir() {
+        let from = std::fs::canonicalize(src.parent().unwrap_or(src))?;
+        let real = std::fs::canonicalize(src)?;
+        check_link_descent(&real, &from, dst, followed)?;
+        followed.push(from);
+        // The link was judged above, so the walk reads the folder it resolves to.
+        let result = copy_dir(&real, None, dst, depth, true, registry, followed);
+        followed.pop();
+        result
+    } else if target.is_file() {
+        std::fs::copy(src, dst).map(|_| ())
+    } else {
+        Err(unsupported_kind())
+    }
+}
+
+/// A folder link whose target holds the link, an earlier followed link or the
+/// copy's own staging would copy itself forever. All paths are canonical.
+fn check_link_descent(
+    target: &Path,
+    from: &Path,
+    staged: &Path,
+    followed: &[PathBuf],
+) -> io::Result<()> {
+    let mut inside = followed.iter().map(PathBuf::as_path).chain([from, staged]);
+    if inside.any(|path| path.starts_with(target)) {
+        return Err(into_itself());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn copy_symlink(src: &Path, dst: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(std::fs::read_link(src)?, dst)
+}
+
+#[cfg(windows)]
+fn copy_symlink(src: &Path, dst: &Path) -> io::Result<()> {
+    use std::os::windows::fs::{symlink_dir, symlink_file, FileTypeExt};
+    let target = std::fs::read_link(src)?;
+    if std::fs::symlink_metadata(src)?.file_type().is_symlink_dir() {
+        symlink_dir(target, dst)
+    } else {
+        symlink_file(target, dst)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn copy_symlink(_src: &Path, _dst: &Path) -> io::Result<()> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+/// Finder naming: ` copy`, ` copy n` before the last extension of a file or package
+/// (other folders and dotfiles take it at the end); ` copy n` already there counts on.
+fn copy_name(name: &OsStr, n: usize, is_dir: bool) -> OsString {
+    let path = Path::new(name);
+    let file_style = !is_dir || is_package(path);
+    let (stem, ext) = match (file_style, path.file_stem(), path.extension()) {
+        (true, Some(stem), Some(ext)) => (stem, Some(ext)),
+        _ => (name, None),
+    };
+    let (base, count) = match stem.to_str().and_then(copy_count) {
+        Some((base, count)) => (OsStr::new(base), count),
+        None => (stem, 0),
+    };
+    let mut out = base.to_os_string();
+    match count + n {
+        1 => out.push(" copy"),
+        number => out.push(format!(" copy {number}")),
+    }
+    if let Some(ext) = ext {
+        out.push(".");
+        out.push(ext);
+    }
+    out
+}
+
+// Finder treats these folders as documents, so a copy keeps the extension last.
+const PACKAGE_EXTENSIONS: [&str; 19] = [
+    "app",
+    "bundle",
+    "framework",
+    "plugin",
+    "kext",
+    "rtfd",
+    "pages",
+    "numbers",
+    "key",
+    "xcodeproj",
+    "xcworkspace",
+    "playground",
+    "photoslibrary",
+    "prefPane",
+    "appex",
+    "qlgenerator",
+    "mdimporter",
+    "saver",
+    "wdgt",
+];
+
+fn is_package(path: &Path) -> bool {
+    path.extension().and_then(OsStr::to_str).is_some_and(|ext| {
+        PACKAGE_EXTENSIONS
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case(ext))
+    })
+}
+
+/// `a copy` is copy 1 of `a`, `a copy 7` copy 7; a count never starts with 0
+/// and never exceeds the names a publish tries, so counting on cannot overflow.
+fn copy_count(stem: &str) -> Option<(&str, usize)> {
+    if let Some(base) = stem.strip_suffix(" copy") {
+        return Some((base, 1));
+    }
+    let (base, digits) = stem.rsplit_once(" copy ")?;
+    if digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let count = digits
+        .parse()
+        .ok()
+        .filter(|&count| count <= MAX_COPY_SUFFIX)?;
+    Some((base, count))
+}
+
+#[cfg(test)]
+pub(crate) fn whitelist_repo_with_staging_rest() -> tempfile::TempDir {
+    let repo = tempfile::tempdir().unwrap();
+    let status = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repo.path())
+        .status()
+        .expect("git is required for the whitelist fixture");
+    assert!(status.success(), "git init failed");
+    std::fs::write(repo.path().join(".gitignore"), "*\n!*/\n!*.txt\n").unwrap();
+    for rel in [".terax-copy-x9Kq2_Lm/src/report.txt", "src/other.txt"] {
+        let path = repo.path().join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "needle\n").unwrap();
+    }
+    std::fs::create_dir(repo.path().join(".hidden")).unwrap();
+    repo
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::modules::fs::to_canon;
+
+    fn s(path: impl AsRef<Path>) -> String {
+        to_canon(path)
+    }
+
+    fn reg_for(dir: &Path) -> WorkspaceRegistry {
+        let reg = WorkspaceRegistry::default();
+        reg.authorize(dir).expect("authorize tempdir root");
+        reg
+    }
+
+    fn copy(sources: &[PathBuf], dest: &Path, rename: bool) -> CopyResult {
+        copy_batch(
+            sources.iter().map(s).collect(),
+            &s(dest),
+            &WorkspaceEnv::Local,
+            &reg_for(dest),
+            rename,
+        )
+        .unwrap()
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut out: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn no_staging_left(dir: &Path) -> bool {
+        !names(dir).iter().any(|n| is_staging_name(n))
+    }
+
+    #[test]
+    fn names_follow_the_finder() {
+        let name = |n: &str, i, dir| copy_name(OsStr::new(n), i, dir);
+        assert_eq!(name("a.txt", 1, false), "a copy.txt");
+        assert_eq!(name("a.txt", 2, false), "a copy 2.txt");
+        assert_eq!(name("archive.tar.gz", 1, false), "archive.tar copy.gz");
+        assert_eq!(name("Makefile", 3, false), "Makefile copy 3");
+        assert_eq!(name(".env", 1, false), ".env copy");
+        assert_eq!(name("report", 1, false), "report copy");
+        assert_eq!(name("v1.2", 1, true), "v1.2 copy");
+        assert_eq!(name("a.txt", 10_000, false), "a copy 10000.txt");
+    }
+
+    #[test]
+    fn packages_keep_their_extension_like_files_but_other_folders_do_not() {
+        let name = |n: &str, i, dir| copy_name(OsStr::new(n), i, dir);
+        assert_eq!(name("Foo.app", 1, true), "Foo copy.app");
+        assert_eq!(name("Foo.app", 2, true), "Foo copy 2.app");
+        assert_eq!(name("Foo copy.app", 1, true), "Foo copy 2.app");
+        assert_eq!(name("Notes.RTFD", 1, true), "Notes copy.RTFD");
+        assert_eq!(name("Pane.prefpane", 1, true), "Pane copy.prefpane");
+        assert_eq!(name("Proj.xcodeproj", 3, true), "Proj copy 3.xcodeproj");
+        assert_eq!(name("conf.d", 1, true), "conf.d copy");
+        assert_eq!(name("v1.2", 1, true), "v1.2 copy");
+        assert_eq!(name(".app", 1, true), ".app copy");
+        let first: Vec<OsString> = copy_candidates(OsStr::new("Foo.app"), true)
+            .take(3)
+            .collect();
+        assert_eq!(first, ["Foo.app", "Foo copy.app", "Foo copy 2.app"]);
+    }
+
+    #[test]
+    fn created_paths_join_the_destination_as_passed_with_a_slash() {
+        assert_eq!(created_path("C:/x", "a.txt"), "C:/x/a.txt");
+        assert_eq!(created_path("C:/", "a.txt"), "C:/a.txt");
+        assert_eq!(created_path("/", "a.txt"), "/a.txt");
+        assert_eq!(created_path("/ws/src", "a b.txt"), "/ws/src/a b.txt");
+
+        let (src, dest) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let file = src.path().join("a.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let named = format!("{}/", s(dest.path()));
+        let result = copy_batch(
+            vec![s(&file)],
+            &named,
+            &WorkspaceEnv::Local,
+            &reg_for(dest.path()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(result.created, [format!("{named}a.txt")]);
+    }
+
+    #[test]
+    fn a_copy_of_a_copy_continues_the_count() {
+        let name = |n: &str, i, dir| copy_name(OsStr::new(n), i, dir);
+        assert_eq!(name("a copy.txt", 1, false), "a copy 2.txt");
+        assert_eq!(name("a copy.txt", 2, false), "a copy 3.txt");
+        assert_eq!(name("a copy 2.txt", 1, false), "a copy 3.txt");
+        assert_eq!(name("a copy 9.txt", 3, false), "a copy 12.txt");
+        assert_eq!(name("Makefile copy", 1, false), "Makefile copy 2");
+        assert_eq!(name("Makefile copy 2", 1, false), "Makefile copy 3");
+        assert_eq!(name(".env copy", 1, false), ".env copy 2");
+        assert_eq!(name("v1.2 copy", 1, true), "v1.2 copy 2");
+        assert_eq!(name("v1.2 copy 4", 1, true), "v1.2 copy 5");
+        assert_eq!(name("notes copy.d", 1, true), "notes copy.d copy");
+        assert_eq!(name("a copy.tar.gz", 1, false), "a copy.tar copy.gz");
+        assert_eq!(name("a copy 02.txt", 1, false), "a copy 02 copy.txt");
+        assert_eq!(name("a copy x.txt", 1, false), "a copy x copy.txt");
+        assert_eq!(name("a copy .txt", 1, false), "a copy  copy.txt");
+        assert_eq!(name("copy.txt", 1, false), "copy copy.txt");
+        let first: Vec<OsString> = copy_candidates(OsStr::new("a copy.txt"), false)
+            .take(3)
+            .collect();
+        assert_eq!(first, ["a copy.txt", "a copy 2.txt", "a copy 3.txt"]);
+    }
+
+    #[test]
+    fn a_count_past_the_copy_limit_is_part_of_the_name() {
+        let name = |n: &str, i, dir| copy_name(OsStr::new(n), i, dir);
+        assert_eq!(name("a copy 10000.txt", 1, false), "a copy 10001.txt");
+        assert_eq!(name("a copy 10001.txt", 1, false), "a copy 10001 copy.txt");
+        let max = "a copy 18446744073709551615.txt";
+        assert_eq!(name(max, 1, false), "a copy 18446744073709551615 copy.txt");
+        assert_eq!(
+            name("v copy 18446744073709551616", 2, true),
+            "v copy 18446744073709551616 copy 2"
+        );
+        let first: Vec<OsString> = copy_candidates(OsStr::new(max), false).take(3).collect();
+        assert_eq!(
+            first,
+            [
+                max,
+                "a copy 18446744073709551615 copy.txt",
+                "a copy 18446744073709551615 copy 2.txt"
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_copied_folder_keeps_the_source_mode_but_stays_the_owners() {
+        use std::os::unix::fs::PermissionsExt;
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let set = |rel: &str, mode: u32| {
+            let perms = std::fs::Permissions::from_mode(mode);
+            std::fs::set_permissions(src.path().join(rel), perms).unwrap();
+        };
+        std::fs::create_dir_all(src.path().join("private/inner")).unwrap();
+        std::fs::create_dir(src.path().join("shared")).unwrap();
+        std::fs::create_dir_all(src.path().join("locked/sub")).unwrap();
+        std::fs::write(src.path().join("locked/sub/a.txt"), b"a").unwrap();
+        set("private/inner", 0o750);
+        set("private", 0o700);
+        set("shared", 0o775);
+        set("locked/sub", 0o555);
+        set("locked", 0o555);
+
+        let sources = ["private", "shared", "locked"].map(|n| src.path().join(n));
+        let result = copy(&sources, dest.path(), false);
+        set("locked", 0o755);
+        set("locked/sub", 0o755);
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        let mode = |rel: &str| {
+            let meta = std::fs::metadata(dest.path().join(rel)).unwrap();
+            meta.permissions().mode() & 0o777
+        };
+        assert_eq!(mode("private"), 0o700);
+        assert_eq!(mode("private/inner"), 0o750);
+        assert_eq!(mode("shared"), 0o775);
+        assert_eq!(mode("locked"), 0o755);
+        assert_eq!(mode("locked/sub"), 0o755);
+        assert_eq!(
+            std::fs::read(dest.path().join("locked/sub/a.txt")).unwrap(),
+            b"a"
+        );
+        assert!(no_staging_left(dest.path()));
+    }
+
+    #[cfg(target_os = "macos")]
+    fn locked(path: &Path) -> bool {
+        use std::os::macos::fs::MetadataExt;
+        std::fs::symlink_metadata(path).is_ok_and(|m| m.st_flags() & libc::UF_IMMUTABLE != 0)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_finder_locked_file_is_copied_locked_without_a_staging_rest() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::create_dir(src.path().join("pkg")).unwrap();
+        for rel in ["a.txt", "pkg/b.txt"] {
+            let file = src.path().join(rel);
+            std::fs::write(&file, rel).unwrap();
+            set_flags(&file, libc::UF_IMMUTABLE).unwrap();
+        }
+        let result = copy(
+            &[src.path().join("a.txt"), src.path().join("pkg")],
+            dest.path(),
+            true,
+        );
+        let copies = ["a.txt", "pkg/b.txt"].map(|rel| locked(&dest.path().join(rel)));
+        let clean = no_staging_left(dest.path());
+        for dir in [src.path(), dest.path()] {
+            unlock_tree(dir);
+        }
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        assert_eq!(copies, [true, true]);
+        assert!(clean, "{:?}", names(dest.path()));
+        assert_eq!(std::fs::read(dest.path().join("a.txt")).unwrap(), b"a.txt");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_failed_item_leaves_no_locked_staging_rest() {
+        let dest = tempfile::tempdir().unwrap();
+        let staging = staging_dir_in(dest.path()).unwrap();
+        let item = staging.path().join(STAGED_ITEM);
+        std::fs::create_dir_all(item.join("sub")).unwrap();
+        for rel in ["a.txt", "sub/b.txt"] {
+            std::fs::write(item.join(rel), b"x").unwrap();
+        }
+        for rel in ["a.txt", "sub/b.txt", "sub"] {
+            set_flags(&item.join(rel), libc::UF_IMMUTABLE).unwrap();
+        }
+        let was_locked = locked(&item.join("sub/b.txt"));
+        discard_staging(staging);
+        let rest = names(dest.path());
+        unlock_tree(dest.path());
+        assert!(was_locked);
+        assert!(rest.is_empty(), "{rest:?}");
+    }
+
+    fn staged_in(dir: &Path) -> PathBuf {
+        dir.join(format!(
+            "{STAGING_PREFIX}{}",
+            "t".repeat(STAGING_RANDOM_LEN)
+        ))
+    }
+
+    #[test]
+    fn staging_names_are_exactly_what_the_two_makers_create() {
+        let dest = tempfile::tempdir().unwrap();
+        for _ in 0..64 {
+            let staging = staging_dir_in(dest.path()).unwrap();
+            let name = staging.path().file_name().unwrap().to_str().unwrap();
+            assert!(is_staging_name(name), "{name}");
+        }
+        // Python's mkdtemp: eight of [a-z0-9_].
+        for name in [
+            ".terax-copy-k2_9xq0a",
+            ".terax-copy-________",
+            ".terax-copy-a1B2c3D4",
+        ] {
+            assert!(is_staging_name(name), "{name}");
+        }
+        for name in [
+            ".terax-copy-notes.md",
+            ".terax-copy-backup",
+            STAGING_PREFIX,
+            ".terax-copy-abcdefg",
+            ".terax-copy-abcdefghi",
+            ".terax-copy-ab-cd-ef",
+            ".terax-copy-\u{e4}bcdefg",
+            ".terax-copy-abcdefgh/",
+            ".terax-copyright.md",
+            "x.terax-copy-abcdefgh",
+            ".TERAX-COPY-abcdefgh",
+        ] {
+            assert!(!is_staging_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn copy_brings_file_and_dir_in_and_creates_a_copy_instead_of_clobbering() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a.txt"), b"payload").unwrap();
+        std::fs::create_dir_all(src.path().join("d/inner")).unwrap();
+        std::fs::write(src.path().join("d/inner/y.txt"), b"y").unwrap();
+
+        let result = copy(
+            &[src.path().join("a.txt"), src.path().join("d")],
+            dest.path(),
+            false,
+        );
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        assert_eq!(
+            result.created,
+            [s(dest.path().join("a.txt")), s(dest.path().join("d"))]
+        );
+        assert_eq!(
+            std::fs::read(dest.path().join("a.txt")).unwrap(),
+            b"payload"
+        );
+        assert_eq!(
+            std::fs::read(dest.path().join("d/inner/y.txt")).unwrap(),
+            b"y"
+        );
+        assert!(src.path().join("a.txt").exists());
+
+        std::fs::write(dest.path().join("a.txt"), b"old").unwrap();
+        let refused = copy(&[src.path().join("a.txt")], dest.path(), false);
+        assert!(refused.created.is_empty());
+        assert!(refused.failed[0].message.contains("already exists"));
+
+        let renamed = copy(&[src.path().join("a.txt")], dest.path(), true);
+        assert_eq!(renamed.created, [s(dest.path().join("a copy.txt"))]);
+        assert_eq!(std::fs::read(dest.path().join("a.txt")).unwrap(), b"old");
+        assert_eq!(
+            std::fs::read(dest.path().join("a copy.txt")).unwrap(),
+            b"payload"
+        );
+        assert!(no_staging_left(dest.path()));
+    }
+
+    #[test]
+    fn conflicts_get_finder_names_and_never_touch_existing_items() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        for file in ["a.txt", "archive.tar.gz", "Makefile", ".env", "report"] {
+            std::fs::write(src.path().join(file), b"new").unwrap();
+        }
+        std::fs::create_dir(src.path().join("v1.2")).unwrap();
+        for file in ["a.txt", "archive.tar.gz", "Makefile", ".env"] {
+            std::fs::write(dest.path().join(file), b"old").unwrap();
+        }
+        std::fs::create_dir(dest.path().join("v1.2")).unwrap();
+        std::fs::create_dir(dest.path().join("report")).unwrap();
+
+        let sources: Vec<PathBuf> = [
+            "a.txt",
+            "archive.tar.gz",
+            "Makefile",
+            ".env",
+            "v1.2",
+            "report",
+        ]
+        .iter()
+        .map(|n| src.path().join(n))
+        .collect();
+        let result = copy(&sources, dest.path(), true);
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        let expected: Vec<String> = [
+            "a copy.txt",
+            "archive.tar copy.gz",
+            "Makefile copy",
+            ".env copy",
+            "v1.2 copy",
+            "report copy",
+        ]
+        .iter()
+        .map(|n| s(dest.path().join(n)))
+        .collect();
+        assert_eq!(result.created, expected);
+
+        let again = copy(&[src.path().join("a.txt")], dest.path(), true);
+        assert_eq!(again.created, [s(dest.path().join("a copy 2.txt"))]);
+        for file in ["a.txt", "archive.tar.gz", "Makefile", ".env"] {
+            assert_eq!(std::fs::read(dest.path().join(file)).unwrap(), b"old");
+        }
+        assert!(dest.path().join("report").is_dir());
+        assert!(dest.path().join("v1.2").is_dir());
+        assert!(no_staging_left(dest.path()));
+    }
+
+    #[test]
+    fn exhausted_copy_names_fail_the_item_without_creating_anything() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a.txt"), b"new").unwrap();
+        for candidate in copy_candidates(OsStr::new("a.txt"), false) {
+            std::fs::write(dest.path().join(candidate), b"").unwrap();
+        }
+        let before = names(dest.path()).len();
+        let result = copy(&[src.path().join("a.txt")], dest.path(), true);
+        assert!(result.created.is_empty());
+        assert_eq!(result.failed[0].message, "no free copy name");
+        assert_eq!(names(dest.path()).len(), before);
+    }
+
+    #[test]
+    fn reports_partial_batch_success_and_continues_after_missing_sources() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("ok1.txt"), b"a").unwrap();
+        std::fs::write(src.path().join("ok2.txt"), b"b").unwrap();
+        let sources = [
+            src.path().join("ok1.txt"),
+            src.path().join("gone.txt"),
+            src.path().join("ok2.txt"),
+        ];
+        let result = copy(&sources, dest.path(), true);
+        assert_eq!(
+            result.created,
+            [
+                s(dest.path().join("ok1.txt")),
+                s(dest.path().join("ok2.txt"))
+            ]
+        );
+        assert_eq!(result.failed.len(), 1);
+        assert_eq!(result.failed[0].source, s(src.path().join("gone.txt")));
+        assert_eq!(result.created.len() + result.failed.len(), sources.len());
+        assert_eq!(names(dest.path()), ["ok1.txt", "ok2.txt"]);
+    }
+
+    #[test]
+    fn refuses_a_folder_into_itself_but_copies_the_rest() {
+        let ws = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let folder = ws.path().join("src");
+        std::fs::create_dir_all(folder.join("sub")).unwrap();
+        std::fs::write(other.path().join("x.txt"), b"x").unwrap();
+        for dest in [folder.clone(), folder.join("sub")] {
+            let before = names(&dest);
+            let result = copy(&[folder.clone(), other.path().join("x.txt")], &dest, true);
+            assert_eq!(result.failed.len(), 1);
+            assert_eq!(result.failed[0].message, "cannot copy a folder into itself");
+            assert_eq!(result.created, [s(dest.join("x.txt"))]);
+            let mut expected = before;
+            expected.push("x.txt".into());
+            expected.sort();
+            assert_eq!(names(&dest), expected);
+        }
+        let result = copy(&[folder], ws.path(), true);
+        assert!(result.failed.is_empty());
+        assert!(ws.path().join("src copy/sub").is_dir());
+    }
+
+    #[test]
+    fn rejects_relative_and_nameless_sources_per_item() {
+        let dest = tempfile::tempdir().unwrap();
+        let result = copy_batch(
+            vec!["rel.txt".into(), "/".into()],
+            &s(dest.path()),
+            &WorkspaceEnv::Local,
+            &reg_for(dest.path()),
+            true,
+        )
+        .unwrap();
+        let messages: Vec<&str> = result.failed.iter().map(|f| f.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            [
+                "copy source must be absolute",
+                "copy source has no filename"
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_fifo_source() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let fifo = src.path().join("pipe");
+        let c = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let result = copy(&[fifo], dest.path(), true);
+        assert_eq!(
+            result.failed[0].message,
+            "only files, folders and symbolic links can be copied"
+        );
+        assert!(names(dest.path()).is_empty());
+    }
+
+    #[test]
+    fn batch_and_depth_limits_hold_at_both_edges() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let reg = reg_for(dest.path());
+        let too_many = vec![s(src.path().join("x")); MAX_COPY_SOURCES + 1];
+        for workspace in [
+            WorkspaceEnv::Local,
+            WorkspaceEnv::Ssh {
+                host: "terax-no-such-host".into(),
+            },
+        ] {
+            let err =
+                copy_batch(too_many.clone(), &s(dest.path()), &workspace, &reg, true).unwrap_err();
+            assert_eq!(err, "copy at most 1024 items at a time");
+        }
+        assert!(names(dest.path()).is_empty());
+
+        let many: Vec<PathBuf> = (0..MAX_COPY_SOURCES)
+            .map(|i| {
+                let p = src.path().join(format!("f{i}"));
+                std::fs::write(&p, b"").unwrap();
+                p
+            })
+            .collect();
+        let result = copy(&many, dest.path(), true);
+        assert!(result.failed.is_empty());
+        assert_eq!(result.created.len(), MAX_COPY_SOURCES);
+
+        let nested = |root: &Path, levels: usize| {
+            let mut p = root.to_path_buf();
+            for _ in 0..levels {
+                p.push("d");
+            }
+            std::fs::create_dir_all(&p).unwrap();
+        };
+        let ok = src.path().join("ok");
+        let deep = src.path().join("deep");
+        nested(&ok, MAX_COPY_DEPTH);
+        nested(&deep, MAX_COPY_DEPTH + 1);
+        let result = copy(&[ok, deep], dest.path(), true);
+        assert_eq!(result.created, [s(dest.path().join("ok"))]);
+        assert_eq!(result.failed.len(), 1);
+        assert_eq!(
+            result.failed[0].message,
+            "folder nesting exceeds the copy limit"
+        );
+        assert!(!dest.path().join("deep").exists());
+        assert!(no_staging_left(dest.path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failure_inside_a_folder_leaves_neither_the_folder_nor_staging() {
+        use std::os::unix::fs::PermissionsExt;
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let big = src.path().join("big");
+        std::fs::create_dir(&big).unwrap();
+        for i in 0..5 {
+            std::fs::write(big.join(format!("{i}.txt")), b"x").unwrap();
+        }
+        let locked = big.join("2.txt");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::File::open(&locked).is_ok();
+        let result = copy(std::slice::from_ref(&big), dest.path(), true);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+        if readable {
+            return;
+        }
+        assert!(result.created.is_empty());
+        assert_eq!(result.failed[0].source, s(&big));
+        assert!(names(dest.path()).is_empty());
+    }
+
+    #[test]
+    fn a_leftover_staging_dir_in_a_source_folder_is_left_out() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let rest = src.path().join("d/.terax-copy-x9Kq2_Lm/item");
+        std::fs::create_dir_all(&rest).unwrap();
+        std::fs::write(rest.join("half"), b"h").unwrap();
+        std::fs::write(src.path().join("d/a"), b"a").unwrap();
+        let result = copy(&[src.path().join("d")], dest.path(), true);
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        assert_eq!(names(&dest.path().join("d")), ["a"]);
+        let staged = Path::new("ws/.terax-copy-x9Kq2_Lm/item");
+        assert!(has_staging_segment(staged));
+        assert!(!has_staging_segment(Path::new("ws/.terax-copy-notes/item")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sockets_and_fifos_inside_a_folder_are_left_out() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(src.path().join("d/sub")).unwrap();
+        std::fs::write(src.path().join("d/a"), b"a").unwrap();
+        let _socket = std::os::unix::net::UnixListener::bind(src.path().join("d/socket")).unwrap();
+        let fifo = src.path().join("d/sub/pipe");
+        let c = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let result = copy(&[src.path().join("d")], dest.path(), true);
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        assert_eq!(result.created, [s(dest.path().join("d"))]);
+        assert_eq!(names(&dest.path().join("d")), ["a", "sub"]);
+        assert!(names(&dest.path().join("d/sub")).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_swapped_after_it_was_looked_at_fails_the_item() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let secret = src.path().join("secret");
+        std::fs::write(&secret, b"s").unwrap();
+        let file = src.path().join("a.txt");
+        let reg = reg_for(dest.path());
+        for swap in ["link", "fifo"] {
+            std::fs::write(&file, b"a").unwrap();
+            let checked = Checked::of(&std::fs::symlink_metadata(&file).unwrap());
+            std::fs::remove_file(&file).unwrap();
+            if swap == "link" {
+                std::os::unix::fs::symlink(&secret, &file).unwrap();
+            } else {
+                let c = std::ffi::CString::new(file.to_string_lossy().as_bytes()).unwrap();
+                assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+            }
+            let dst = dest.path().join(swap);
+            let error =
+                copy_kind(&file, &checked, &dst, 0, false, &reg, &mut Vec::new()).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                changed_since_plan().to_string(),
+                "{swap}"
+            );
+            assert!(std::fs::symlink_metadata(&dst).is_err(), "{swap}");
+            std::fs::remove_file(&file).unwrap();
+        }
+    }
+
+    // The folder (or file) is checked, then replaced before the walk reads it:
+    // by a link to a secret folder, or by another entry of the same kind.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_swapped_after_it_was_looked_at_is_not_followed() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let secret = src.path().join("secret");
+        std::fs::create_dir(&secret).unwrap();
+        std::fs::write(secret.join("id_ed25519"), b"PRIVATE").unwrap();
+        let reg = reg_for(dest.path());
+        let pkg = src.path().join("pkg");
+        for swap in ["link", "other folder", "other file"] {
+            let is_dir = swap != "other file";
+            if is_dir {
+                std::fs::create_dir(&pkg).unwrap();
+                std::fs::write(pkg.join("a.txt"), b"a").unwrap();
+            } else {
+                std::fs::write(&pkg, b"a").unwrap();
+            }
+            let checked = Checked::of(&std::fs::symlink_metadata(&pkg).unwrap());
+            let old = src.path().join(format!("old {swap}"));
+            std::fs::rename(&pkg, &old).unwrap();
+            match swap {
+                "link" => std::os::unix::fs::symlink(&secret, &pkg).unwrap(),
+                "other folder" => std::fs::create_dir(&pkg).unwrap(),
+                _ => std::fs::write(&pkg, b"b").unwrap(),
+            }
+            let dst = dest.path().join(swap);
+            let error =
+                copy_kind(&pkg, &checked, &dst, 0, false, &reg, &mut Vec::new()).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                changed_since_plan().to_string(),
+                "{swap}"
+            );
+            assert!(std::fs::symlink_metadata(&dst).is_err(), "{swap}");
+            if swap == "link" || !is_dir {
+                std::fs::remove_file(&pkg).unwrap();
+            } else {
+                std::fs::remove_dir(&pkg).unwrap();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_copied_as_links_and_never_followed() {
+        use std::os::unix::fs::symlink;
+        let base = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let pkg = base.path().join("pkg");
+        std::fs::create_dir(&pkg).unwrap();
+        std::fs::create_dir(base.path().join("outside")).unwrap();
+        std::fs::write(base.path().join("outside/secret"), b"s").unwrap();
+        symlink("../outside", pkg.join("link")).unwrap();
+        symlink(".", pkg.join("cycle")).unwrap();
+        let result = copy(&[pkg], dest.path(), true);
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        let link = dest.path().join("pkg/link");
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_link(&link).unwrap(), Path::new("../outside"));
+        assert_eq!(
+            std::fs::read_link(dest.path().join("pkg/cycle")).unwrap(),
+            Path::new(".")
+        );
+        assert!(!dest.path().join("outside").exists());
+    }
+
+    // FS-5 under CopyResult: a dangling symlink at the destination is never
+    // written through, with or without conflict renaming.
+    #[cfg(unix)]
+    #[test]
+    fn copy_refuses_prestaged_dangling_symlink_at_dest() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a.txt"), b"payload").unwrap();
+        let victim = outside.path().join("victim");
+        std::os::unix::fs::symlink(&victim, dest.path().join("a.txt")).unwrap();
+
+        let renamed = copy(&[src.path().join("a.txt")], dest.path(), true);
+        assert_eq!(renamed.created, [s(dest.path().join("a copy.txt"))]);
+        let refused = copy(&[src.path().join("a.txt")], dest.path(), false);
+        assert!(refused.created.is_empty());
+        assert!(refused.failed[0].message.contains("already exists"));
+        assert!(!victim.exists(), "must not write through the symlink");
+    }
+
+    #[test]
+    fn copy_passes_what_the_editor_may_open_by_name() {
+        let src = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let write = |rel: &str| {
+            let path = src.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"secret").unwrap();
+            path
+        };
+        let sources = [
+            write(".env"),
+            write("id_ed25519"),
+            write(".ssh/config"),
+            write("app/node_modules/x.pem")
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .to_path_buf(),
+        ];
+        let result = copy(&sources, ws.path(), true);
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        assert_eq!(names(ws.path()), [".env", "app", "config", "id_ed25519"]);
+        assert_eq!(
+            std::fs::read(ws.path().join("app/node_modules/x.pem")).unwrap(),
+            b"secret"
+        );
+
+        let ssh = ws.path().join(".ssh");
+        std::fs::create_dir(&ssh).unwrap();
+        let result = copy(&sources[..1], &ssh, true);
+        assert_eq!(result.created, [s(ssh.join(".env"))]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_destination_cannot_land_in_a_protected_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("home/.ssh")).unwrap();
+        std::fs::create_dir(root.path().join("ws")).unwrap();
+        std::os::unix::fs::symlink(root.path().join("home/.ssh"), root.path().join("ws/drop"))
+            .unwrap();
+        std::fs::write(src.path().join("a.txt"), b"a").unwrap();
+        let result = copy_batch(
+            vec![s(src.path().join("a.txt"))],
+            &s(root.path().join("ws/drop")),
+            &WorkspaceEnv::Local,
+            &reg_for(root.path()),
+            true,
+        )
+        .unwrap();
+        assert!(result.created.is_empty());
+        assert_eq!(
+            result.failed[0].message,
+            "refused: path is inside a protected directory (.ssh)"
+        );
+        assert!(names(&root.path().join("home/.ssh")).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_parent_cannot_hide_a_protected_source() {
+        let outside = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::create_dir(outside.path().join(".ssh")).unwrap();
+        std::fs::write(outside.path().join(".ssh/config"), b"Host real").unwrap();
+        std::os::unix::fs::symlink(outside.path().join(".ssh"), src.path().join("assets")).unwrap();
+        let result = copy(&[src.path().join("assets/config")], dest.path(), true);
+        assert!(result.created.is_empty());
+        assert!(
+            result.failed[0].message.contains("protected directory"),
+            "{:?}",
+            result.failed
+        );
+        assert!(names(dest.path()).is_empty());
+    }
+
+    // The protected folder only shows up below the root, behind the linked parent.
+    #[cfg(unix)]
+    #[test]
+    fn entries_below_a_linked_parent_keep_the_policy_check() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let roaming = base.join("home/AppData/Roaming");
+        std::fs::create_dir_all(roaming.join("gcloud")).unwrap();
+        std::fs::write(roaming.join("gcloud/access.db"), b"token").unwrap();
+        std::fs::write(roaming.join("notes.txt"), b"n").unwrap();
+        std::os::unix::fs::symlink(base.join("home/AppData"), base.join("ad")).unwrap();
+        let dest = base.join("dest");
+        std::fs::create_dir(&dest).unwrap();
+
+        let result = copy(&[base.join("ad/Roaming")], &dest, true);
+        assert!(result.created.is_empty());
+        assert_eq!(
+            result.failed[0].message,
+            "refused: path is inside a protected directory (appdata/roaming/gcloud)"
+        );
+        assert!(names(&dest).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_workspace_link_to_an_outside_target_is_copied_as_a_link() {
+        let ws = tempfile::tempdir().unwrap();
+        let opt = tempfile::tempdir().unwrap();
+        let tool = opt.path().join("tool");
+        std::fs::create_dir(&tool).unwrap();
+        std::fs::create_dir(ws.path().join("src")).unwrap();
+        std::os::unix::fs::symlink(&tool, ws.path().join("src/tool")).unwrap();
+        let dest = ws.path().join("dest");
+        std::fs::create_dir(&dest).unwrap();
+
+        let result = copy_batch(
+            vec![s(ws.path().join("src/tool"))],
+            &s(&dest),
+            &WorkspaceEnv::Local,
+            &reg_for(ws.path()),
+            true,
+        )
+        .unwrap();
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        assert_eq!(result.created, [s(dest.join("tool"))]);
+        let copied = dest.join("tool");
+        assert!(std::fs::symlink_metadata(&copied)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_link(&copied).unwrap(), tool);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_link_on_the_way_marks_a_source_as_linked() {
+        let tmp = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+        assert!(tmp.path().starts_with("/tmp"));
+        let dir = tmp.path().join("Dir");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::os::unix::fs::symlink(&dir, tmp.path().join("alias")).unwrap();
+        let cafe = tmp.path().join("Caf\u{e9}");
+        std::fs::create_dir(&cafe).unwrap();
+        let reg = WorkspaceRegistry::default();
+        let linked = |path: PathBuf| check_source(&path, &reg).unwrap().linked;
+
+        assert!(!linked(dir.clone()));
+        assert!(!linked(dir.join("sub")));
+        let shouted = tmp.path().join("DIR");
+        if shouted.exists() {
+            assert!(!linked(shouted));
+        }
+        let decomposed = tmp.path().join("Cafe\u{301}");
+        if decomposed.exists() {
+            assert!(!linked(decomposed));
+        }
+        assert!(linked(tmp.path().join("alias")));
+        assert!(linked(tmp.path().join("alias/sub")));
+    }
+
+    #[test]
+    fn only_the_system_aliases_may_prefix_a_named_path() {
+        let linked = |src: &str, real: &str| behind_link(Path::new(src), Path::new(real));
+        assert!(linked("/data/proj", "/secret/data/proj"));
+        assert!(linked("/tmp/x", "/secret/tmp/x"));
+        assert!(linked("/opt/x", "/private/opt/x"));
+        assert!(linked("/home/tmp/x", "/private/tmp/x"));
+        assert!(linked("/data/proj", "/proj"));
+
+        assert!(!linked("/data/proj", "/data/proj"));
+        assert!(!linked("/tmp/x", "/private/tmp/x"));
+        assert!(!linked("/TMP/x", "/private/tmp/x"));
+        assert!(!linked("/var/folders/x", "/private/var/folders/x"));
+        assert!(!linked("/etc/hosts", "/private/etc/hosts"));
+        assert!(!linked("/private/tmp/x", "/private/tmp/x"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_verbatim_drive_is_the_named_one_but_another_drive_is_a_link() {
+        let linked = |src: &str, real: &str| behind_link(Path::new(src), Path::new(real));
+        assert!(!linked(r"C:\data\x", r"\\?\C:\data\x"));
+        assert!(!linked(r"c:\data\x", r"\\?\C:\data\x"));
+        assert!(linked(r"C:\data\x", r"\\?\D:\data\x"));
+        assert!(linked(r"C:\data\x", r"\\?\C:\secret\data\x"));
+    }
+
+    #[test]
+    fn link_content_fallback_is_only_for_the_missing_windows_privilege() {
+        let denied = io::Error::from_raw_os_error(ERROR_PRIVILEGE_NOT_HELD);
+        assert!(copies_link_content(&denied, true));
+        assert!(!copies_link_content(&denied, false));
+        assert!(!copies_link_content(&io::Error::from_raw_os_error(5), true));
+        assert!(!copies_link_content(
+            &io::ErrorKind::AlreadyExists.into(),
+            true
+        ));
+    }
+
+    #[test]
+    fn a_followed_folder_link_never_leads_back_into_the_copy() {
+        let staged = Path::new("/ws/dest/.terax-copy-x/item/lib");
+        let descend = |target: &str, from: &str, followed: &[&str]| {
+            let followed: Vec<PathBuf> = followed.iter().map(PathBuf::from).collect();
+            check_link_descent(Path::new(target), Path::new(from), staged, &followed)
+                .map_err(|e| e.to_string())
+        };
+        let itself = Err("cannot copy a folder into itself".to_string());
+        assert_eq!(descend("/src/lib", "/src/app", &[]), Ok(()));
+        assert_eq!(descend("/src/app", "/src/app", &[]), itself);
+        assert_eq!(descend("/src", "/src/app/sub", &[]), itself);
+        assert_eq!(descend("/", "/src/app", &[]), itself);
+        assert_eq!(descend("/ws/dest", "/src/app", &[]), itself);
+        assert_eq!(descend("/ws", "/src/app", &[]), itself);
+        assert_eq!(descend("/ws/dest/other", "/src/app", &[]), Ok(()));
+        assert_eq!(descend("/src", "/lib/sub", &["/src/app"]), itself);
+        assert_eq!(descend("/lib", "/src/b", &["/src/a"]), Ok(()));
+        assert_eq!(descend("/src/app-old", "/src/app", &[]), Ok(()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_link_content_fallback_copies_the_target_and_judges_the_link() {
+        use std::os::unix::fs::symlink;
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let reg = reg_for(dest.path());
+        std::fs::create_dir_all(src.path().join("lib/sub")).unwrap();
+        std::fs::write(src.path().join("lib/sub/a.txt"), b"a").unwrap();
+        std::fs::create_dir(src.path().join("keys")).unwrap();
+        std::fs::write(src.path().join("keys/id_ed25519"), b"PRIVATE").unwrap();
+        symlink("lib", src.path().join("lib-link")).unwrap();
+        symlink("keys/id_ed25519", src.path().join("notes.txt")).unwrap();
+        symlink("..", src.path().join("lib/sub/up")).unwrap();
+        let follow = |link: &str, dst: &Path| {
+            copy_link_content(&src.path().join(link), dst, 0, &reg, &mut Vec::new())
+        };
+
+        let copied = dest.path().join("lib-link");
+        follow("lib-link", &copied).unwrap();
+        assert!(!std::fs::symlink_metadata(&copied)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(copied.join("sub/a.txt")).unwrap(), b"a");
+
+        let notes = dest.path().join("notes.txt");
+        let err = follow("notes.txt", &notes).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "refused: \"id_ed25519\" matches a sensitive-file pattern"
+        );
+        assert!(std::fs::symlink_metadata(&notes).is_err());
+
+        let up = dest.path().join("up");
+        let err = follow("lib/sub/up", &up).unwrap_err();
+        assert_eq!(err.to_string(), "cannot copy a folder into itself");
+        assert!(std::fs::symlink_metadata(&up).is_err());
+    }
+
+    #[test]
+    fn copy_rejects_unauthorized_or_non_directory_dest() {
+        let src = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let allowed = tempfile::tempdir().unwrap();
+        let reg = reg_for(allowed.path());
+        std::fs::write(src.path().join("a.txt"), b"payload").unwrap();
+        std::fs::write(allowed.path().join("readme.md"), b"r").unwrap();
+        let sources = vec![s(src.path().join("a.txt"))];
+
+        let err = copy_batch(
+            sources.clone(),
+            &s(foreign.path()),
+            &WorkspaceEnv::Local,
+            &reg,
+            true,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("outside the authorized workspace"),
+            "got: {err}"
+        );
+        assert!(names(foreign.path()).is_empty());
+
+        let err = copy_batch(
+            sources,
+            &s(allowed.path().join("readme.md")),
+            &WorkspaceEnv::Local,
+            &reg,
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(err, "copy destination is not a directory");
+        assert_eq!(names(allowed.path()), ["readme.md"]);
+    }
+
+    #[test]
+    fn long_names_and_deep_trees_fail_alone_with_the_os_reason() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let fits = format!("{}.txt", "a".repeat(246));
+        let overflows = format!("{}.txt", "b".repeat(247));
+        for name in [&fits, &overflows] {
+            std::fs::write(src.path().join(name), b"new").unwrap();
+            std::fs::write(dest.path().join(name), b"old").unwrap();
+        }
+        std::fs::write(src.path().join("x.txt"), b"x").unwrap();
+        // Fits macOS PATH_MAX (1024) at the source, overflows it once staged.
+        let tree = src.path().join("tree");
+        let mut deep = tree.clone();
+        while s(&deep).len() < 1010 {
+            let room = 1009 - s(&deep).len();
+            deep.push("s".repeat(room.clamp(1, 100)));
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+
+        let result = copy(
+            &[
+                src.path().join(&fits),
+                src.path().join(&overflows),
+                tree.clone(),
+                src.path().join("x.txt"),
+            ],
+            dest.path(),
+            true,
+        );
+        let copied = format!("{} copy.txt", "a".repeat(246));
+        assert_eq!(copied.len(), 255);
+        assert!(result.created.contains(&s(dest.path().join(&copied))));
+        assert!(result.created.contains(&s(dest.path().join("x.txt"))));
+        let failed: Vec<&str> = result.failed.iter().map(|f| f.source.as_str()).collect();
+        assert!(failed.contains(&s(src.path().join(&overflows)).as_str()));
+        if cfg!(target_os = "macos") {
+            assert!(failed.contains(&s(&tree).as_str()), "{:?}", result.failed);
+            assert!(!dest.path().join("tree").exists());
+        }
+        for name in [&fits, &overflows] {
+            assert_eq!(std::fs::read(dest.path().join(name)).unwrap(), b"old");
+        }
+        assert!(no_staging_left(dest.path()));
+    }
+
+    #[test]
+    fn case_insensitive_targets_count_as_taken() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a.txt"), b"new").unwrap();
+        std::fs::write(dest.path().join("A.txt"), b"old").unwrap();
+        let insensitive = dest.path().join("a.txt").exists();
+        let result = copy(&[src.path().join("a.txt")], dest.path(), true);
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        let expected = if insensitive { "a copy.txt" } else { "a.txt" };
+        assert_eq!(result.created, [s(dest.path().join(expected))]);
+        assert_eq!(std::fs::read(dest.path().join("A.txt")).unwrap(), b"old");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn unsupported_rename_falls_back_to_reservation_and_eexist_moves_on() {
+        let unsupported = NO_REPLACE_UNSUPPORTED[0];
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::write(dest.path().join("a.txt"), b"old").unwrap();
+        let stage = |body: &[u8]| {
+            let staged = staged_in(dest.path());
+            std::fs::write(&staged, body).unwrap();
+            staged
+        };
+
+        let staged = stage(b"one");
+        let name = publish(
+            &staged,
+            dest.path(),
+            OsStr::new("a.txt"),
+            false,
+            true,
+            |_, _| Err(io::Error::from_raw_os_error(unsupported)),
+            swap_onto_claim,
+        )
+        .unwrap();
+        assert_eq!(name, "a copy.txt");
+        assert_eq!(
+            std::fs::read(dest.path().join("a copy.txt")).unwrap(),
+            b"one"
+        );
+
+        let staged = stage(b"two");
+        let calls = std::cell::Cell::new(0);
+        let name = publish(
+            &staged,
+            dest.path(),
+            OsStr::new("b.txt"),
+            false,
+            true,
+            |from, to| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 {
+                    Err(io::Error::from_raw_os_error(libc::EEXIST))
+                } else {
+                    rename_no_replace(from, to)
+                }
+            },
+            swap_onto_claim,
+        )
+        .unwrap();
+        assert_eq!(name, "b copy.txt");
+        assert!(!dest.path().join("b.txt").exists());
+
+        let staged_dir = staged_in(dest.path());
+        std::fs::create_dir(&staged_dir).unwrap();
+        std::fs::create_dir(dest.path().join("v")).unwrap();
+        std::fs::write(dest.path().join("v/keep"), b"k").unwrap();
+        let name = publish(
+            &staged_dir,
+            dest.path(),
+            OsStr::new("v"),
+            true,
+            true,
+            |_, _| Err(io::Error::from_raw_os_error(unsupported)),
+            swap_onto_claim,
+        )
+        .unwrap();
+        assert_eq!(name, "v copy");
+        assert_eq!(std::fs::read(dest.path().join("v/keep")).unwrap(), b"k");
+        assert_eq!(std::fs::read(dest.path().join("a.txt")).unwrap(), b"old");
+        assert!(no_staging_left(dest.path()));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn enosys_and_eperm_fall_back_to_reservation_but_eexist_never_does() {
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::write(dest.path().join("a.txt"), b"old").unwrap();
+        for (code, expected) in [(libc::ENOSYS, "a copy.txt"), (libc::EPERM, "a copy 2.txt")] {
+            let staged = staged_in(dest.path());
+            std::fs::write(&staged, b"new").unwrap();
+            let name = publish(
+                &staged,
+                dest.path(),
+                OsStr::new("a.txt"),
+                false,
+                true,
+                |_, _| Err(io::Error::from_raw_os_error(code)),
+                swap_onto_claim,
+            )
+            .unwrap();
+            assert_eq!(name, expected);
+            assert_eq!(std::fs::read(dest.path().join(expected)).unwrap(), b"new");
+        }
+        assert_eq!(std::fs::read(dest.path().join("a.txt")).unwrap(), b"old");
+        assert!(no_staging_left(dest.path()));
+
+        let eexist = io::Error::from_raw_os_error(libc::EEXIST);
+        assert!(!is_unsupported(&eexist));
+        let staged = staged_in(dest.path());
+        std::fs::write(&staged, b"new").unwrap();
+        let refused = place(
+            &staged,
+            &dest.path().join("free.txt"),
+            false,
+            &|_: &Path, _: &Path| Err(io::Error::from_raw_os_error(libc::EEXIST)),
+            &swap_onto_claim,
+        );
+        assert!(matches!(refused, Err(Refused::Taken)), "{refused:?}");
+        assert!(!dest.path().join("free.txt").exists());
+        assert!(staged.exists());
+    }
+
+    // The placeholder is ours, so a failing swap onto it (even with EEXIST)
+    // fails the item instead of looking like a taken name.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_failed_swap_onto_the_claim_fails_the_item_and_frees_the_name() {
+        let dest = tempfile::tempdir().unwrap();
+        let staged = staged_in(dest.path());
+        let unsupported =
+            |_: &Path, _: &Path| Err(io::Error::from_raw_os_error(NO_REPLACE_UNSUPPORTED[0]));
+        for (is_dir, code) in [
+            (false, libc::EEXIST),
+            (false, libc::EIO),
+            (true, libc::EXDEV),
+            (true, libc::EIO),
+        ] {
+            if is_dir {
+                std::fs::create_dir(&staged).unwrap();
+            } else {
+                std::fs::write(&staged, b"new").unwrap();
+            }
+            let swaps = std::cell::Cell::new(0);
+            let error = publish(
+                &staged,
+                dest.path(),
+                OsStr::new("a"),
+                is_dir,
+                true,
+                unsupported,
+                |_, _| {
+                    swaps.set(swaps.get() + 1);
+                    Err(io::Error::from_raw_os_error(code))
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(code));
+            assert_eq!(swaps.get(), 1, "no further candidate may be tried");
+            let staged_name = staged.file_name().unwrap().to_string_lossy();
+            assert_eq!(names(dest.path()), [&*staged_name]);
+            if is_dir {
+                std::fs::remove_dir(&staged).unwrap();
+            } else {
+                std::fs::remove_file(&staged).unwrap();
+            }
+        }
+    }
+
+    // SMB refuses a rename onto the claimed folder; the swap stub stands in
+    // for that, then for a move that breaks halfway through the fill.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_refused_folder_swap_fills_the_claim_entry_by_entry() {
+        use std::os::unix::fs::PermissionsExt;
+        let dest = tempfile::tempdir().unwrap();
+        let staged = staged_in(dest.path());
+        let stage = || {
+            std::fs::create_dir_all(staged.join("sub")).unwrap();
+            std::fs::write(staged.join("a.txt"), b"a").unwrap();
+            std::fs::write(staged.join("sub/b.txt"), b"b").unwrap();
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o750)).unwrap();
+        };
+        let unsupported =
+            |_: &Path, _: &Path| Err(io::Error::from_raw_os_error(NO_REPLACE_UNSUPPORTED[0]));
+        let refusing = |fail_at: usize| {
+            let calls = std::cell::Cell::new(0);
+            move |from: &Path, to: &Path| {
+                calls.set(calls.get() + 1);
+                match calls.get() {
+                    1 => Err(io::Error::from_raw_os_error(libc::EEXIST)),
+                    n if n == fail_at => Err(io::Error::from_raw_os_error(libc::EIO)),
+                    _ => std::fs::rename(from, to),
+                }
+            }
+        };
+        let publish_dir = |swap: &dyn Fn(&Path, &Path) -> io::Result<()>| {
+            publish(
+                &staged,
+                dest.path(),
+                OsStr::new("v"),
+                true,
+                true,
+                unsupported,
+                swap,
+            )
+        };
+
+        stage();
+        assert_eq!(publish_dir(&refusing(0)).unwrap(), "v");
+        let v = dest.path().join("v");
+        assert_eq!(std::fs::read(v.join("a.txt")).unwrap(), b"a");
+        assert_eq!(std::fs::read(v.join("sub/b.txt")).unwrap(), b"b");
+        let mode = std::fs::metadata(&v).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o750);
+        assert!(!staged.exists());
+
+        stage();
+        let error = publish_dir(&refusing(3)).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EIO));
+        let staged_name = staged.file_name().unwrap().to_string_lossy();
+        assert_eq!(names(dest.path()), [&*staged_name, "v"]);
+        assert_eq!(names(&v), ["a.txt", "sub"], "the earlier copy is untouched");
+        assert_eq!(names(&staged).len(), 1, "the moved entry was removed again");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_claim_another_writer_filled_is_left_alone_and_fails_the_item() {
+        let dest = tempfile::tempdir().unwrap();
+        let staged = staged_in(dest.path());
+        std::fs::create_dir(&staged).unwrap();
+        std::fs::write(staged.join("a.txt"), b"ours").unwrap();
+        let unsupported =
+            |_: &Path, _: &Path| Err(io::Error::from_raw_os_error(NO_REPLACE_UNSUPPORTED[0]));
+        let intruder = |_: &Path, to: &Path| {
+            std::fs::write(to.join("theirs.txt"), b"theirs").unwrap();
+            Err(io::Error::from_raw_os_error(libc::EEXIST))
+        };
+        let error = publish(
+            &staged,
+            dest.path(),
+            OsStr::new("v"),
+            true,
+            false,
+            unsupported,
+            intruder,
+        )
+        .unwrap_err();
+        let v = dest.path().join("v");
+        assert_eq!(
+            error.to_string(),
+            format!("already exists: {}", v.display())
+        );
+        assert_eq!(names(&v), ["theirs.txt"]);
+        assert_eq!(std::fs::read(staged.join("a.txt")).unwrap(), b"ours");
+    }
+
+    // Another writer replaces our placeholder before the swap fails; the
+    // cleanup must leave theirs.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_failed_swap_leaves_whatever_replaced_the_placeholder() {
+        let dest = tempfile::tempdir().unwrap();
+        let unsupported =
+            |_: &Path, _: &Path| Err(io::Error::from_raw_os_error(NO_REPLACE_UNSUPPORTED[0]));
+        for is_dir in [false, true] {
+            let staged = staged_in(dest.path());
+            let theirs = dest.path().join("theirs");
+            if is_dir {
+                std::fs::create_dir(&staged).unwrap();
+                std::fs::create_dir(&theirs).unwrap();
+            } else {
+                std::fs::write(&staged, b"ours").unwrap();
+                std::fs::write(&theirs, b"theirs").unwrap();
+            }
+            let replace = |_: &Path, to: &Path| {
+                std::fs::rename(&theirs, to).unwrap();
+                Err(io::Error::from_raw_os_error(libc::EIO))
+            };
+            let name = if is_dir { "d" } else { "f.txt" };
+            let error = publish(
+                &staged,
+                dest.path(),
+                OsStr::new(name),
+                is_dir,
+                false,
+                unsupported,
+                replace,
+            )
+            .unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::EIO));
+            let target = dest.path().join(name);
+            assert_eq!(std::fs::symlink_metadata(&target).unwrap().is_dir(), is_dir);
+            if !is_dir {
+                assert_eq!(std::fs::read(&target).unwrap(), b"theirs");
+            }
+            assert!(staged.exists());
+            if is_dir {
+                std::fs::remove_dir(&staged).unwrap();
+            } else {
+                std::fs::remove_file(&staged).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn a_denied_windows_move_is_retried_a_few_times_unless_the_target_is_taken() {
+        for code in [ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION] {
+            for attempts in 1..MOVE_ATTEMPTS {
+                assert!(retries_move(Some(code), attempts, false));
+            }
+            assert!(!retries_move(Some(code), MOVE_ATTEMPTS, false));
+            assert!(!retries_move(Some(code), 1, true));
+        }
+        assert!(!retries_move(Some(ERROR_PRIVILEGE_NOT_HELD), 1, false));
+        assert!(!retries_move(Some(183), 1, false));
+        assert!(!retries_move(None, 1, false));
+    }
+
+    #[test]
+    fn concurrent_publishes_choose_distinct_names_without_clobbering() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a.txt"), b"source").unwrap();
+        let barrier = std::sync::Barrier::new(4);
+        let results = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        copy(&[src.path().join("a.txt")], dest.path(), true)
+                    })
+                })
+                .collect();
+            threads
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let mut paths = std::collections::HashSet::new();
+        for result in results {
+            assert!(result.failed.is_empty());
+            assert!(paths.insert(result.created[0].clone()));
+        }
+        assert_eq!(names(dest.path()).len(), 4);
+    }
+}

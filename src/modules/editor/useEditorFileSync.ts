@@ -1,8 +1,8 @@
 import { type RefObject, useEffect, useRef } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { parentDir } from "@/lib/utils";
 import {
   listenFsChanged,
-  parentDir,
   watchAdd,
   watchRemove,
 } from "@/modules/explorer/lib/watch";

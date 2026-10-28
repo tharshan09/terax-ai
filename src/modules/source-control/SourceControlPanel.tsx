@@ -47,7 +47,7 @@ import {
   COMPACT_CONTENT,
   COMPACT_ITEM,
 } from "@/modules/explorer/lib/menuItemClass";
-import { joinPath } from "@/modules/explorer/lib/useFileTree";
+import { joinPath } from "@/modules/explorer/lib/paths";
 import {
   AiContentGenerator02Icon,
   Alert02Icon,

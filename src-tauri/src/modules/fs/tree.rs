@@ -6,6 +6,7 @@ use std::time::UNIX_EPOCH;
 use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 
+use super::copy::{is_staging_name, not_staging};
 use crate::modules::workspace::{resolve_path, WorkspaceEnv};
 
 #[derive(Serialize, Deserialize)]
@@ -53,6 +54,7 @@ fn git_non_ignored_names(dir: &Path, show_hidden: bool) -> HashSet<String> {
         .parents(true)
         .max_depth(Some(1))
         .follow_links(false)
+        .filter_entry(not_staging)
         .build()
         .flatten()
         .filter_map(|d| d.file_name().to_str().map(str::to_string))
@@ -182,6 +184,9 @@ pub fn fs_read_dir_blocking(
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let name = entry.file_name().into_string().ok()?;
+            if is_staging_name(&name) {
+                return None;
+            }
 
             // `metadata()` follows symlinks → it returns the target's stat in
             // one syscall (file_type + size + mtime all derived from it). We
@@ -268,7 +273,7 @@ pub fn list_subdirs(
             _ => false,
         })
         .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| show_hidden || !name.starts_with('.'))
+        .filter(|name| !is_staging_name(name) && (show_hidden || !name.starts_with('.')))
         .collect();
 
     dirs.sort_by(|a, b| natural_cmp(a, b));
@@ -277,8 +282,62 @@ pub fn list_subdirs(
 
 #[cfg(test)]
 mod tests {
-    use super::natural_cmp;
+    use super::{fs_read_dir_blocking, git_non_ignored_names, list_subdirs, natural_cmp};
+    use crate::modules::fs::copy::whitelist_repo_with_staging_rest;
     use std::cmp::Ordering;
+
+    #[test]
+    fn listings_hide_staging_even_when_hidden_entries_are_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".terax-copy-x9Kq2_Lm")).unwrap();
+        std::fs::write(dir.path().join(".terax-copy-x9Kq2_Lm/report.pdf"), b"x").unwrap();
+        std::fs::write(dir.path().join(".env"), b"x").unwrap();
+        std::fs::write(dir.path().join(".terax-copy-notes.md"), b"x").unwrap();
+        std::fs::create_dir(dir.path().join(".hidden")).unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+
+        let entries = fs_read_dir_blocking(root.clone(), true, None, None).unwrap();
+        let mut names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, [".env", ".hidden", ".terax-copy-notes.md"]);
+        assert_eq!(list_subdirs(root, true, None).unwrap(), [".hidden"]);
+    }
+
+    #[test]
+    fn git_whitelist_rules_cannot_reveal_staging() {
+        let repo = whitelist_repo_with_staging_rest();
+        for show_hidden in [true, false] {
+            let names = git_non_ignored_names(repo.path(), show_hidden);
+            assert!(
+                !names.contains(".terax-copy-x9Kq2_Lm"),
+                "{show_hidden}: {names:?}"
+            );
+            assert!(names.contains("src"), "{show_hidden}: {names:?}");
+        }
+        assert!(git_non_ignored_names(repo.path(), true).contains(".hidden"));
+    }
+
+    // The root the user opened, or a folder above it, may carry a staging name.
+    #[test]
+    fn a_root_named_like_staging_still_lists_and_hides_staging_below() {
+        let dir = tempfile::tempdir().unwrap();
+        for root in [
+            dir.path().join(".terax-copy-old7_Mn2"),
+            dir.path().join(".terax-copy-old7_Mn2/proj"),
+        ] {
+            std::fs::create_dir_all(root.join(".terax-copy-ab12Cd34")).unwrap();
+            std::fs::write(root.join("a.txt"), b"a").unwrap();
+            let names = git_non_ignored_names(&root, true);
+            assert!(names.contains("a.txt"), "{root:?}: {names:?}");
+            assert!(!names.contains(".terax-copy-ab12Cd34"), "{names:?}");
+            let listed =
+                fs_read_dir_blocking(root.to_string_lossy().into_owned(), true, None, None)
+                    .unwrap();
+            let listed: Vec<&str> = listed.iter().map(|e| e.name.as_str()).collect();
+            assert!(listed.contains(&"a.txt"), "{listed:?}");
+            assert!(!listed.contains(&".terax-copy-ab12Cd34"), "{listed:?}");
+        }
+    }
 
     fn sorted(mut v: Vec<&str>) -> Vec<&str> {
         v.sort_by(|a, b| natural_cmp(a, b));
