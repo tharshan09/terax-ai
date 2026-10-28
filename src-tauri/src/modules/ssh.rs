@@ -1437,7 +1437,7 @@ fn copy_with(
     rename_on_conflict: bool,
     registry: &crate::modules::workspace::WorkspaceRegistry,
 ) -> Result<crate::modules::fs::copy::CopyResult, String> {
-    use crate::modules::fs::copy::{CopyFailure, CopyResult};
+    use crate::modules::fs::copy::{created_path, CopyFailure, CopyResult};
     let dest = dest_dir.trim_end_matches('/');
     let mut taken = listed_names(run, host, dest_dir);
     let mut result = CopyResult::default();
@@ -1455,7 +1455,7 @@ fn copy_with(
             registry,
         );
         match item {
-            Ok(name) => result.created.push(format!("{dest}/{name}")),
+            Ok(name) => result.created.push(created_path(dest_dir, &name)),
             Err(ItemError::Remote(RemoteError::Failed(message))) => {
                 log::warn!("ssh copy({source} -> {host}:{dest}) failed: {message}");
                 result.failed.push(failure(source, &message));
@@ -2208,6 +2208,22 @@ Host !secret prod
             .iter()
             .map(|f| (f.source.clone(), f.message.clone()))
             .collect()
+    }
+
+    #[test]
+    fn created_paths_keep_the_destination_as_passed() {
+        let src = tempfile::tempdir().unwrap();
+        let sources = local_sources(src.path(), &["a.txt"]);
+        let result = copy_with(
+            &mut |request, _| healthy(request),
+            "stub",
+            &sources,
+            "C:/x",
+            true,
+            &crate::modules::workspace::WorkspaceRegistry::default(),
+        )
+        .unwrap();
+        assert_eq!(result.created, ["C:/x/a.txt"]);
     }
 
     #[test]

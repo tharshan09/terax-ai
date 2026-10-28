@@ -4,17 +4,15 @@
 pub async fn fs_clipboard_paths(app: tauri::AppHandle) -> Result<Vec<String>, String> {
     #[cfg(target_os = "macos")]
     {
-        // AppKit expects pasteboard access on the main thread; the wait for it
-        // runs on the blocking pool so neither the main thread nor a worker stalls.
-        let (tx, rx) = std::sync::mpsc::channel();
+        // AppKit expects pasteboard access on the main thread; awaiting its
+        // answer parks only this task, no thread.
+        let (tx, rx) = tokio::sync::oneshot::channel();
         app.run_on_main_thread(move || {
             let pasteboard = objc2_app_kit::NSPasteboard::generalPasteboard();
             let _ = tx.send(read_file_paths(&pasteboard));
         })
         .map_err(|e| e.to_string())?;
-        tauri::async_runtime::spawn_blocking(move || receive_paths(&rx, MAIN_THREAD_BUDGET))
-            .await
-            .map_err(|e| format!("fs_clipboard_paths task failed: {e}"))?
+        receive_paths(rx, MAIN_THREAD_BUDGET).await
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -27,12 +25,14 @@ pub async fn fs_clipboard_paths(app: tauri::AppHandle) -> Result<Vec<String>, St
 const MAIN_THREAD_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[cfg(target_os = "macos")]
-fn receive_paths(
-    rx: &std::sync::mpsc::Receiver<Vec<String>>,
+async fn receive_paths(
+    rx: tokio::sync::oneshot::Receiver<Vec<String>>,
     budget: std::time::Duration,
 ) -> Result<Vec<String>, String> {
-    rx.recv_timeout(budget)
-        .map_err(|_| "clipboard read timed out or was cancelled".to_string())
+    match tokio::time::timeout(budget, rx).await {
+        Ok(Ok(paths)) => Ok(paths),
+        _ => Err("clipboard read timed out or was cancelled".to_string()),
+    }
 }
 
 /// Absolute paths of every pasteboard item carrying a file URL. Finder writes
@@ -161,14 +161,22 @@ mod tests {
 
     #[test]
     fn a_silent_or_gone_main_thread_fails_with_the_timeout_text() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
         let message = "clipboard read timed out or was cancelled";
-        let (tx, rx) = std::sync::mpsc::channel::<Vec<String>>();
         let budget = std::time::Duration::from_millis(20);
-        assert_eq!(receive_paths(&rx, budget).unwrap_err(), message);
-        drop(tx);
-        assert_eq!(receive_paths(&rx, budget).unwrap_err(), message);
-        let (tx, rx) = std::sync::mpsc::channel();
-        tx.send(vec!["/a".to_string()]).unwrap();
-        assert_eq!(receive_paths(&rx, budget).unwrap(), ["/a"]);
+        runtime.block_on(async {
+            let (silent, rx) = tokio::sync::oneshot::channel::<Vec<String>>();
+            assert_eq!(receive_paths(rx, budget).await.unwrap_err(), message);
+            drop(silent);
+            let (gone, rx) = tokio::sync::oneshot::channel::<Vec<String>>();
+            drop(gone);
+            assert_eq!(receive_paths(rx, budget).await.unwrap_err(), message);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            tx.send(vec!["/a".to_string()]).unwrap();
+            assert_eq!(receive_paths(rx, budget).await.unwrap(), ["/a"]);
+        });
     }
 }

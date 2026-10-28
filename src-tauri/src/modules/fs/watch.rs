@@ -99,15 +99,11 @@ fn has_staging_segment(path: &Path) -> bool {
 }
 
 // A copy in progress is invisible; only its publish under the real name is news.
-// Only names below the watched folder count: the folder may sit under such a name.
+// Staging names count only below a known watched folder, which may sit under one.
 fn in_staging(path: &Path, watched_ancestor: &WatchedAncestor) -> bool {
-    if !has_staging_segment(path) {
-        return false;
-    }
-    match watched_ancestor(path) {
-        Some(dir) => path.strip_prefix(dir).is_ok_and(has_staging_segment),
-        None => true,
-    }
+    has_staging_segment(path)
+        && watched_ancestor(path)
+            .is_some_and(|dir| path.strip_prefix(dir).is_ok_and(has_staging_segment))
 }
 
 #[derive(Default)]
@@ -428,6 +424,20 @@ mod tests {
             set,
             HashSet::from([to_canon("/x/.terax-copy-old/proj/a.txt"), to_canon(root)])
         );
+    }
+
+    #[test]
+    fn a_staging_path_outside_every_watched_folder_is_still_reported() {
+        use notify::event::CreateKind;
+        let unwatched = |_: &Path| -> Option<PathBuf> { None };
+        let mut set = HashSet::new();
+        let path = "/gone/.terax-copy-ab12/item";
+        collect(
+            &mut set,
+            event(EventKind::Create(CreateKind::Any), &[path]),
+            &unwatched,
+        );
+        assert_eq!(set, HashSet::from([to_canon(path)]));
     }
 
     #[test]

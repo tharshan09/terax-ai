@@ -234,4 +234,40 @@ describe("isTerminalPasteChord", () => {
       ),
     ).toBe(false);
   });
+
+  it("goes by the letter on Latin layouts, so Dvorak K on the V key is no paste", () => {
+    expect(
+      isTerminalPasteChord(evt({ ctrlKey: true, key: "k", code: "KeyV" }), {
+        isMac: false,
+      }),
+    ).toBe(false);
+    expect(
+      isTerminalPasteChord(evt({ metaKey: true, key: "k", code: "KeyV" }), {
+        isMac: true,
+      }),
+    ).toBe(false);
+    expect(
+      isTerminalPasteChord(evt({ ctrlKey: true, key: "v", code: "Period" }), {
+        isMac: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("matches the physical V key on non-Latin layouts", () => {
+    expect(
+      isTerminalPasteChord(evt({ ctrlKey: true, key: "м", code: "KeyV" }), {
+        isMac: false,
+      }),
+    ).toBe(true);
+    expect(
+      isTerminalPasteChord(evt({ metaKey: true, key: "м", code: "KeyV" }), {
+        isMac: true,
+      }),
+    ).toBe(true);
+    expect(
+      isTerminalPasteChord(evt({ ctrlKey: true, key: "м", code: "KeyM" }), {
+        isMac: false,
+      }),
+    ).toBe(false);
+  });
 });

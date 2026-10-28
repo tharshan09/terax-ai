@@ -8,7 +8,6 @@ use tauri::Manager;
 
 use super::guard;
 use super::mutate::authorize_mutation_dir;
-use super::to_canon;
 use crate::modules::workspace::{resolve_path, WorkspaceEnv, WorkspaceRegistry};
 
 pub(crate) const STAGING_PREFIX: &str = ".terax-copy-";
@@ -93,7 +92,7 @@ fn copy_batch(
         match item {
             Ok(name) => result
                 .created
-                .push(to_canon(Path::new(dest_dir).join(name))),
+                .push(created_path(dest_dir, &name.to_string_lossy())),
             Err(error) => {
                 log::warn!("fs_copy({source} -> {}) failed: {error}", dest.display());
                 result.failed.push(CopyFailure {
@@ -104,6 +103,15 @@ fn copy_batch(
         }
     }
     Ok(result)
+}
+
+/// A new item as the explorer keys it: the destination as passed, joined with `/`.
+pub(crate) fn created_path(dest_dir: &str, name: &str) -> String {
+    if dest_dir.ends_with('/') {
+        format!("{dest_dir}{name}")
+    } else {
+        format!("{dest_dir}/{name}")
+    }
 }
 
 fn copy_destination(dest: &Path, registry: &WorkspaceRegistry) -> Result<PathBuf, String> {
@@ -631,6 +639,7 @@ pub(crate) fn whitelist_repo_with_staging_rest() -> tempfile::TempDir {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modules::fs::to_canon;
 
     fn s(path: impl AsRef<Path>) -> String {
         to_canon(path)
@@ -677,6 +686,28 @@ mod tests {
         assert_eq!(name("report", 1, false), "report copy");
         assert_eq!(name("v1.2", 1, true), "v1.2 copy");
         assert_eq!(name("a.txt", 10_000, false), "a copy 10000.txt");
+    }
+
+    #[test]
+    fn created_paths_join_the_destination_as_passed_with_a_slash() {
+        assert_eq!(created_path("C:/x", "a.txt"), "C:/x/a.txt");
+        assert_eq!(created_path("C:/", "a.txt"), "C:/a.txt");
+        assert_eq!(created_path("/", "a.txt"), "/a.txt");
+        assert_eq!(created_path("/ws/src", "a b.txt"), "/ws/src/a b.txt");
+
+        let (src, dest) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let file = src.path().join("a.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let named = format!("{}/", s(dest.path()));
+        let result = copy_batch(
+            vec![s(&file)],
+            &named,
+            &WorkspaceEnv::Local,
+            &reg_for(dest.path()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(result.created, [format!("{named}a.txt")]);
     }
 
     #[test]

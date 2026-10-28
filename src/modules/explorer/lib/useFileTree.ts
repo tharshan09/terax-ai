@@ -27,29 +27,23 @@ type ChildrenState =
 
 type TreeState = Record<string, ChildrenState>;
 
-type Landed = { rendered: Promise<void> };
-type FolderRead = { settled: Promise<Landed> };
+// A refresh() or expand() waiting for a read at least as new as `gen` to show.
+type Waiter = { gen: number; done: () => void };
 
-const NOTHING_TO_RENDER: Landed = { rendered: Promise.resolve() };
+// The read each folder state came from, so a commit tells which waiters it frees.
+const readOf = new WeakMap<ChildrenState, number>();
 
-// Reads of one folder can finish out of order: only the newest lands, and an
-// overtaken read settles once the newest listing has rendered.
-function overtakenBy(
-  latest: Map<string, FolderRead>,
+function release(
+  waiters: Map<string, Waiter[]>,
   path: string,
-  read: FolderRead,
-): Promise<Landed> | null {
-  const newest = latest.get(path);
-  if (newest === read) return null;
-  return newest?.settled ?? Promise.resolve(NOTHING_TO_RENDER);
-}
-
-function nextCommit(waiters: (() => void)[]): Landed {
-  return {
-    rendered: new Promise<void>((done) => {
-      waiters.push(done);
-    }),
-  };
+  gen: number,
+): void {
+  const list = waiters.get(path);
+  if (!list) return;
+  const rest = list.filter((w) => w.gen > gen);
+  if (rest.length > 0) waiters.set(path, rest);
+  else waiters.delete(path);
+  for (const w of list) if (w.gen <= gen) w.done();
 }
 
 export type PendingCreate = {
@@ -129,8 +123,10 @@ export function useFileTree(rootPath: string | null, options?: Options) {
   const expandedRef = useRef(expanded);
   const nodesRef = useRef(nodes);
   const watchedRef = useRef<Set<string>>(new Set());
-  const latestFetchRef = useRef(new Map<string, FolderRead>());
-  const commitWaitersRef = useRef<(() => void)[]>([]);
+  // Reads of one folder can finish out of order: only the newest one lands.
+  const readCountRef = useRef(0);
+  const newestReadRef = useRef(new Map<string, number>());
+  const waitersRef = useRef(new Map<string, Waiter[]>());
 
   useEffect(() => {
     showHiddenRef.current = showHidden;
@@ -146,9 +142,10 @@ export function useFileTree(rootPath: string | null, options?: Options) {
 
   useLayoutEffect(() => {
     nodesRef.current = nodes;
-    const waiters = commitWaitersRef.current;
-    commitWaitersRef.current = [];
-    for (const done of waiters) done();
+    for (const [path] of waitersRef.current) {
+      const shown = nodes[path];
+      if (shown) release(waitersRef.current, path, readOf.get(shown) ?? 0);
+    }
   }, [nodes]);
 
   const addWatch = useCallback((path: string) => {
@@ -162,7 +159,9 @@ export function useFileTree(rootPath: string | null, options?: Options) {
     watchRemove([path]);
   }, []);
 
-  const readChildren = useCallback(async (path: string, read: FolderRead) => {
+  const readChildren = useCallback(async (path: string, gen: number) => {
+    const newest = newestReadRef.current;
+    newest.set(path, gen);
     if (nodesRef.current[path]?.status !== "loaded") {
       setNodes((s) => ({ ...s, [path]: { status: "loading" } }));
     }
@@ -173,12 +172,13 @@ export function useFileTree(rootPath: string | null, options?: Options) {
         gitDecorations: gitDecorationsRef.current,
         workspace: currentWorkspaceEnv(),
       });
-      const newer = overtakenBy(latestFetchRef.current, path, read);
-      if (newer) return newer;
+      if (newest.get(path) !== gen) return;
+      newest.delete(path);
 
       const prev = nodesRef.current[path];
       if (prev?.status === "loaded" && sameDirListing(prev.entries, entries)) {
-        return NOTHING_TO_RENDER;
+        release(waitersRef.current, path, gen);
+        return;
       }
 
       const liveDirs = new Set(
@@ -200,10 +200,12 @@ export function useFileTree(rootPath: string | null, options?: Options) {
         }
       }
 
+      const node: ChildrenState = { status: "loaded", entries };
+      readOf.set(node, gen);
       setNodes((s) => {
         const next: TreeState = {};
         for (const [k, v] of Object.entries(s)) if (!dead.has(k)) next[k] = v;
-        next[path] = { status: "loaded", entries };
+        next[path] = node;
         return next;
       });
 
@@ -215,50 +217,47 @@ export function useFileTree(rootPath: string | null, options?: Options) {
           return changed ? n : c;
         });
         const toUnwatch: string[] = [];
-        for (const d of dead) if (watchedRef.current.delete(d)) toUnwatch.push(d);
+        for (const d of dead) {
+          // A removed folder's late answer must not bring it back.
+          newest.delete(d);
+          release(waitersRef.current, d, Number.POSITIVE_INFINITY);
+          if (watchedRef.current.delete(d)) toUnwatch.push(d);
+        }
         watchRemove(toUnwatch);
       }
-      return nextCommit(commitWaitersRef.current);
     } catch (e) {
-      const newer = overtakenBy(latestFetchRef.current, path, read);
-      if (newer) return newer;
-      setNodes((s) => ({
-        ...s,
-        [path]: { status: "error", message: String(e) },
-      }));
-      return nextCommit(commitWaitersRef.current);
+      if (newest.get(path) !== gen) return;
+      newest.delete(path);
+      const node: ChildrenState = { status: "error", message: String(e) };
+      readOf.set(node, gen);
+      setNodes((s) => ({ ...s, [path]: node }));
     }
   }, []);
 
   const fetchChildren = useCallback(
-    (path: string): Promise<Landed> => {
-      const latest = latestFetchRef.current;
-      const read: FolderRead = { settled: Promise.resolve(NOTHING_TO_RENDER) };
-      latest.set(path, read);
-      read.settled = readChildren(path, read);
-      // Stays registered until its listing renders, so an overtaken read
-      // finishing meanwhile waits for that render.
-      void read.settled
-        .then((landed) => landed.rendered)
-        .then(() => {
-          if (latest.get(path) === read) latest.delete(path);
-        });
-      return read.settled;
-    },
+    (path: string): Promise<void> => readChildren(path, ++readCountRef.current),
     [readChildren],
   );
 
-  // Settles once the folder's read shows in the rendered tree.
+  // Settles once this read, or a newer one, shows in the rendered tree.
   const refresh = useCallback(
-    (path: string): Promise<void> =>
-      fetchChildren(path).then((landed) => landed.rendered),
-    [fetchChildren],
+    (path: string): Promise<void> => {
+      const gen = ++readCountRef.current;
+      const shown = new Promise<void>((done) => {
+        const list = waitersRef.current.get(path) ?? [];
+        list.push({ gen, done });
+        waitersRef.current.set(path, list);
+      });
+      void readChildren(path, gen);
+      return shown;
+    },
+    [readChildren],
   );
 
   // Root change → restore the cached expansion for this root, re-scope watches,
   // and persist the outgoing root's expansion on the way out.
   useEffect(() => {
-    latestFetchRef.current.clear();
+    newestReadRef.current.clear();
     if (!rootPath) {
       setNodes({});
       setExpanded(new Set());
@@ -287,6 +286,10 @@ export function useFileTree(rootPath: string | null, options?: Options) {
 
     return () => {
       rememberExpansion(rootPath, expandedRef.current);
+      const waiters = waitersRef.current;
+      for (const path of [...waiters.keys()]) {
+        release(waiters, path, Number.POSITIVE_INFINITY);
+      }
       if (watchedRef.current.size > 0) {
         watchRemove([...watchedRef.current]);
         watchedRef.current.clear();

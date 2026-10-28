@@ -46,12 +46,20 @@ export function isTerminalCopyChord(
   return event.code === "KeyC" || event.key === "c" || event.key === "C";
 }
 
+const LATIN_LETTER = /^[a-z]$/i;
+
+// The physical V key counts only on a non-Latin layout, so Dvorak Cmd+K stays K.
+function isPasteKey(event: TerminalKeyEvent): boolean {
+  const { key } = event;
+  if (LATIN_LETTER.test(key)) return key === "v" || key === "V";
+  return event.code === "KeyV";
+}
+
 export function isTerminalPasteChord(
   event: TerminalKeyEvent,
   opts: PlatformOpts,
 ): boolean {
-  if (!isNativeChord(event, opts.isMac)) return false;
-  return event.code === "KeyV" || event.key === "v" || event.key === "V";
+  return isNativeChord(event, opts.isMac) && isPasteKey(event);
 }
 
 /** Modifier+Backspace deletion:

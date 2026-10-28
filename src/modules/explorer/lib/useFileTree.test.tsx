@@ -202,4 +202,42 @@ describe("useFileTree read promises", () => {
     });
     expect(pending).toHaveLength(2);
   });
+
+  it("settles a refresh whose listing did not change, with nothing to render", async () => {
+    const pending = reads();
+    const { result } = renderHook(() => useFileTree("/ws"));
+    await act(async () => pending[0].resolve([entry("a")]));
+
+    let settled = false;
+    act(() => {
+      void result.current.refresh("/ws").then(() => {
+        settled = true;
+      });
+    });
+    await act(async () => pending[1].resolve([entry("a")]));
+    await vi.waitFor(() => expect(settled).toBe(true));
+  });
+
+  it("settles expand of a folder its parent's re-read removed and drops its late answer", async () => {
+    const pending = reads();
+    const { result } = renderHook(() => useFileTree("/ws"));
+    await act(async () => pending[0].resolve([entry("docs", "dir")]));
+
+    let expanding: Promise<void> | undefined;
+    act(() => {
+      expanding = result.current.expand("/ws/docs");
+    });
+    act(() => {
+      void result.current.refresh("/ws");
+    });
+    const [docs, ws] = pending.slice(1);
+    expect([docs.path, ws.path]).toEqual(["/ws/docs", "/ws"]);
+    await act(async () => ws.resolve([]));
+    await act(async () => {
+      await expanding;
+    });
+    await act(async () => docs.resolve([entry("a.txt")]));
+    expect(result.current.nodes["/ws/docs"]).toBeUndefined();
+    expect(result.current.isExpanded("/ws/docs")).toBe(false);
+  });
 });

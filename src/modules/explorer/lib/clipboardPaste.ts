@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import type { TerminalKeyEvent } from "@/modules/terminal/lib/keymap";
+import {
+  isTerminalPasteChord,
+  type TerminalKeyEvent,
+} from "@/modules/terminal/lib/keymap";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import { dirname } from "./useFileTree";
 
@@ -31,14 +34,9 @@ export async function pasteExclusively(
   }
 }
 
-const LATIN_LETTER = /^[a-z]$/i;
-
 // Files come from the macOS pasteboard only, so other platforms get no shortcut.
-// The physical V key counts only on a non-Latin layout, so Dvorak Cmd+K stays K.
 export function isPasteShortcut(e: TerminalKeyEvent, isMac: boolean): boolean {
-  if (!isMac || !e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return false;
-  if (LATIN_LETTER.test(e.key)) return e.key === "v" || e.key === "V";
-  return e.code === "KeyV";
+  return isMac && isTerminalPasteChord(e, { isMac });
 }
 
 // Holding Cmd+V repeats keydown: only the first press pastes.
