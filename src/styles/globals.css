@@ -8,6 +8,13 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* A smooth endless loop keeps the compositor busy at display rate; a few
+ * ticks per second still read as "working". */
+@theme {
+  --animate-spin: spin 1s steps(12, end) infinite;
+  --animate-pulse: pulse 2s steps(4, end) infinite;
+}
+
 @theme inline {
     --font-heading: var(--font-sans);
     /* `--ui-font-sans` is an empty runtime override set from the UI-font
@@ -411,6 +418,15 @@ html *::-webkit-scrollbar {
   animation: terax-tab-in var(--dur-base) var(--ease-premium);
 }
 
+@keyframes terax-icon-in {
+  from {
+    opacity: 0;
+  }
+}
+.terax-icon-in {
+  animation: terax-icon-in var(--dur-fast) var(--ease-soft);
+}
+
 /* Text shimmer loop (replaces motion background-position animation). Driven by
  * --shimmer-duration / --shimmer-spread set inline per instance. */
 @keyframes terax-shimmer {
@@ -437,7 +453,15 @@ html *::-webkit-scrollbar {
       var(--color-muted-foreground),
       var(--color-muted-foreground)
     );
-  animation: terax-shimmer var(--shimmer-duration, 2s) linear infinite;
+  animation: terax-shimmer var(--shimmer-duration, 2s) steps(40, end) infinite;
+}
+
+/* Only an invisible window pauses: an unfocused one next to a browser is still
+ * watched. Paused animations resume where they stopped. */
+html[data-window-hidden] *,
+html[data-window-hidden] *::before,
+html[data-window-hidden] *::after {
+  animation-play-state: paused !important;
 }
 
 @media (prefers-reduced-motion: reduce) {

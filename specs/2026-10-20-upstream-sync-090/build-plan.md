@@ -765,7 +765,15 @@ Bau-Reihenfolge (PM): slice-00 → slice-01 → slice-02 → slice-03 → slice-
 
 **Wie gebaut**
 
-_(leer bis zum Merge)_
+- Merge: PR #85, Squash-Commit `25b970e` auf `main`.
+- Review: `/code-review high` 3 Runden (vereinbarte Obergrenze). Gefixt: Vollbild und Bild-in-Bild laufen weiter, Live-Fensterzustand beim Verlassen des Vollbilds, Kommentarregel.
+- Abweichungen vom Plan:
+  - `App.tsx` angefasst (nur tmux-cwd-Poll-Guard), wie im „Wie gebaut“ von slice-00 erlaubt.
+  - `MediaPreview` liest `useWindowHidden` nicht selbst; die Bindung in `mediaPlayback.ts` abonniert `subscribeWindowHidden` und liest den Zustand live.
+  - Vollbild und Bild-in-Bild heben Tab- und Fenster-Sperre auf (über Upstream hinaus, sonst unbenutzbar).
+  - Upstream `mediaPreview.ts` nicht übernommen, Klassifikation bleibt `binaryPreviewMode` (Q&A #16).
+  - `rendererPool` behält seinen eigenen Listener (Allowlist im Guard-Test).
+- Offen für QA und dokumentierte Grenzen: siehe `evidence/slice-02-media-pause.json` und PR #85.
 
 ### slice-03-animations: Animationen in Stufen und Pause bei unsichtbarem Fenster
 
