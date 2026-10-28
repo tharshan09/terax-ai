@@ -20,6 +20,7 @@ vi.mock("./lib/tmux", async (importOriginal) => {
   };
 });
 
+const LONG_NAME = `deploy-${"very-long-session-name-".repeat(12)}end`;
 const refresh = vi.fn(() => Promise.resolve());
 vi.mock("./lib/useTmuxSessions", () => ({
   useTmuxSessions: (select: (s: unknown) => unknown) =>
@@ -29,6 +30,13 @@ vi.mock("./lib/useTmuxSessions", () => ({
           name: "s1",
           windows: 1,
           attached: false,
+          lastAttached: null,
+          attachable: true,
+        },
+        {
+          name: LONG_NAME,
+          windows: 3,
+          attached: true,
           lastAttached: null,
           attachable: true,
         },
@@ -148,5 +156,54 @@ describe("TmuxSessionSwitcher, creating a session", () => {
       screen.getByText(/s1 already exists\. This attaches to it/),
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "Attach" })).toBeTruthy();
+  });
+});
+
+describe("TmuxSessionSwitcher, a very long session name", () => {
+  afterEach(cleanup);
+
+  // jsdom does no layout, so this pins the structure truncation depends on.
+  it("lets the name truncate inside the scroll area", () => {
+    setup();
+    const name = screen.getByText(LONG_NAME);
+    expect(name.className).toMatch(/\btruncate\b/);
+    expect(name.className).toMatch(/\bmin-w-0\b/);
+    expect(name.className).toMatch(/\bflex-1\b/);
+
+    // Radix puts an inline display:table wrapper between viewport and list;
+    // the override must hit exactly that wrapper.
+    const viewport = name.closest<HTMLElement>(
+      '[data-slot="scroll-area-viewport"]',
+    );
+    const wrapper = viewport?.firstElementChild as HTMLElement | null;
+    expect(wrapper?.tagName).toBe("DIV");
+    expect(wrapper?.contains(name)).toBe(true);
+    expect(wrapper?.style.display).toBe("table");
+    const root = name.closest<HTMLElement>('[data-slot="scroll-area"]');
+    expect(root?.className).toContain(
+      "[&_[data-slot=scroll-area-viewport]>div]:block!",
+    );
+
+    const row = name.closest<HTMLElement>('[data-slot="command-item"]');
+    expect(row?.getAttribute("title")).toContain(LONG_NAME);
+  });
+
+  it("keeps rename and kill rendered, enabled and working", () => {
+    setup();
+    const rename = screen.getByRole("button", {
+      name: `Rename ${LONG_NAME}`,
+    }) as HTMLButtonElement;
+    const kill = screen.getByRole("button", {
+      name: `Kill ${LONG_NAME}`,
+    }) as HTMLButtonElement;
+    expect(rename.disabled).toBe(false);
+    expect(kill.disabled).toBe(false);
+    expect(rename.parentElement?.className).toMatch(/\bshrink-0\b/);
+
+    fireEvent.click(kill);
+    expect(kill.textContent).toBe("Kill?");
+
+    fireEvent.click(rename);
+    expect(screen.getByDisplayValue(LONG_NAME)).toBeTruthy();
   });
 });
