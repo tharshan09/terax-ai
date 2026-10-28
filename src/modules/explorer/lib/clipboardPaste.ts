@@ -5,6 +5,7 @@ import {
   type TerminalKeyEvent,
 } from "@/modules/terminal/lib/keymap";
 import type { WorkspaceEnv } from "@/modules/workspace";
+import { basename, joinPath } from "./paths";
 
 // One paste at a time; a second request says so instead of silently doing
 // nothing. `release` frees the lock early, never one a later paste took.
@@ -72,10 +73,16 @@ type PasteOptions = {
   onCopySettled: () => void;
 };
 
+function missingItems(unresolved: number): string {
+  return unresolved === 1
+    ? "1 copied item no longer exists"
+    : `${unresolved} copied items no longer exist`;
+}
+
 function unresolvedHint(unresolved: number): string {
   return unresolved === 1
     ? "A copied item no longer exists"
-    : `${unresolved} copied items no longer exist`;
+    : missingItems(unresolved);
 }
 
 // A lost connection explains every failure after it, so it beats the first one.
@@ -112,9 +119,11 @@ export async function pasteClipboardFiles(
   // A collapsed folder is read when it opens, so it gets no extra re-read.
   const isOpen = () => destDir === scope.rootPath || isExpanded(destDir);
   let copyStarted = false;
+  let unresolved = 0;
   try {
-    const { paths: sources, unresolved } =
-      await invoke<ClipboardFiles>("fs_clipboard_paths");
+    const clipboard = await invoke<ClipboardFiles>("fs_clipboard_paths");
+    const sources = clipboard.paths;
+    unresolved = clipboard.unresolved;
     if (!isCurrent()) return [];
     if (sources.length === 0) {
       if (unresolved > 0)
@@ -140,10 +149,15 @@ export async function pasteClipboardFiles(
     else if (result.created.length > 0) await expand(destDir);
     if (!isCurrent()) return [];
     const first = result.created[0];
-    if (first && hasRow(first)) select(first);
+    const row = first && joinPath(destDir, basename(first));
+    if (row && hasRow(row)) select(row);
     return result.created;
   } catch (err) {
-    toast.error(`Paste failed: ${String(err)}`);
+    if (unresolved > 0)
+      toast.error("Paste failed", {
+        description: `${String(err)} · ${missingItems(unresolved)}`,
+      });
+    else toast.error(`Paste failed: ${String(err)}`);
     if (copyStarted && isCurrent() && isOpen()) await refresh(destDir);
     return [];
   }

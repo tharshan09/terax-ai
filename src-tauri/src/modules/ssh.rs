@@ -848,50 +848,45 @@ impl From<RemoteError> for String {
     }
 }
 
-/// Run one remote FS op and return its `data` value (or the remote error).
-///
-/// `timeout` bounds the whole ssh exec: `Some(_)` (the read commands pass
-/// [`REMOTE_FS_TIMEOUT`]) kills a wedged host after the budget; `None` (remote
-/// mutations) waits indefinitely as before, since killing mid-write is riskier
-/// than blocking.
-fn run_remote_json(
-    host: &str,
-    request: &serde_json::Value,
-    timeout: Option<std::time::Duration>,
-) -> Result<serde_json::Value, RemoteError> {
-    let parsed = remote_envelope(host, request, timeout)?;
-    if parsed.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
-        Ok(parsed
-            .get("data")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null))
-    } else {
-        Err(RemoteError::Failed(
-            parsed
-                .get("error")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("unknown remote error")
-                .to_string(),
-        ))
-    }
-}
-
 /// ssh reports its own failures (connect, auth, a dropped master) as 255; every
 /// other status is the remote command's.
 const SSH_OWN_FAILURE_EXIT: i32 = 255;
 /// The remote shell's "command not found": the helper never ran, so no item can.
 const COMMAND_NOT_FOUND_EXIT: i32 = 127;
 
+/// Last stderr line, where Python puts a start failure (SyntaxError, ImportError).
+fn stderr_excerpt(stderr: &str) -> String {
+    let line = stderr
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty());
+    line.unwrap_or_default().chars().take(200).collect()
+}
+
+fn with_stderr(message: String, stderr: &str) -> String {
+    match stderr_excerpt(stderr) {
+        excerpt if excerpt.is_empty() => message,
+        excerpt => format!("{message} (stderr: {excerpt})"),
+    }
+}
+
 fn exit_error(code: Option<i32>, stderr: &str) -> RemoteError {
     if let Some(message) = classify_ssh_error(stderr) {
         return RemoteError::Transport(message);
     }
+    let excerpt = stderr_excerpt(stderr);
     match code {
-        Some(COMMAND_NOT_FOUND_EXIT) => RemoteError::Transport(if stderr.is_empty() {
+        Some(COMMAND_NOT_FOUND_EXIT) if excerpt.is_empty() => RemoteError::Transport(
             "the remote helper could not start: command not found on the host (exit 127)"
-                .to_string()
+                .to_string(),
+        ),
+        // The helper answers every request with exit 0; below the signal range
+        // it never ran here, so every item would fail the same way.
+        Some(code @ 1..=COMMAND_NOT_FOUND_EXIT) => RemoteError::Transport(if excerpt.is_empty() {
+            format!("the remote helper could not start (exit {code})")
         } else {
-            format!("the remote helper could not start: {stderr}")
+            format!("the remote helper could not start: {excerpt}")
         }),
         Some(code) if code != SSH_OWN_FAILURE_EXIT => RemoteError::Failed(if stderr.is_empty() {
             format!("remote helper exited with status {code}")
@@ -906,7 +901,13 @@ fn exit_error(code: Option<i32>, stderr: &str) -> RemoteError {
     }
 }
 
-fn remote_envelope(
+/// Run one remote FS op and return its `data` value (or the remote error).
+///
+/// `timeout` bounds the whole ssh exec: `Some(_)` (the read commands pass
+/// [`REMOTE_FS_TIMEOUT`]) kills a wedged host after the budget; `None` (remote
+/// mutations) waits indefinitely as before, since killing mid-write is riskier
+/// than blocking.
+fn run_remote_json(
     host: &str,
     request: &serde_json::Value,
     timeout: Option<std::time::Duration>,
@@ -973,34 +974,61 @@ fn remote_envelope(
     let _ = writer.join();
     let (stdout_bytes, overflow) = out_reader.join().unwrap_or((Vec::new(), false));
     let (stderr_bytes, _) = err_reader.join().unwrap_or((Vec::new(), false));
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    read_envelope(status.code(), &stdout_bytes, overflow, stderr.trim())
+}
 
-    if !status.success() {
-        let err = String::from_utf8_lossy(&stderr_bytes);
-        return Err(exit_error(status.code(), err.trim()));
+/// Only a sentinel-prefixed object with a boolean `ok` is the helper's answer;
+/// its error fails the item, anything else is transport.
+fn read_envelope(
+    code: Option<i32>,
+    stdout: &[u8],
+    overflow: bool,
+    stderr: &str,
+) -> Result<serde_json::Value, RemoteError> {
+    use RemoteError::{Failed, Transport};
+    if code != Some(0) {
+        return Err(exit_error(code, stderr));
     }
     if overflow {
         return Err(Transport(
             "remote response exceeded the 16 MiB limit".to_string(),
         ));
     }
-    // The embedded helper always prefixes its envelope with the sentinel, after
-    // any login-shell banner/MOTD. Its absence means the helper never emitted a
-    // response (crash, killed, or banner-only) — surface that clearly instead of
-    // a misleading JSON parse error on the banner text.
-    let json_bytes = match find_subslice(&stdout_bytes, TERAX_SENTINEL) {
-        Some(i) => &stdout_bytes[i + TERAX_SENTINEL.len()..],
+    let no_answer = |message: String| Transport(with_stderr(message, stderr));
+    // The sentinel follows any login-shell banner/MOTD; without it the helper
+    // never answered, so the banner text is no JSON error to parse.
+    let json_bytes = match find_subslice(stdout, TERAX_SENTINEL) {
+        Some(i) => &stdout[i + TERAX_SENTINEL.len()..],
+        None if stdout.is_empty() => {
+            return Err(no_answer("no response from the remote helper".to_string()))
+        }
         None => {
-            if stdout_bytes.is_empty() {
-                return Err(Transport("no response from the remote helper".to_string()));
-            }
-            let preview = String::from_utf8_lossy(&stdout_bytes[..stdout_bytes.len().min(200)]);
-            return Err(Transport(format!(
+            let preview = String::from_utf8_lossy(&stdout[..stdout.len().min(200)]);
+            return Err(no_answer(format!(
                 "unexpected remote output (no response marker): {}",
                 preview.trim()
             )));
         }
     };
-    serde_json::from_slice(json_bytes).map_err(|e| Transport(format!("bad remote response: {e}")))
+    let envelope: serde_json::Value = serde_json::from_slice(json_bytes)
+        .map_err(|e| no_answer(format!("bad remote response: {e}")))?;
+    match envelope.get("ok").and_then(serde_json::Value::as_bool) {
+        Some(true) => Ok(envelope
+            .get("data")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)),
+        Some(false) => Err(Failed(
+            envelope
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown remote error")
+                .to_string(),
+        )),
+        None => Err(no_answer(
+            "bad remote response: no ok field in the reply".to_string(),
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1323,7 +1351,10 @@ fn plan_upload(
     // so every link is judged here, where the upload reads through it.
     let target = if meta.file_type().is_symlink() {
         copy::guard_read(registry, src)?;
-        std::fs::metadata(src)?
+        std::fs::metadata(src).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => broken_symlink(src, &rel),
+            _ => error,
+        })?
     } else {
         meta
     };
@@ -1342,6 +1373,20 @@ fn plan_upload(
         mode: file_mode(&target),
     });
     Ok(())
+}
+
+fn broken_symlink(src: &std::path::Path, rel: &str) -> std::io::Error {
+    let entry = match rel.strip_prefix('/') {
+        Some(rel) => rel.to_string(),
+        None => src.file_name().map_or_else(
+            || src.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        ),
+    };
+    std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!("broken symlink: {entry}"),
+    )
 }
 
 // A killed step only leaves a half-written item in the hidden staging.
@@ -1849,10 +1894,13 @@ Host !secret prod
         );
     }
 
-    /// Runs the embedded helper on the local python3, after an optional
-    /// `prelude` that can stub os calls. `None` when python3 is absent.
+    /// Exit code, stdout and stderr of the embedded helper on the local python3,
+    /// after an optional `prelude`. `None` when python3 is absent.
     #[cfg(unix)]
-    fn run_helper(prelude: &str, req: &serde_json::Value) -> Option<serde_json::Value> {
+    fn helper_output(
+        prelude: &str,
+        req: &serde_json::Value,
+    ) -> Option<(Option<i32>, Vec<u8>, String)> {
         use std::io::Write;
         use std::process::{Command, Stdio};
 
@@ -1869,18 +1917,28 @@ Host !secret prod
             .arg(format!("{prelude}{REMOTE_PYTHON}"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("spawn python3");
-        child
+        // A helper that cannot start may exit before it reads the request.
+        let _ = child
             .stdin
             .take()
             .unwrap()
-            .write_all(req.to_string().as_bytes())
-            .unwrap();
+            .write_all(req.to_string().as_bytes());
         let out = child.wait_with_output().expect("helper output");
-        assert!(out.status.success());
-        let i = find_subslice(&out.stdout, TERAX_SENTINEL).expect("sentinel present");
-        Some(serde_json::from_slice(&out.stdout[i + TERAX_SENTINEL.len()..]).expect("json envelope"))
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        Some((out.status.code(), out.stdout, stderr))
+    }
+
+    /// Runs the embedded helper on the local python3, after an optional
+    /// `prelude` that can stub os calls. `None` when python3 is absent.
+    #[cfg(unix)]
+    fn run_helper(prelude: &str, req: &serde_json::Value) -> Option<serde_json::Value> {
+        let (code, stdout, stderr) = helper_output(prelude, req)?;
+        assert_eq!(code, Some(0), "{stderr}");
+        let i = find_subslice(&stdout, TERAX_SENTINEL).expect("sentinel present");
+        Some(serde_json::from_slice(&stdout[i + TERAX_SENTINEL.len()..]).expect("json envelope"))
     }
 
     // Locks the FS-3 invariant: realpath must resolve a symlink to its real
@@ -2733,7 +2791,7 @@ Host !secret prod
     }
 
     #[test]
-    fn only_ssh_failures_count_as_transport() {
+    fn ssh_and_start_failures_count_as_transport() {
         let transport =
             |code, stderr| matches!(exit_error(code, stderr), RemoteError::Transport(_));
         assert!(transport(Some(255), ""));
@@ -2754,10 +2812,12 @@ Host !secret prod
             }
             other => panic!("137 must fail only the item: {other:?}"),
         }
-        assert!(matches!(
-            exit_error(Some(1), "Traceback: MemoryError"),
-            RemoteError::Failed(_)
-        ));
+        match exit_error(Some(1), "Traceback (most recent call last):\nMemoryError") {
+            RemoteError::Transport(message) => {
+                assert_eq!(message, "the remote helper could not start: MemoryError")
+            }
+            other => panic!("exit 1 without an answer must stop the batch: {other:?}"),
+        }
     }
 
     #[test]
@@ -2811,6 +2871,48 @@ Host !secret prod
             ]
         );
         assert_eq!(requests.iter().filter(|r| creates_staging(r)).count(), 2);
+    }
+
+    // An old interpreter fails before main(), so no item gets an answer.
+    #[cfg(unix)]
+    #[test]
+    fn a_helper_that_cannot_start_stops_the_batch_with_its_stderr() {
+        let stat = serde_json::json!({ "op": "stat", "path": "/terax/no/such/path" });
+        let Some(syntax) = helper_output("def (\n", &stat) else {
+            return;
+        };
+        let reply = |(code, stdout, stderr): &(Option<i32>, Vec<u8>, String)| {
+            read_envelope(*code, stdout, false, stderr)
+        };
+        let start_failure = |output| match reply(output) {
+            Err(RemoteError::Transport(message)) => message,
+            other => panic!("a start failure must stop the batch: {other:?}"),
+        };
+        let message = start_failure(&syntax);
+        assert!(
+            message.starts_with("the remote helper could not start: SyntaxError"),
+            "{message}"
+        );
+        let missing = helper_output("import terax_no_such_module\n", &stat).unwrap();
+        let import = start_failure(&missing);
+        assert!(import.contains("terax_no_such_module"), "{import}");
+
+        let answered = helper_output("", &stat).unwrap();
+        assert!(matches!(reply(&answered), Err(RemoteError::Failed(_))));
+        let unmarked = (Some(0), b"motd only".to_vec(), "ImportError: x".to_string());
+        assert_eq!(
+            start_failure(&unmarked),
+            "unexpected remote output (no response marker): motd only (stderr: ImportError: x)"
+        );
+        let shapeless = (Some(0), b"__TERAX_JSON__[1]".to_vec(), String::new());
+        assert!(matches!(reply(&shapeless), Err(RemoteError::Transport(_))));
+
+        let src = tempfile::tempdir().unwrap();
+        let sources = local_sources(src.path(), &["a.txt", "b.txt"]);
+        let (result, requests) = stub_copy(&sources, |_| reply(&syntax));
+        assert_eq!(result.unwrap_err(), message);
+        assert_eq!(requests.len(), 1);
+        assert!(creates_staging(&requests[0]));
     }
 
     #[test]
@@ -2973,6 +3075,32 @@ Host !secret prod
                 "folder symlinks cannot be copied to an SSH host"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_fails_its_item_naming_the_entry() {
+        let src = tempfile::tempdir().unwrap();
+        let pkg = src.path().join("pkg");
+        std::fs::create_dir_all(pkg.join("sub")).unwrap();
+        std::fs::write(pkg.join("a.txt"), b"a").unwrap();
+        std::os::unix::fs::symlink("gone.txt", pkg.join("sub/dead")).unwrap();
+        let lone = src.path().join("lone-link");
+        std::os::unix::fs::symlink("gone.txt", &lone).unwrap();
+        let [pkg, lone] = [pkg, lone].map(|p| p.to_string_lossy().into_owned());
+        let ok = local_sources(src.path(), &["ok.txt"]).remove(0);
+
+        let (result, requests) = stub_copy(&[pkg.clone(), lone.clone(), ok], healthy);
+        let result = result.unwrap();
+        assert_eq!(result.created, ["/remote/ok.txt"]);
+        assert_eq!(
+            failures(&result),
+            [
+                (pkg, "broken symlink: sub/dead".to_string()),
+                (lone, "broken symlink: lone-link".to_string()),
+            ]
+        );
+        assert_eq!(requests.iter().filter(|r| creates_staging(r)).count(), 1);
     }
 
     // End-to-end check of the real ssh + python helper path. No-op unless

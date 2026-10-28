@@ -9,7 +9,7 @@ import {
 import { toast } from "sonner";
 import { currentWorkspaceEnv } from "@/modules/workspace";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import { dirname } from "./paths";
+import { dirname, joinPath } from "./paths";
 import { listenFsChanged, watchAdd, watchRemove } from "./watch";
 
 export type DirEntry = {
@@ -52,10 +52,7 @@ export type PendingCreate = {
   kind: "file" | "dir";
 };
 
-export function joinPath(parent: string, name: string): string {
-  if (parent.endsWith("/")) return `${parent}${name}`;
-  return `${parent}/${name}`;
-}
+export { joinPath };
 
 const EXPANSION_CACHE_LIMIT = 8;
 const expansionCache = new Map<string, string[]>();

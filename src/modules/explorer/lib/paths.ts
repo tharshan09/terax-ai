@@ -1,8 +1,19 @@
+// The one rule for tree keys: a folder's key plus `/` plus the entry name.
+export function joinPath(parent: string, name: string): string {
+  if (parent.endsWith("/")) return `${parent}${name}`;
+  return `${parent}/${name}`;
+}
+
 // Parent of a tree key: keys join with `/`, so a backslash stays part of a name.
 export function dirname(path: string): string {
   const i = path.lastIndexOf("/");
   if (i <= 0) return "/";
   return path.slice(0, i);
+}
+
+// Name of a tree key, by the same `/` rule as dirname.
+export function basename(path: string): string {
+  return path.slice(path.lastIndexOf("/") + 1);
 }
 
 // The folder a row stands for when something lands on it: paste, drop or move.

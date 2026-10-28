@@ -8,6 +8,7 @@ import {
   pasteKeyAction,
   reportCopyFailures,
 } from "@/modules/explorer/lib/clipboardPaste";
+import { joinPath } from "@/modules/explorer/lib/paths";
 import type { WorkspaceEnv } from "@/modules/workspace";
 
 const { invoke, toast } = vi.hoisted(() => ({
@@ -283,6 +284,23 @@ describe("pasteClipboardFiles", () => {
     expect(opts.select).toHaveBeenCalledWith("/ws/a.txt");
   });
 
+  it("selects the row by its tree key, also under the root /", async () => {
+    invoke
+      .mockResolvedValueOnce(clip(["/tmp/a.txt"]))
+      .mockResolvedValueOnce({ created: ["/a.txt"], failed: [] });
+    const local = { kind: "local" } as WorkspaceEnv;
+    const opts = {
+      ...options(local),
+      scope: { rootPath: "/", workspace: local },
+    };
+    const rows = new Set([joinPath("/", "a.txt")]);
+    opts.hasRow.mockImplementation((path) => rows.has(path));
+    expect(await pasteClipboardFiles("/", opts)).toEqual(["/a.txt"]);
+    expect(opts.refresh).toHaveBeenCalledWith("/");
+    expect(opts.hasRow).toHaveBeenCalledWith("/a.txt");
+    expect(opts.select).toHaveBeenCalledWith("/a.txt");
+  });
+
   it("selects nothing when the new row is not in the tree", async () => {
     invoke
       .mockResolvedValueOnce(clip(["/tmp/.env"]))
@@ -386,6 +404,26 @@ describe("pasteClipboardFiles", () => {
       "Paste failed: copy at most 1024 items at a time",
     );
     expect(opts.refresh).toHaveBeenCalledWith("/ws");
+  });
+
+  it("names the clipboard items that no longer exist when the copy is refused", async () => {
+    invoke
+      .mockResolvedValueOnce(clip(["/x/a"], 1))
+      .mockRejectedValueOnce("copy at most 1024 items at a time");
+    expect(await pasteClipboardFiles("/ws", options())).toEqual([]);
+    expect(toast.error).toHaveBeenCalledTimes(1);
+    expect(toast.error).toHaveBeenCalledWith("Paste failed", {
+      description:
+        "copy at most 1024 items at a time · 1 copied item no longer exists",
+    });
+
+    invoke
+      .mockResolvedValueOnce(clip(["/x/a"], 2))
+      .mockRejectedValueOnce("destination is gone");
+    await pasteClipboardFiles("/ws", options());
+    expect(toast.error).toHaveBeenLastCalledWith("Paste failed", {
+      description: "destination is gone · 2 copied items no longer exist",
+    });
   });
 
   it("reports a clipboard failure without copying or re-reading", async () => {
