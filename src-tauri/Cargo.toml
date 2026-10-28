@@ -20,7 +20,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }
-tauri-plugin-opener = "2"
+tauri-plugin-opener = "~2.7"
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps the key order of JSON we read and write back.
 # Terax rewrites files it does not own (~/.claude/settings.json), and the
@@ -37,10 +37,10 @@ grep-searcher = "0.1"
 globset = "0.4"
 nucleo-matcher = "0.3"
 shared_child = "1"
-tauri-plugin-log = "2"
-tauri-plugin-os = "2"
-tauri-plugin-store = "2"
-tauri-plugin-notification = "2"
+tauri-plugin-log = "~2.10"
+tauri-plugin-os = "~2.4"
+tauri-plugin-store = "~2.5"
+tauri-plugin-notification = "~2.7"
 reqwest = { version = "0.12", default-features = false, features = [
 	"rustls-tls",
 	"stream",
@@ -82,8 +82,8 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-tauri-plugin-autostart = "2"
-tauri-plugin-window-state = "2"
+tauri-plugin-autostart = "~2.7"
+tauri-plugin-window-state = "~2.5"
 
 [profile.dev]
 incremental = true
