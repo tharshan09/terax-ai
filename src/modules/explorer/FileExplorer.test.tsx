@@ -77,16 +77,16 @@ function serve(handlers: Handlers = {}) {
 function rowsInView(): () => void {
   const original = Object.getOwnPropertyDescriptor(
     HTMLElement.prototype,
-    "offsetHeight",
+    "clientHeight",
   );
-  Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+  Object.defineProperty(HTMLElement.prototype, "clientHeight", {
     configurable: true,
     get: () => 600,
   });
   return () => {
     if (original)
-      Object.defineProperty(HTMLElement.prototype, "offsetHeight", original);
-    else Reflect.deleteProperty(HTMLElement.prototype, "offsetHeight");
+      Object.defineProperty(HTMLElement.prototype, "clientHeight", original);
+    else Reflect.deleteProperty(HTMLElement.prototype, "clientHeight");
   };
 }
 
@@ -495,21 +495,95 @@ describe("FileExplorer after a failed copy", () => {
 });
 
 describe("FileExplorer paste while typing a name", () => {
-  it("offers no context-menu Paste while a new name is being typed", async () => {
-    serve({
-      fs_clipboard_paths: () =>
-        Promise.resolve({ paths: ["/x/f.txt"], unresolved: 0 }),
-    });
+  let errors: unknown[] = [];
+  const onError = (e: ErrorEvent) => errors.push(e.error);
+  const advance = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
+  beforeEach(() => {
+    errors = [];
+    window.addEventListener("error", onError);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    window.removeEventListener("error", onError);
+  });
+
+  it.each([
+    {
+      name: "a new file",
+      begin: () => fireEvent.click(screen.getByTitle("New file")),
+    },
+    {
+      name: "a rename of f.txt",
+      begin: () => fireEvent.doubleClick(screen.getByText("f.txt")),
+    },
+  ])(
+    "offers no context-menu Paste on a right-click while typing $name",
+    async ({ begin }) => {
+      const restore = rowsInView();
+      try {
+        serve({
+          fs_read_dir: () =>
+            Promise.resolve([
+              {
+                name: "f.txt",
+                kind: "file",
+                size: 0,
+                mtime: 0,
+                gitignored: false,
+              },
+            ]),
+          fs_clipboard_paths: () =>
+            Promise.resolve({ paths: ["/x/f.txt"], unresolved: 0 }),
+        });
+        render(explorer("/typing"));
+        expect(await screen.findByText("f.txt")).toBeTruthy();
+        vi.useFakeTimers();
+        begin();
+        await advance(50);
+        fireEvent.contextMenu(treeArea());
+        const item = screen.getByText("Paste").closest("[role='menuitem']");
+        expect(item?.getAttribute("aria-disabled")).toBe("true");
+        // Past the input's 170 ms tick, whose refocus once fought the menu's focus trap.
+        await advance(200);
+        expect(errors).toEqual([]);
+        expect(document.activeElement?.closest("[role='menu']")).toBeTruthy();
+        if (item) fireEvent.click(item);
+        await advance(10);
+        expect(commands()).not.toContain("fs_clipboard_paths");
+        fireEvent.keyDown(document.activeElement ?? document.body, {
+          key: "Escape",
+        });
+        await advance(10);
+        expect(screen.queryByText("Paste")).toBeNull();
+        const input = screen.getByRole("textbox");
+        expect(document.activeElement).toBe(input);
+        fireEvent.keyDown(input, { key: "Escape" });
+        await advance(10);
+        expect(screen.queryByRole("textbox")).toBeNull();
+        expect(screen.getByText("f.txt")).toBeTruthy();
+        expect(errors).toEqual([]);
+      } finally {
+        restore();
+      }
+    },
+  );
+
+  it("keeps a typed new name when a right-click blurs the settled input", async () => {
+    serve({});
+    vi.useFakeTimers();
     render(explorer("/typing"));
-    await settle();
+    await advance(10);
     fireEvent.click(screen.getByTitle("New file"));
-    await settle();
+    await advance(200);
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "n.txt" },
+    });
     fireEvent.contextMenu(treeArea());
-    const paste = await screen.findByText("Paste");
-    const item = paste.closest("[role='menuitem']");
-    expect(item?.getAttribute("aria-disabled")).toBe("true");
-    if (item) fireEvent.click(item);
-    await settle();
-    expect(commands()).not.toContain("fs_clipboard_paths");
+    await advance(50);
+    expect(errors).toEqual([]);
+    expect(invoke).toHaveBeenCalledWith("fs_create_file", {
+      path: "/typing/n.txt",
+      workspace: LOCAL,
+    });
   });
 });

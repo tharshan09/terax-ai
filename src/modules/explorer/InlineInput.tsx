@@ -7,6 +7,22 @@ type Props = {
   onCancel: () => void;
 };
 
+// A blur inside our own focus() call means a focus trap (an open modal menu)
+// took focus straight back; refocusing again would recurse forever.
+function focusUnlessTrapped(
+  el: HTMLInputElement,
+  focusing: { current: boolean },
+): boolean {
+  if (focusing.current) return false;
+  focusing.current = true;
+  try {
+    el.focus({ preventScroll: true });
+  } finally {
+    focusing.current = false;
+  }
+  return el.ownerDocument.activeElement === el;
+}
+
 /**
  * Self-focusing single-line input for rename / create flows in the tree.
  * Enter commits, Escape cancels, blur commits (matches VSCode behavior —
@@ -22,6 +38,7 @@ export function InlineInput({
   const ref = useRef<HTMLInputElement>(null);
   const committedRef = useRef(false);
   const settledRef = useRef(false);
+  const focusingRef = useRef(false);
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -39,13 +56,15 @@ export function InlineInput({
     // the left edge. We're already rendering the input where it should be
     // visible — there is no scroll-into-view we need from focus().
     const focus = () => {
-      el.focus({ preventScroll: true });
+      if (!focusUnlessTrapped(el, focusingRef)) return;
       const dot = initial.lastIndexOf(".");
       if (dot > 0) el.setSelectionRange(0, dot);
       else el.select();
     };
     focus();
     const raf = requestAnimationFrame(() => focus());
+    // Known limit: a menu still open at this tick keeps focus, so the input
+    // settles unfocused until clicked.
     const timer = setTimeout(() => {
       focus();
       settledRef.current = true;
@@ -70,6 +89,7 @@ export function InlineInput({
   return (
     <input
       ref={ref}
+      data-inline-input=""
       value={value}
       placeholder={placeholder}
       onChange={(e) => setValue(e.target.value)}
@@ -84,7 +104,7 @@ export function InlineInput({
       }}
       onBlur={() => {
         if (!settledRef.current) {
-          ref.current?.focus({ preventScroll: true });
+          if (ref.current) focusUnlessTrapped(ref.current, focusingRef);
           return;
         }
         commit();
