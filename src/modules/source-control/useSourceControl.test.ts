@@ -121,6 +121,120 @@ describe("useSourceControl live option", () => {
   });
 });
 
+const trackedStatus: GitStatusSnapshot = { ...status, upstream: "origin/main" };
+const tracked: GitPanelSnapshot = {
+  repo: {
+    repoRoot: "/repo",
+    branch: "main",
+    upstream: "origin/main",
+    isDetached: false,
+  },
+  status: trackedStatus,
+};
+
+describe("useSourceControl context switches", () => {
+  it("refreshes a new context while a refresh of the old one is running", async () => {
+    const answer = new Map<string, (s: GitPanelSnapshot) => void>();
+    native.gitPanelSnapshot.mockImplementation(
+      (cwd: string) =>
+        new Promise<GitPanelSnapshot>((resolve) => answer.set(cwd, resolve)),
+    );
+    const { result, rerender } = renderHook(
+      ({ path }) => useSourceControl(path),
+      { initialProps: { path: "/repo/app" } },
+    );
+    await settle();
+    expect(native.gitPanelSnapshot).toHaveBeenCalledWith("/repo/app");
+
+    await act(async () => rerender({ path: "/other" }));
+    await settle(1000);
+    expect(native.gitPanelSnapshot).toHaveBeenCalledWith("/other");
+
+    const other: GitPanelSnapshot = {
+      repo: {
+        repoRoot: "/other",
+        branch: "main",
+        upstream: null,
+        isDetached: false,
+      },
+      status: { ...status, repoRoot: "/other" },
+    };
+    await act(async () => answer.get("/other")?.(other));
+    await act(async () => answer.get("/repo/app")?.(snapshot));
+    await settle();
+    expect(result.current.repo?.repoRoot).toBe("/other");
+  });
+
+  it("keeps a failed remote action's error while consumers come and go", async () => {
+    native.gitPanelSnapshot.mockResolvedValue(tracked);
+    native.gitPush.mockRejectedValue("push rejected");
+    const statusAnswers: Array<() => void> = [];
+    native.gitStatus.mockImplementation(
+      () =>
+        new Promise<GitStatusSnapshot>((resolve) =>
+          statusAnswers.push(() => resolve(trackedStatus)),
+        ),
+    );
+    const { result, rerender } = renderHook(
+      ({ path, live }) => useSourceControl(path, true, { live }),
+      { initialProps: { path: "/repo/app", live: true } },
+    );
+    await settle(1000);
+    act(() => {
+      void result.current.runRemoteAction("push");
+    });
+    await settle();
+    await act(async () => {
+      for (const answer of statusAnswers.splice(0)) answer();
+    });
+    await settle();
+    expect(result.current.lastRemoteError).toBe("push rejected");
+
+    await act(async () => rerender({ path: "/repo/app", live: false }));
+    await settle(1000);
+    await act(async () => rerender({ path: "/repo/app", live: true }));
+    await settle(3000);
+    expect(result.current.lastRemoteError).toBe("push rejected");
+
+    await act(async () => rerender({ path: "/elsewhere", live: true }));
+    await settle(1000);
+    expect(result.current.lastRemoteError).toBeNull();
+  });
+
+  it("keeps a running remote action through a clear and drops its stale refresh", async () => {
+    native.gitPanelSnapshot.mockResolvedValue(tracked);
+    let finishPush = () => {};
+    native.gitPush.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finishPush = resolve;
+        }),
+    );
+    const { result, rerender } = renderHook(
+      ({ path, live }) => useSourceControl(path, true, { live }),
+      { initialProps: { path: "/repo/app", live: true } },
+    );
+    await settle(1000);
+    act(() => {
+      void result.current.runRemoteAction("push");
+    });
+    await settle();
+    expect(result.current.busyAction).toBe("push");
+
+    await act(async () => rerender({ path: "/other", live: false }));
+    await settle(1000);
+    expect(result.current.hasRepo).toBe(false);
+    expect(result.current.busyAction).toBe("push");
+
+    const runs = gitStatusRuns();
+    await act(async () => finishPush());
+    await settle();
+    expect(gitStatusRuns()).toBe(runs);
+    expect(result.current.status).toBeNull();
+    expect(result.current.busyAction).toBeNull();
+  });
+});
+
 describe("planContextRefresh", () => {
   const loaded = {
     live: true,

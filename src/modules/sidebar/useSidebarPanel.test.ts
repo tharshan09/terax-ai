@@ -89,4 +89,45 @@ describe("useSidebarPanel collapsed state", () => {
     ]);
     expect(callsOf("fs_read_dir")).toHaveLength(1);
   });
+
+  it("re-reads only the root and expanded folders when the sidebar opens again", async () => {
+    const dir = (name: string) => ({
+      name,
+      kind: "dir",
+      size: 0,
+      mtime: 0,
+      gitignored: false,
+    });
+    invoke.mockImplementation((cmd: string, args: { path?: string }) =>
+      Promise.resolve(
+        cmd !== "fs_read_dir"
+          ? undefined
+          : args.path === "/reopen-ws"
+            ? [dir("open"), dir("closed")]
+            : [],
+      ),
+    );
+    const { result } = renderHook(() => {
+      const panel = useSidebarPanel(explorerRef);
+      const tree = useFileTree("/reopen-ws", {
+        visible: !panel.sidebarCollapsed,
+      });
+      return { panel, tree };
+    });
+    await act(async () => {});
+    await act(async () => result.current.tree.toggle("/reopen-ws/open"));
+    await act(async () => result.current.tree.toggle("/reopen-ws/closed"));
+    await act(async () => result.current.tree.toggle("/reopen-ws/closed"));
+    expect(result.current.tree.nodes["/reopen-ws/closed"]?.status).toBe(
+      "loaded",
+    );
+
+    await act(async () => result.current.panel.persistSidebarCollapsed(true));
+    invoke.mockClear();
+    await act(async () => result.current.panel.persistSidebarCollapsed(false));
+    const reread = callsOf("fs_read_dir").map(
+      (args) => (args as { path: string }).path,
+    );
+    expect(reread.sort()).toEqual(["/reopen-ws", "/reopen-ws/open"]);
+  });
 });

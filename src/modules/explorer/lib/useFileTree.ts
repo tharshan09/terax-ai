@@ -339,11 +339,8 @@ export function useFileTree(rootPath: string | null, options?: Options) {
     if (plan.arm) watches.arm();
     else watches.disarm();
     if (!plan.resync) return;
-    const targets = new Set(watches.paths());
-    for (const [path, state] of Object.entries(nodesRef.current)) {
-      if (state.status === "loaded") targets.add(path);
-    }
-    for (const path of targets) void fetchChildren(path);
+    // Root and expanded folders only; a collapsed cached one is read on expand.
+    for (const path of watches.paths()) void fetchChildren(path);
   }, [visible, watches, fetchChildren]);
 
   useEffect(() => {

@@ -4,7 +4,14 @@ import {
   type GitStatusSnapshot,
 } from "@/modules/ai/lib/native";
 import { useWorkspaceEnvStore, workspaceScopeKey } from "@/modules/workspace";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 const AUTO_FETCH_THROTTLE_MS = 5 * 60_000;
 const AUTO_FETCH_LRU_LIMIT = 16;
@@ -77,6 +84,12 @@ const EMPTY_STATE: SourceControlSummaryState = {
   localError: null,
   busyAction: null,
   lastRemoteError: null,
+};
+
+type InflightRefresh = {
+  contextKey: string;
+  mode: SourceControlRefreshMode;
+  promise: Promise<void>;
 };
 
 function normalizeError(error: unknown): string {
@@ -225,11 +238,17 @@ export function useSourceControl(
   });
   const stateRef = useRef(state);
   const requestIdRef = useRef(0);
-  const inflightRef = useRef<Promise<void> | null>(null);
-  const inflightModeRef = useRef<SourceControlRefreshMode>("never");
+  const inflightRef = useRef<InflightRefresh | null>(null);
   const autoFetchByRepoRef = useRef(new Map<string, number>());
   const enabledRef = useRef(enabled);
   const lastRefreshAtRef = useRef(0);
+  const contextKey = `${workspaceKey}\u0000${contextPath ?? ""}`;
+  const contextKeyRef = useRef(contextKey);
+  const errorContextRef = useRef<string | null>(null);
+
+  useLayoutEffect(() => {
+    contextKeyRef.current = contextKey;
+  }, [contextKey]);
 
   useEffect(() => {
     stateRef.current = state;
@@ -242,7 +261,6 @@ export function useSourceControl(
   useEffect(() => {
     requestIdRef.current++;
     inflightRef.current = null;
-    inflightModeRef.current = "never";
     autoFetchByRepoRef.current.clear();
     setState({
       repo: null,
@@ -269,7 +287,8 @@ export function useSourceControl(
 
   const doRefresh = useCallback(
     async (remoteMode: SourceControlRefreshMode): Promise<void> => {
-      if (!enabledRef.current) return;
+      // A refresh bound to a context already left never writes its status.
+      if (!enabledRef.current || contextKey !== contextKeyRef.current) return;
       const requestId = ++requestIdRef.current;
 
       if (!contextPath) {
@@ -402,31 +421,27 @@ export function useSourceControl(
         lastRefreshAtRef.current = Date.now();
       }
     },
-    [contextPath, workspaceKey],
+    [contextKey, contextPath],
   );
 
   const refresh = useCallback(
     async (options?: { remote?: SourceControlRefreshMode }) => {
       const remoteMode = options?.remote ?? "never";
       const inflight = inflightRef.current;
-      if (inflight) {
-        const cur = inflightModeRef.current;
+      if (inflight?.contextKey === contextKey) {
+        const cur = inflight.mode;
         const upgrade =
           (cur === "never" && remoteMode !== "never") ||
           (cur === "auto" && remoteMode === "always");
-        if (!upgrade) return inflight;
+        if (!upgrade) return inflight.promise;
       }
-      inflightModeRef.current = remoteMode;
       const run = doRefresh(remoteMode).finally(() => {
-        if (inflightRef.current === run) {
-          inflightRef.current = null;
-          inflightModeRef.current = "never";
-        }
+        if (inflightRef.current?.promise === run) inflightRef.current = null;
       });
-      inflightRef.current = run;
+      inflightRef.current = { contextKey, mode: remoteMode, promise: run };
       return run;
     },
-    [doRefresh],
+    [contextKey, doRefresh],
   );
 
   const runRemoteAction = useCallback(
@@ -477,10 +492,15 @@ export function useSourceControl(
   useEffect(() => {
     if (!enabled) {
       requestIdRef.current++;
+      errorContextRef.current = null;
       setState(EMPTY_STATE);
       return;
     }
-    setState((current) => ({ ...current, lastRemoteError: null }));
+    // A remote error belongs to its context; a consumer coming or going keeps it.
+    if (errorContextRef.current !== contextKey) {
+      errorContextRef.current = contextKey;
+      setState((current) => ({ ...current, lastRemoteError: null }));
+    }
     const run = () => {
       const current = stateRef.current;
       const plan = planContextRefresh({
@@ -493,11 +513,18 @@ export function useSourceControl(
       if (plan === "refresh") {
         void refresh({ remote: "never" });
       } else if (plan === "clear") {
-        // Drop a refresh still in flight for the context just left.
+        // Drop a refresh still in flight for the context just left; a running
+        // remote action keeps its busy state and error.
         requestIdRef.current++;
         inflightRef.current = null;
-        inflightModeRef.current = "never";
-        setState(EMPTY_STATE);
+        setState((s) => ({
+          ...s,
+          repo: null,
+          status: null,
+          hasRepo: false,
+          isLoading: false,
+          localError: null,
+        }));
       }
     };
     // A consumer with nothing to show must not wait for an idle slot, or it
@@ -522,7 +549,7 @@ export function useSourceControl(
         window.clearTimeout(idle as number);
       }
     };
-  }, [refresh, contextPath, enabled, workspaceKey, live]);
+  }, [refresh, contextKey, contextPath, enabled, live]);
 
   useEffect(() => {
     if (!enabled || !live) return;
