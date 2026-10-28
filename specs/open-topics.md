@@ -11,11 +11,13 @@ Als Nächstes steht Welle C an (Pane von Tab A nach Tab B).
 
 ## 0. Reihenfolge ab 27.10.2026 (vom User so bestätigt)
 
-1. **Upstream-Sync 0.8.7 bauen.** Discovery `specs/2026-10-20-upstream-sync-090/discovery.md`
+**Stand 29.10.2026:** Punkte 1 und 2 sind gemergt (PRs #84 bis #89 für den Sync, Version 0.8.7; PR #90 für B1/B2). Installation offen, nur mit Ja des Users. QA in der echten App und Folgepunkte siehe unten unter „Nach dem Sync“.
+
+1. **(erledigt) Upstream-Sync 0.8.7 bauen.** Discovery `specs/2026-10-20-upstream-sync-090/discovery.md`
    ist Ready, inklusive Nachtrag `bf7e03d` (BR-20). Ghostty bleibt geparkt (BR-14-Check
    vom 27.10.: alle vier Issues offen). Vor jedem Pull auf `main`: `git pull origin main`,
    weil `main` `upstream/main` trackt.
-2. **Fix-PR mit zwei Bugs**, ohne Discovery:
+2. **(erledigt, PR #90) Fix-PR mit zwei Bugs**, ohne Discovery:
    - **B1** tmux-Picker: Bei einem sehr langen Sessionnamen sind Umbenennen und Schließen
      nicht erreichbar. Die Zeile kürzt eigentlich ab; Verdacht ist die Scroll-Fläche um die
      Liste, die das Kürzen aushebelt und die Knöpfe aus dem Bild schiebt.
@@ -25,6 +27,8 @@ Als Nächstes steht Welle C an (Pane von Tab A nach Tab B).
      gefunden), das passt zur Diagnose. Beim Fix zusätzlich gegentesten: eine Indexdatei
      mit eingebetteten Bildern (HTML wäre die bekannte Grenze für relative Bilder in
      Remote-HTML, Markdown bräuchte denselben Ladeweg wie die Bildvorschau).
+   - **Nach dem Sync, QA in der echten App:** Einfügen aus dem Finder (lokal und SSH, macOS-Erlaubnisdialog gegen das 5-s-Budget), Media-Pause (Bild-in-Bild aus Hintergrund-Tab, Eintritt ins native Vollbild), Spinner-Stufen (8-zackiges Icon wirkt evtl. rückwärts), CPU vorher/nachher (BR-15), Watcher und git status bei eingeklappter Sidebar, About zeigt 0.8.7, Autostart-Schalter, Färbung in drei Editor-Themes, tmux-Picker mit langem Namen, Bilder über SSH (Foto, über 10 MB, unter `~/.ssh`).
+   - **Folgepunkte:** gleiches `display: table`-Problem wahrscheinlich in Command Palette und Mission Control; Markdown-Bilder laden auch lokal nicht; Video/Audio über SSH (Streaming); `katex` hat eine Low-Lücke (Fix ab 0.18.2); Reload/Save von Tabs ohne gespeicherten Workspace nutzen den aktiven Workspace; Icon-Set ohne Idle-Preload (Einblenden bei jedem Start).
 3. **Features, je eine eigene Discovery:**
    - **F1** Explorer: Suche findet nichts im übergeordneten Ordner, Wunsch nach oben zu
      navigieren. Kernfrage: Wann folgt der Explorer dem Terminal-Ordner, wann bleibt er
