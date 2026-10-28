@@ -35,7 +35,7 @@ import { type LanguageResult, resolveLanguage } from "./lib/languageResolver";
 import { useEditorThemeExt } from "./lib/useEditorThemeExt";
 import { useDocument } from "./lib/useDocument";
 import { initVimGlobals, vimHandlersExtension } from "./lib/vim";
-import { currentWorkspaceEnv, type WorkspaceEnv } from "@/modules/workspace";
+import type { WorkspaceEnv } from "@/modules/workspace";
 import { inlineCompletion } from "./lib/autocomplete/inlineExtension";
 import {
   binaryPreviewMode,
@@ -97,7 +97,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
       visible = true,
     } = props;
 
-    const { doc, onChange, save, reload } = useDocument({
+    const { doc, onChange, save, reload, readEnv } = useDocument({
       path,
       workspace,
       onDirtyChange,
@@ -380,8 +380,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
     // inert card instead of being served as text/html in the asset:// origin.
     // null = pending, true/false = verified result.
     const [pdfVerified, setPdfVerified] = useState<boolean | null>(null);
-    // The env useDocument read the file from.
-    const mediaEnv = workspace ?? currentWorkspaceEnv();
+    const imageOverSsh = readsImageRemotely(extOf(path), readEnv);
     useEffect(() => {
       const showsMedia =
         (doc.status === "binary" || doc.status === "toolarge") &&
@@ -397,7 +396,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
       // never flashes for an unverified pdf. trusted:true mirrors the editor
       // open (the user explicitly opened this file).
       // SSH images skip the local asset scope: their path names a remote file.
-      const authorize = readsImageRemotely(ext, mediaEnv)
+      const authorize = imageOverSsh
         ? Promise.resolve()
         : invoke("asset_allow", { path, directory: false }).catch(() => {});
       const verify: Promise<boolean> = isPdf
@@ -413,7 +412,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
       return () => {
         cancelled = true;
       };
-    }, [path, doc.status, workspace, mediaEnv]);
+    }, [path, doc.status, workspace, imageOverSsh]);
 
     if (doc.status === "loading") {
       return (
@@ -451,7 +450,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
             {mode === "image" && (
               <ImagePreview
                 path={path}
-                workspace={mediaEnv}
+                remote={imageOverSsh ? readEnv : null}
                 tooLarge={doc.status === "toolarge"}
               />
             )}

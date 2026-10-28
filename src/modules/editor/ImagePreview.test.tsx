@@ -14,7 +14,6 @@ import { ImagePreview } from "@/modules/editor/ImagePreview";
 import type { WorkspaceEnv } from "@/modules/workspace";
 
 const SSH: WorkspaceEnv = { kind: "ssh", host: "box" };
-const LOCAL: WorkspaceEnv = { kind: "local" };
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 let created: Blob[];
@@ -63,7 +62,7 @@ describe("ImagePreview over SSH", () => {
   it("reads the bytes over the remote helper and shows them from a blob URL", async () => {
     invoke.mockResolvedValue(PNG.buffer);
     const { container } = render(
-      <ImagePreview path="/home/u/photo.jpg" workspace={SSH} />,
+      <ImagePreview path="/home/u/photo.jpg" remote={SSH} />,
     );
     expect(imgSrc(container)).toBeNull();
     expect(container.textContent).toContain("Loading");
@@ -85,12 +84,12 @@ describe("ImagePreview over SSH", () => {
   it("revokes the object URL when the path or host changes and on unmount", async () => {
     invoke.mockResolvedValue(PNG.buffer);
     const { container, rerender, unmount } = render(
-      <ImagePreview path="/home/u/a.png" workspace={SSH} />,
+      <ImagePreview path="/home/u/a.png" remote={SSH} />,
     );
     await settle();
     expect(imgSrc(container)).toBe("blob:terax/1");
 
-    rerender(<ImagePreview path="/home/u/b.png" workspace={SSH} />);
+    rerender(<ImagePreview path="/home/u/b.png" remote={SSH} />);
     // The revoked URL is never left on screen while the next read runs.
     expect(imgSrc(container)).toBeNull();
     expect(revoked).toEqual(["blob:terax/1"]);
@@ -98,7 +97,7 @@ describe("ImagePreview over SSH", () => {
     expect(imgSrc(container)).toBe("blob:terax/2");
 
     const other: WorkspaceEnv = { kind: "ssh", host: "other" };
-    rerender(<ImagePreview path="/home/u/b.png" workspace={other} />);
+    rerender(<ImagePreview path="/home/u/b.png" remote={other} />);
     await settle();
     expect(invoke).toHaveBeenLastCalledWith("fs_read_remote_image", {
       path: "/home/u/b.png",
@@ -118,10 +117,10 @@ describe("ImagePreview over SSH", () => {
       .mockReturnValueOnce(first.promise)
       .mockReturnValueOnce(second.promise);
     const { container, rerender } = render(
-      <ImagePreview path="/home/u/a.png" workspace={SSH} />,
+      <ImagePreview path="/home/u/a.png" remote={SSH} />,
     );
     await settle();
-    rerender(<ImagePreview path="/home/u/b.png" workspace={SSH} />);
+    rerender(<ImagePreview path="/home/u/b.png" remote={SSH} />);
     await settle();
 
     first.resolve(PNG.buffer);
@@ -138,7 +137,7 @@ describe("ImagePreview over SSH", () => {
   it("shows why a refused read has no preview instead of a broken image", async () => {
     invoke.mockRejectedValue("sensitive-file: refusing to read");
     const { container } = render(
-      <ImagePreview path="/home/u/.env.png" workspace={SSH} />,
+      <ImagePreview path="/home/u/.env.png" remote={SSH} />,
     );
     await settle();
     expect(imgSrc(container)).toBeNull();
@@ -149,7 +148,7 @@ describe("ImagePreview over SSH", () => {
 
   it("refuses a file past the read cap without a round-trip", async () => {
     const { container } = render(
-      <ImagePreview path="/home/u/huge.png" workspace={SSH} tooLarge />,
+      <ImagePreview path="/home/u/huge.png" remote={SSH} tooLarge />,
     );
     await settle();
     expect(invoke).not.toHaveBeenCalled();
@@ -161,7 +160,7 @@ describe("ImagePreview over SSH", () => {
 describe("ImagePreview in a local workspace", () => {
   it("keeps the asset protocol URL and never reads over SSH", async () => {
     const { container } = render(
-      <ImagePreview path="/work/photo.png" workspace={LOCAL} tooLarge />,
+      <ImagePreview path="/work/photo.png" remote={null} tooLarge />,
     );
     await settle();
     expect(convertFileSrc).toHaveBeenCalledWith("/work/photo.png");

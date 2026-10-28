@@ -10,16 +10,12 @@ export type RemoteImage =
 
 const LOADING: RemoteImage = { status: "loading" };
 
-/**
- * Object URL for an image read over SSH, revoked when the path or host changes
- * and on unmount. `path === null` reads nothing.
- */
 export function useRemoteImage(
-  path: string | null,
-  workspace: WorkspaceEnv,
+  path: string,
+  workspace: WorkspaceEnv | null,
 ): RemoteImage {
   const key =
-    path === null ? null : `${workspaceScopeKey(workspace)}\n${path}`;
+    workspace === null ? null : `${workspaceScopeKey(workspace)}\n${path}`;
   const [loaded, setLoaded] = useState<{
     key: string;
     image: RemoteImage;
@@ -28,7 +24,7 @@ export function useRemoteImage(
   workspaceRef.current = workspace;
 
   useEffect(() => {
-    if (path === null || key === null) return;
+    if (key === null) return;
     const mime = remoteImageMime(extOf(path));
     if (!mime) {
       setLoaded({

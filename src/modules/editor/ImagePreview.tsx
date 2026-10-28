@@ -1,11 +1,10 @@
-import { extOf, readsImageRemotely } from "@/modules/editor/lib/binaryPreview";
 import { useRemoteImage } from "@/modules/editor/lib/useRemoteImage";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 type Props = {
   path: string;
-  workspace: WorkspaceEnv;
+  remote: WorkspaceEnv | null;
   /** Past the read cap: a remote image is refused without a round-trip. */
   tooLarge?: boolean;
 };
@@ -25,12 +24,11 @@ function Unavailable({ reason }: { reason: string }) {
   );
 }
 
-export function ImagePreview({ path, workspace, tooLarge = false }: Props) {
-  const remote = readsImageRemotely(extOf(path), workspace);
-  const image = useRemoteImage(remote && !tooLarge ? path : null, workspace);
+export function ImagePreview({ path, remote, tooLarge = false }: Props) {
+  const image = useRemoteImage(path, tooLarge ? null : remote);
 
   let src: string;
-  if (!remote) {
+  if (remote === null) {
     src = convertFileSrc(path);
   } else if (tooLarge) {
     return <Unavailable reason="File too large to preview over SSH" />;

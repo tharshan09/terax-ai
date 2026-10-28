@@ -26,6 +26,9 @@ type Options = {
 
 export function useDocument({ path, workspace, onDirtyChange }: Options) {
   const [doc, setDoc] = useState<DocumentState>({ status: "loading" });
+  const [readEnv, setReadEnv] = useState<WorkspaceEnv>(
+    () => workspace ?? currentWorkspaceEnv(),
+  );
   const [dirty, setDirty] = useState(false);
 
   const autoSave = usePreferencesStore((s) => s.editorAutoSave);
@@ -140,10 +143,10 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
   }, []);
 
   const readFromDisk = useCallback(
-    () =>
+    (env: WorkspaceEnv = workspace ?? currentWorkspaceEnv()) =>
       invoke<ReadResult>("fs_read_file", {
         path,
-        workspace: workspace ?? currentWorkspaceEnv(),
+        workspace: env,
         // Explicit user open in the editor: allow reading a file named by name,
         // even a secret. The terminal Cmd+Click path stays untrusted.
         trusted: true,
@@ -154,10 +157,12 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
   // Load on path change (or workspace change → new readFromDisk identity).
   useEffect(() => {
     let cancelled = false;
+    const env = workspace ?? currentWorkspaceEnv();
+    setReadEnv(env);
     setDoc({ status: "loading" });
     setDirty(false);
 
-    readFromDisk()
+    readFromDisk(env)
       .then((res) => {
         if (!cancelled) adoptRead(res);
       })
@@ -168,7 +173,7 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
     return () => {
       cancelled = true;
     };
-  }, [readFromDisk, adoptRead]);
+  }, [readFromDisk, adoptRead, workspace]);
 
   // Skipped while dirty: never clobber unsaved edits. Re-checked when the read
   // resolves, since typing can start while the read is in flight.
@@ -210,5 +215,5 @@ export function useDocument({ path, workspace, onDirtyChange }: Options) {
 
   useEffect(() => clearAutoSaveTimer, [path, clearAutoSaveTimer]);
 
-  return { doc, dirty, onChange, save, reload };
+  return { doc, dirty, onChange, save, reload, readEnv };
 }
