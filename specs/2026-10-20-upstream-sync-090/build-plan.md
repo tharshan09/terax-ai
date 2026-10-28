@@ -656,7 +656,18 @@ Bau-Reihenfolge (PM): slice-00 → slice-01 → slice-02 → slice-03 → slice-
 
 **Wie gebaut**
 
-_(leer bis zum Merge)_
+- Merge: PR #84, Squash-Commit `8934207` auf `main`.
+- Review: Pipeline-Reviewer ohne Befunde; `/code-review high` 27 Runden, ab Runde 20 keine High-Befunde mehr. Schluss nach Runde 27 auf Entscheidung des Users (zwei Punkte gefixt, Rest als bekannte Grenzen im PR).
+- Abweichungen vom Plan:
+  - AC19/OB-3: Transportfehler über SSH je Element, nach dem ersten Timeout bricht der Rest der Charge ab; Staging bleibt nach Timeout stehen, nach Failed/Killed wird es gelöscht. `CopyFailure.maybePlaced` meldet „may already be in place“, der Explorer liest den Zielordner dann trotzdem neu.
+  - Helper-Ops `mkstage`, `write_bytes` (Zeitbudget 30 s plus 1 s je 64 KiB), `publish` mit Kandidatenliste (64 Namen); Remote-Befehl endet mit `; exit`.
+  - `fs_watch`-Vertrag: Watcher nicht rekursiv, Staging-Filter nur für Eintrag und Elternordner, nie für den geöffneten Wurzelordner.
+  - `joinPath`-Form aus `lib/paths.ts`; gemeinsamer `rereadAfterCopy` für Einfügen und Drop.
+  - Pakete behalten ihre Endung (`Foo copy.app`); Sockets/FIFOs werden übersprungen.
+  - Pasteboard wird auf einem Blocking-Worker mit 5 s Budget gelesen.
+  - Lokale Ordner werden ohne Link-Folgen geöffnet (O_NOFOLLOW, dev/ino-Prüfung).
+  - Frühes Leeren des Edit-Zustands zurückgenommen, Upstream-Reihenfolge (Tie-Break).
+- Dokumentierte Restrisiken: siehe `evidence/slice-01-clipboard-paste.json` und PR #84.
 
 ### slice-02-media-pause: Fenster-Sichtbarkeit und Media-Pause
 
