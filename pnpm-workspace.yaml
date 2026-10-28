@@ -1,5 +1,7 @@
 minimumReleaseAge: 4320
 minimumReleaseAgeStrict: true
+catalog:
+  '@lezer/highlight': 1.2.5
 allowBuilds:
   esbuild: true
   msgpackr-extract: false
@@ -19,3 +21,5 @@ overrides:
   dompurify: ">=3.4.11 <4"
   react-grab: "0.1.47"
   react-doctor: "0.5.8"
+  # Parsers and themes must share Lezer's highlighting metadata identity.
+  '@lezer/highlight': 'catalog:'

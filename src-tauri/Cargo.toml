@@ -1,6 +1,6 @@
 [package]
 name = "terax"
-version = "0.8.6"
+version = "0.8.7"
 description = "Terax — an open-source AI-native terminal emulator"
 authors = ["crynta"]
 license = "Apache-2.0"
@@ -28,7 +28,7 @@ serde = { version = "1", features = ["derive"] }
 # every hook or statusline toggle.
 serde_json = { version = "1", features = ["preserve_order"] }
 portable-pty = "0.9"
-dirs = "6"
+dirs = "7"
 log = "0.4"
 ignore = "0.4"
 regex = "1"
