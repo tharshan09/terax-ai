@@ -5,11 +5,38 @@ import {
   mediaPlaybackAllowed,
 } from "./mediaPlayback";
 
-function mediaElement() {
-  return Object.assign(new EventTarget(), {
-    pause: vi.fn(),
-    play: vi.fn(),
-  });
+type WebkitPresentation = {
+  webkitDisplayingFullscreen?: boolean;
+  webkitPresentationMode?: string;
+};
+
+function mediaElement(presentation: WebkitPresentation = {}) {
+  return Object.assign(
+    new EventTarget(),
+    { pause: vi.fn(), play: vi.fn() },
+    presentation,
+  );
+}
+
+type Presented =
+  | "fullscreen"
+  | "picture-in-picture"
+  | "webkit fullscreen"
+  | "webkit picture-in-picture";
+
+function presentedMedia(kind: Presented) {
+  const media = mediaElement(
+    kind === "webkit fullscreen"
+      ? { webkitDisplayingFullscreen: true }
+      : kind === "webkit picture-in-picture"
+        ? { webkitPresentationMode: "picture-in-picture" }
+        : {},
+  );
+  const doc = {
+    fullscreenElement: kind === "fullscreen" ? media : null,
+    pictureInPictureElement: kind === "picture-in-picture" ? media : null,
+  };
+  return { media, doc };
 }
 
 function userPlays(media: EventTarget) {
@@ -94,5 +121,50 @@ describe("bindMediaPlayback", () => {
 
     userPlays(media);
     expect(media.pause).not.toHaveBeenCalled();
+  });
+
+  it.each<Presented>([
+    "fullscreen",
+    "picture-in-picture",
+    "webkit fullscreen",
+    "webkit picture-in-picture",
+  ])(
+    "keeps %s media playing while the window is hidden, not in a background tab",
+    (kind) => {
+      const { media, doc } = presentedMedia(kind);
+      const dispose = bindMediaPlayback(media, hiddenWindow, doc);
+      userPlays(media);
+      dispose();
+      expect(media.pause).not.toHaveBeenCalled();
+
+      const background = bindMediaPlayback(media, backgroundTab, doc);
+      expect(media.pause).toHaveBeenCalledOnce();
+      userPlays(media);
+      expect(media.pause).toHaveBeenCalledTimes(2);
+      background();
+    },
+  );
+
+  it("pauses again when the media leaves fullscreen or picture-in-picture while the window is still hidden", () => {
+    const video = mediaElement({ webkitPresentationMode: "fullscreen" });
+    const disposeVideo = bindMediaPlayback(video, hiddenWindow, undefined);
+    expect(video.pause).not.toHaveBeenCalled();
+    video.webkitPresentationMode = "inline";
+    video.dispatchEvent(new Event("webkitpresentationmodechanged"));
+    expect(video.pause).toHaveBeenCalledOnce();
+    userPlays(video);
+    expect(video.pause).toHaveBeenCalledTimes(2);
+    disposeVideo();
+
+    const pip = mediaElement();
+    const doc: { pictureInPictureElement: unknown } = {
+      pictureInPictureElement: pip,
+    };
+    const disposePip = bindMediaPlayback(pip, hiddenWindow, doc);
+    expect(pip.pause).not.toHaveBeenCalled();
+    doc.pictureInPictureElement = null;
+    pip.dispatchEvent(new Event("leavepictureinpicture"));
+    expect(pip.pause).toHaveBeenCalledOnce();
+    disposePip();
   });
 });
