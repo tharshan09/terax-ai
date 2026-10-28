@@ -1,0 +1,19 @@
+{
+  "feature": "upstream-sync-090",
+  "slice": "slice-02-media-pause",
+  "timestamp": "2026-10-28T00:00:00Z",
+  "status": "passed",
+  "implementation": {"pr": 85, "base": "968b34c", "head": "48136b2"},
+  "review": {"rounds": 3, "fixed": ["fullscreen/PiP paused by window-hidden", "PiP paused and hidden on tab switch", "stale window state on leaving fullscreen", "TERAX comment rule"], "stop": "3-round cap agreed with user"},
+  "deterministic_gate": {"lint": 0, "check_types": 0, "build": 0, "em_dash_added": 0},
+  "tests": {"vitest": {"files": 88, "passed": 790}, "cargo_test": "skipped, no src-tauri change"},
+  "open_notes": [
+    "QA: background-tab video in PiP may show its placeholder over the active tab",
+    "QA: entering native fullscreen may pause once if visibilitychange precedes the WebKit presentation flag",
+    "QA: AC 8 (minimised, covered, other Space, focus change) and AC 10 (pollers and persistence) in a dev instance",
+    "audio pauses while window hidden (upstream behaviour)",
+    "iframe media and PDF view in background layers not covered",
+    "rendererPool keeps its own visibilitychange listener (allowlisted)"
+  ],
+  "merge_commit": "25b970e"
+}
