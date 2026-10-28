@@ -120,7 +120,6 @@ export async function pasteClipboardFiles(
   if (!isCurrent()) return cancelled();
   // A collapsed folder is read when it opens, so it gets no extra re-read.
   const isOpen = () => destDir === scope.rootPath || isExpanded(destDir);
-  let copyStarted = false;
   let unresolved = 0;
   try {
     const clipboard = await invoke<ClipboardFiles>("fs_clipboard_paths");
@@ -133,7 +132,6 @@ export async function pasteClipboardFiles(
       else toast.message("No files on the clipboard");
       return [];
     }
-    copyStarted = true;
     let result: CopyResult;
     try {
       result = await invoke<CopyResult>("fs_copy", {
@@ -146,7 +144,8 @@ export async function pasteClipboardFiles(
       onCopySettled();
     }
     reportCopyFailures(result, unresolved);
-    if (!isCurrent()) return [];
+    // A lost connection keeps the last good listing; a re-read could not land.
+    if (!isCurrent() || result.aborted) return [];
     if (isOpen()) await refresh(destDir);
     else if (result.created.length > 0) await expand(destDir);
     if (!isCurrent()) return [];
@@ -159,7 +158,6 @@ export async function pasteClipboardFiles(
         description: `${String(err)} · ${missingItems(unresolved)}`,
       });
     else toast.error(`Paste failed: ${String(err)}`);
-    if (copyStarted && isCurrent() && isOpen()) await refresh(destDir);
     return [];
   }
 }

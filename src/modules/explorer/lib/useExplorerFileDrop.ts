@@ -80,12 +80,20 @@ export function useExplorerFileDrop(options: Options) {
             workspace: scope.workspace,
             renameOnConflict: true,
           })
-            .then(reportCopyFailures)
-            .catch((err) => toast.error(`Copy failed: ${String(err)}`))
-            .finally(() => {
-              // A collapsed folder is read when it opens, as after a paste.
+            .then((result) => {
+              reportCopyFailures(result);
+              return !result.aborted;
+            })
+            .catch((err) => {
+              toast.error(`Copy failed: ${String(err)}`);
+              return false;
+            })
+            .then((copied) => {
+              // A rejected or aborted copy keeps the last good listing, and a
+              // collapsed folder is read when it opens, as after a paste.
               const open = dir === scope.rootPath || isExpanded(dir);
-              if (!disposed && isCurrent(scope) && open) onCopied(dir);
+              if (copied && open && !disposed && isCurrent(scope))
+                onCopied(dir);
             });
         }
       })

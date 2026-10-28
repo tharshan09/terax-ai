@@ -435,7 +435,7 @@ describe("pasteClipboardFiles", () => {
     expect(opts.select).not.toHaveBeenCalled();
   });
 
-  it("re-reads the folder after a whole-call copy failure", async () => {
+  it("keeps the last listing after a whole-call copy failure", async () => {
     invoke
       .mockResolvedValueOnce(clip(["/x/a"]))
       .mockRejectedValueOnce("copy at most 1024 items at a time");
@@ -444,7 +444,30 @@ describe("pasteClipboardFiles", () => {
     expect(toast.error).toHaveBeenCalledWith(
       "Paste failed: copy at most 1024 items at a time",
     );
-    expect(opts.refresh).toHaveBeenCalledWith("/ws");
+    expect(opts.refresh).not.toHaveBeenCalled();
+    expect(opts.expand).not.toHaveBeenCalled();
+  });
+
+  it("keeps the last listing when the connection dropped during the copy", async () => {
+    const lost = "ssh: connection closed";
+    for (const open of [true, false]) {
+      invoke
+        .mockResolvedValueOnce(clip(["/x/a", "/x/b"]))
+        .mockResolvedValueOnce({
+          created: ["/ws/docs/a"],
+          failed: [{ source: "/x/b", message: lost }],
+          aborted: lost,
+        });
+      const opts = options();
+      opts.isExpanded.mockReturnValue(open);
+      await pasteClipboardFiles("/ws/docs", opts);
+      expect(toast.error).toHaveBeenLastCalledWith("Could not copy 1 item", {
+        description: lost,
+      });
+      expect(opts.refresh).not.toHaveBeenCalled();
+      expect(opts.expand).not.toHaveBeenCalled();
+      expect(opts.select).not.toHaveBeenCalled();
+    }
   });
 
   it("names the clipboard items that no longer exist when the copy is refused", async () => {
@@ -563,7 +586,7 @@ describe("pasteClipboardFiles", () => {
     failing.isExpanded.mockReturnValue(true);
     await pasteClipboardFiles("/ws/docs", failing);
     expect(failing.onCopySettled).toHaveBeenCalledTimes(1);
-    expect(failing.refresh).toHaveBeenCalledWith("/ws/docs");
+    expect(failing.refresh).not.toHaveBeenCalled();
 
     invoke.mockResolvedValueOnce(clip([]));
     const empty = options();

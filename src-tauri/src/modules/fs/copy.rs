@@ -245,9 +245,8 @@ pub(crate) fn guard_read(registry: &WorkspaceRegistry, path: &Path) -> io::Resul
     guard::enforce_read(registry, path, &path.to_string_lossy(), true).map_err(refused)
 }
 
-// The user picked the folder, so its links may lead outside the workspace, as
-// local copies keep them, but never to a secret. Only a link the user named
-// directly may be a secret by its own name, as an editor open may.
+// Links in a picked folder may lead outside the workspace, as local copies keep
+// them, but never to a secret; only a root the user named may be one by name.
 pub(crate) fn guard_link(path: &Path, named: bool) -> io::Result<()> {
     if named && guard::check_read_str(&path.to_string_lossy()).is_err() {
         return Ok(());

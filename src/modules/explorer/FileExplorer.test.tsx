@@ -419,3 +419,50 @@ describe("FileExplorer selection and drops", () => {
     }
   });
 });
+
+describe("FileExplorer after a failed copy", () => {
+  it("keeps the last listing when a paste or drop copy is rejected or aborted", async () => {
+    const lost = "ssh: connection closed";
+    let outcome: "rejected" | "aborted" | "normal" = "normal";
+    serve({
+      fs_clipboard_paths: () =>
+        Promise.resolve({ paths: ["/x/f.txt"], unresolved: 0 }),
+      fs_copy: () => {
+        if (outcome === "rejected") return Promise.reject(lost);
+        const aborted = outcome === "aborted";
+        return Promise.resolve({
+          created: [],
+          failed: aborted ? [{ source: "/x/f.txt", message: lost }] : [],
+          aborted: aborted ? lost : null,
+        });
+      },
+    });
+    render(explorer("/kept"));
+    await settle();
+    const paste = async () => {
+      fireEvent.contextMenu(treeArea());
+      fireEvent.click(await screen.findByText("Paste"));
+    };
+    const drop = () =>
+      act(async () =>
+        webview.drop?.({
+          payload: {
+            type: "drop",
+            paths: ["/x/f.txt"],
+            position: { x: 10, y: 10 },
+          },
+        }),
+      );
+    for (const transfer of [paste, drop]) {
+      for (const next of ["rejected", "aborted", "normal"] as const) {
+        outcome = next;
+        const before = invoke.mock.calls.length;
+        await transfer();
+        await vi.waitFor(() => expect(commands(before)).toContain("fs_copy"));
+        await settle();
+        await settle();
+        expect(reads(before)).toEqual(next === "normal" ? ["/kept"] : []);
+      }
+    }
+  });
+});
