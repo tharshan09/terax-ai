@@ -235,7 +235,9 @@ export function TmuxSessionSwitcher({
               placeholder="Filter or name a session..."
               autoFocus
             />
-            <ScrollArea className="max-h-[360px]">
+            {/* Radix wraps the list in an inline display:table div that grows to
+                the longest name, pushing the row buttons out of view. */}
+            <ScrollArea className="max-h-[360px] [&_[data-slot=scroll-area-viewport]>div]:block!">
               <CommandList className="max-h-none overflow-visible">
                 {error ? (
                   <StatusRow label={error} tone="error" />

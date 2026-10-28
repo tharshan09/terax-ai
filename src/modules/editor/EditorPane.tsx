@@ -42,6 +42,7 @@ import {
   extOf,
   isMediaPath,
 } from "./lib/binaryPreview";
+import { ImagePreview } from "@/modules/editor/ImagePreview";
 import { MediaPreview } from "./MediaPreview";
 
 initVimGlobals();
@@ -95,7 +96,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
       visible = true,
     } = props;
 
-    const { doc, onChange, save, reload } = useDocument({
+    const { doc, onChange, save, reload, readEnv } = useDocument({
       path,
       workspace,
       onDirtyChange,
@@ -378,11 +379,13 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
     // inert card instead of being served as text/html in the asset:// origin.
     // null = pending, true/false = verified result.
     const [pdfVerified, setPdfVerified] = useState<boolean | null>(null);
+    const overSsh = readEnv.kind === "ssh";
     useEffect(() => {
       const showsMedia =
         (doc.status === "binary" || doc.status === "toolarge") &&
         isMediaPath(path);
-      if (!showsMedia) return;
+      // An SSH path names a remote file; it must never reach the local asset scope.
+      if (!showsMedia || overSsh) return;
       const isPdf = extOf(path) === "pdf";
       let cancelled = false;
       setMediaReadyPath(null);
@@ -407,7 +410,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
       return () => {
         cancelled = true;
       };
-    }, [path, doc.status, workspace]);
+    }, [path, doc.status, workspace, overSsh]);
 
     if (doc.status === "loading") {
       return (
@@ -428,6 +431,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
         extOf(path),
         mediaReadyPath === path,
         pdfVerified,
+        overSsh,
       );
 
       if (mode === "loading") {
@@ -439,28 +443,26 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
       }
 
       if (mode !== "card") {
-        const assetUrl = convertFileSrc(path);
         return (
           <div className="flex h-full min-h-0 flex-col items-center justify-center bg-background p-4 overflow-auto">
             {mode === "image" && (
-              <img
-                src={assetUrl}
-                loading="lazy"
-                decoding="async"
-                className="max-w-full max-h-full object-contain rounded-md border border-border shadow-sm"
-                style={{
-                  backgroundImage: 'conic-gradient(#e5e7eb 0.25turn, #f3f4f6 0.25turn 0.5turn, #e5e7eb 0.5turn 0.75turn, #f3f4f6 0.75turn)',
-                  backgroundSize: '20px 20px',
-                }}
-                alt={path.split('/').pop()}
+              <ImagePreview
+                path={path}
+                remote={overSsh ? readEnv : null}
+                size={doc.size}
+                tooLarge={doc.status === "toolarge"}
               />
             )}
             {(mode === "video" || mode === "audio") && (
-              <MediaPreview kind={mode} src={assetUrl} tabVisible={visible} />
+              <MediaPreview
+                kind={mode}
+                src={convertFileSrc(path)}
+                tabVisible={visible}
+              />
             )}
             {mode === "pdf" && (
               <iframe
-                src={assetUrl}
+                src={convertFileSrc(path)}
                 className="w-full h-full border-none"
                 title={path.split('/').pop()}
                 // No sandbox attribute: in WKWebView any sandbox value (even an
@@ -487,16 +489,22 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
             {doc.status === "binary" ? "Binary file" : "File too large"}
           </div>
           <div className="text-xs text-muted-foreground">
-            {formatBytes(doc.size)} · preview not supported
+            {formatBytes(doc.size)} ·{" "}
+            {overSsh && isMediaPath(path)
+              ? "preview not available over SSH"
+              : "preview not supported"}
           </div>
-          <Button
-            variant="outline"
-            size="sm"
-            className="mt-2"
-            onClick={() => void openWithDefaultApp(path)}
-          >
-            Open with default app
-          </Button>
+          {/* Over SSH this would open a same-named local file. */}
+          {!overSsh && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-2"
+              onClick={() => void openWithDefaultApp(path)}
+            >
+              Open with default app
+            </Button>
+          )}
         </div>
       );
     }

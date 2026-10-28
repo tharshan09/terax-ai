@@ -10,9 +10,10 @@ use tauri::{Emitter, Manager};
 use tempfile::NamedTempFile;
 
 use crate::modules::fs::guard;
+use crate::modules::ssh::RemoteFileBytes;
 use crate::modules::workspace::{resolve_path, WorkspaceEnv, WorkspaceRegistry};
 
-const MAX_READ_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
+pub(crate) const MAX_READ_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
 const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -132,6 +133,61 @@ fn fs_read_file_impl(
         }),
         Err(_) => Ok(ReadResult::Binary { size }),
     }
+}
+
+/// Raster formats only: SVG is left out because a blob URL lives in the app
+/// origin, where a navigated SVG document could run script.
+const REMOTE_IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "ico"];
+
+fn is_remote_image_path(path: &str) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    name.rsplit_once('.')
+        .is_some_and(|(_, ext)| REMOTE_IMAGE_EXTS.contains(&ext.to_ascii_lowercase().as_str()))
+}
+
+// No trusted override: these bytes land in the webview.
+fn check_remote_image(path: &str) -> Result<(), String> {
+    if !is_remote_image_path(path) {
+        return Err(format!("not a previewable image: {path}"));
+    }
+    guard::check_read_str(path)
+}
+
+#[tauri::command]
+pub async fn fs_read_remote_image(
+    path: String,
+    workspace: Option<WorkspaceEnv>,
+    size: Option<u64>,
+) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || fs_read_remote_image_impl(&path, workspace, size))
+        .await
+        .map_err(|e| format!("fs_read_remote_image task failed: {e}"))?
+        .map(tauri::ipc::Response::new)
+}
+
+fn fs_read_remote_image_impl(
+    path: &str,
+    workspace: Option<WorkspaceEnv>,
+    size: Option<u64>,
+) -> Result<Vec<u8>, String> {
+    fs_read_remote_image_with(path, workspace, size, crate::modules::ssh::read_bytes)
+}
+
+fn fs_read_remote_image_with(
+    path: &str,
+    workspace: Option<WorkspaceEnv>,
+    size: Option<u64>,
+    read: impl FnOnce(&str, &str, u64, Option<u64>) -> Result<RemoteFileBytes, String>,
+) -> Result<Vec<u8>, String> {
+    let WorkspaceEnv::Ssh { host } = WorkspaceEnv::from_option(workspace) else {
+        return Err("remote image read needs an SSH workspace".to_string());
+    };
+    check_remote_image(path)?;
+    let file = read(&host, path, MAX_READ_BYTES, size)?;
+    // The host follows symlinks, so an innocent name may point at a key.
+    check_remote_image(&file.resolved_path)
+        .map_err(|e| format!("{path} resolves to a refused target: {e}"))?;
+    Ok(file.bytes)
 }
 
 /// A genuine PDF begins with these magic bytes.
@@ -649,6 +705,121 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"payload");
         // The pre-staged symlink target must not have been written through.
         assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
+    }
+
+    fn ssh_never_connects() -> Option<WorkspaceEnv> {
+        Some(WorkspaceEnv::Ssh {
+            host: "terax-test-never-connects".into(),
+        })
+    }
+
+    #[test]
+    fn remote_image_refuses_local_workspace() {
+        for ws in [None, Some(WorkspaceEnv::Local)] {
+            let err = fs_read_remote_image_impl("/tmp/photo.png", ws, None).unwrap_err();
+            assert!(err.contains("SSH workspace"), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn remote_image_refuses_non_raster_before_dispatch() {
+        for p in ["/home/u/notes.txt", "/home/u/logo.svg", "/home/u/png", "/home/u/.env"] {
+            let err = fs_read_remote_image_impl(p, ssh_never_connects(), None).unwrap_err();
+            assert!(err.contains("not a previewable image"), "{p}: {err}");
+        }
+    }
+
+    #[test]
+    fn remote_image_refuses_secret_paths_before_dispatch() {
+        for p in ["~/.ssh/avatar.png", ".aws/diagram.JPG", "/home/u/.env.png"] {
+            let err = fs_read_remote_image_impl(p, ssh_never_connects(), None).unwrap_err();
+            assert!(
+                err.contains("sensitive-file") || err.contains("protected directory"),
+                "{p}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_image_accepts_raster_extensions_case_insensitively() {
+        for p in ["a.png", "/x/b.JPG", "/x/c.jpeg", "d.gif", "e.WebP", "f.ico"] {
+            assert!(is_remote_image_path(p), "{p}");
+        }
+        for p in ["a.svg", "a.png.txt", "png", "/x.png/readme"] {
+            assert!(!is_remote_image_path(p), "{p}");
+        }
+    }
+
+    /// Stands in for the host: resolves symlinks like the helper's realpath.
+    fn read_like_the_host(
+        _: &str,
+        path: &str,
+        _: u64,
+        _: Option<u64>,
+    ) -> Result<RemoteFileBytes, String> {
+        Ok(RemoteFileBytes {
+            resolved_path: s(&std::fs::canonicalize(path).map_err(|e| e.to_string())?),
+            bytes: std::fs::read(path).map_err(|e| e.to_string())?,
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_image_refuses_a_symlink_to_a_secret_after_the_read() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".ssh")).unwrap();
+        std::fs::create_dir(dir.path().join("repo")).unwrap();
+        let key = dir.path().join(".ssh/id_ed25519");
+        std::fs::write(&key, b"PRIVATE KEY").unwrap();
+        let notes = dir.path().join("notes.txt");
+        std::fs::write(&notes, b"plain").unwrap();
+        for (name, target) in [("shot.png", &key), ("logo.png", &notes)] {
+            let link = dir.path().join("repo").join(name);
+            std::os::unix::fs::symlink(target, &link).unwrap();
+            let err =
+                fs_read_remote_image_with(&s(&link), ssh_never_connects(), None, read_like_the_host)
+                    .unwrap_err();
+            assert!(err.contains("refused target"), "{name}: {err}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_image_serves_a_symlink_to_another_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.png");
+        std::fs::write(&real, b"\x89PNG").unwrap();
+        let alias = dir.path().join("alias.png");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let bytes =
+            fs_read_remote_image_with(&s(&alias), ssh_never_connects(), None, read_like_the_host)
+                .unwrap();
+        assert_eq!(bytes, b"\x89PNG");
+    }
+
+    #[test]
+    fn remote_image_passes_the_known_size_and_the_cap_to_the_read() {
+        let mut seen = None;
+        let read = |_: &str, _: &str, limit: u64, size: Option<u64>| {
+            seen = Some((limit, size));
+            Ok(RemoteFileBytes {
+                resolved_path: "/home/u/icon.png".into(),
+                bytes: vec![1],
+            })
+        };
+        fs_read_remote_image_with("/home/u/icon.png", ssh_never_connects(), Some(4096), read)
+            .unwrap();
+        assert_eq!(seen, Some((MAX_READ_BYTES, Some(4096))));
+    }
+
+    #[test]
+    fn remote_image_never_reads_a_refused_name() {
+        let read = |_: &str, _: &str, _: u64, _: Option<u64>| -> Result<RemoteFileBytes, String> {
+            panic!("a refused name must not reach the host")
+        };
+        let err = fs_read_remote_image_with("~/.ssh/avatar.png", ssh_never_connects(), None, read)
+            .unwrap_err();
+        assert!(err.contains("protected directory"), "got: {err}");
     }
 
     // --- fs_is_pdf: the magic-byte gate for the sandbox-less PDF iframe ---

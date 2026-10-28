@@ -255,7 +255,7 @@ def _natcmp(a, b):
 
 
 _natkey = functools.cmp_to_key(_natcmp)
-from stat import S_IMODE, S_ISDIR
+from stat import S_IMODE, S_ISDIR, S_ISREG
 
 MAX_READ = 10 * 1024 * 1024
 MAX_ENTRIES = 100000
@@ -370,6 +370,27 @@ def read_file(req):
         return {"kind": "binary", "size": size}
     return {"kind": "text", "content": content, "size": size,
             "mtime": int(st.st_mtime * 1000)}
+
+
+def read_bytes(req):
+    # Reads the resolved target and reports it, so the caller can refuse a
+    # symlink to a secret; O_NONBLOCK keeps a FIFO swapped in from blocking.
+    path = os.path.expanduser(req["path"])
+    limit = min(int(req.get("limit", MAX_READ)), MAX_READ)
+    real = os.path.realpath(path)
+    if not S_ISREG(os.stat(real).st_mode):
+        raise ValueError("not a regular file: " + path)
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    with os.fdopen(os.open(real, flags), "rb") as f:
+        st = os.fstat(f.fileno())
+        if not S_ISREG(st.st_mode):
+            raise ValueError("not a regular file: " + path)
+        if st.st_size > limit:
+            raise ValueError("file too large to preview: %d bytes (limit %d)" % (st.st_size, limit))
+        data = f.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("file too large to preview (limit %d bytes)" % limit)
+    return {"real": real, "b64": base64.b64encode(data).decode("ascii")}
 
 
 def write_file(req):
@@ -697,7 +718,8 @@ def grep(req):
 
 
 OPS = {"read_dir": read_dir, "list_subdirs": list_subdirs, "stat": stat,
-       "exists": exists, "realpath": realpath, "read_file": read_file, "write_file": write_file,
+       "exists": exists, "realpath": realpath, "read_file": read_file,
+       "read_bytes": read_bytes, "write_file": write_file,
        "create_file": create_file, "create_dir": create_dir, "mkstage": mkstage,
        "rename": rename, "delete": delete, "publish": publish,
        "write_bytes": write_bytes, "search": search, "grep": grep}
@@ -742,6 +764,45 @@ fn b64encode(data: &[u8]) -> String {
         });
     }
     out
+}
+
+/// `None` on any malformed input, so a garbled reply never yields partial bytes.
+fn b64decode(s: &str) -> Option<Vec<u8>> {
+    fn sextet(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some(u32::from(c - b'A')),
+            b'a'..=b'z' => Some(u32::from(c - b'a') + 26),
+            b'0'..=b'9' => Some(u32::from(c - b'0') + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes = s.as_bytes();
+    if !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    let quads = bytes.len() / 4;
+    let mut out = Vec::with_capacity(quads * 3);
+    for (i, quad) in bytes.chunks(4).enumerate() {
+        let pad = quad.iter().rev().take_while(|&&c| c == b'=').count();
+        if pad > 2 || (pad > 0 && i + 1 != quads) {
+            return None;
+        }
+        let mut n = 0u32;
+        for &c in &quad[..4 - pad] {
+            n = (n << 6) | sextet(c)?;
+        }
+        n <<= 6 * pad as u32;
+        out.push((n >> 16) as u8);
+        if pad < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(n as u8);
+        }
+    }
+    Some(out)
 }
 
 /// Sentinel the remote helper prints right before its JSON envelope so we can
@@ -1131,12 +1192,12 @@ fn helper_answer(
             )));
         }
     };
-    let envelope: serde_json::Value = serde_json::from_slice(json_bytes)
+    let mut envelope: serde_json::Value = serde_json::from_slice(json_bytes)
         .map_err(|e| no_answer(format!("bad remote response: {e}")))?;
     match envelope.get("ok").and_then(serde_json::Value::as_bool) {
         Some(true) => Ok(envelope
-            .get("data")
-            .cloned()
+            .get_mut("data")
+            .map(serde_json::Value::take)
             .unwrap_or(serde_json::Value::Null)),
         Some(false) => Err(Failed(
             envelope
@@ -1302,6 +1363,49 @@ pub fn read_file(host: &str, path: &str) -> Result<crate::modules::fs::file::Rea
         Some(REMOTE_FS_TIMEOUT),
     )?;
     serde_json::from_value(data).map_err(|e| format!("bad read_file response: {e}"))
+}
+
+pub struct RemoteFileBytes {
+    pub resolved_path: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Refused host-side above `limit`, so an oversized file never crosses the wire.
+pub fn read_bytes(
+    host: &str,
+    path: &str,
+    limit: u64,
+    expected_size: Option<u64>,
+) -> Result<RemoteFileBytes, String> {
+    let data = run_remote_json(
+        host,
+        &serde_json::json!({ "op": "read_bytes", "path": path, "limit": limit }),
+        Some(read_bytes_timeout(limit, expected_size)),
+    )?;
+    parse_read_bytes(data)
+}
+
+// Budgeted like an upload of the reply's size: a known size keeps a stuck read
+// of a small icon short, an unknown one budgets for the cap.
+fn read_bytes_timeout(limit: u64, expected_size: Option<u64>) -> std::time::Duration {
+    let size = expected_size.map_or(limit, |size| size.min(limit));
+    write_timeout(usize::try_from(size).unwrap_or(usize::MAX)).max(REMOTE_FS_TIMEOUT)
+}
+
+fn parse_read_bytes(data: serde_json::Value) -> Result<RemoteFileBytes, String> {
+    #[derive(serde::Deserialize)]
+    struct Reply {
+        real: String,
+        b64: String,
+    }
+    let reply: Reply =
+        serde_json::from_value(data).map_err(|e| format!("bad read_bytes response: {e}"))?;
+    let bytes = b64decode(&reply.b64)
+        .ok_or_else(|| "bad read_bytes response: invalid base64".to_string())?;
+    Ok(RemoteFileBytes {
+        resolved_path: reply.real,
+        bytes,
+    })
 }
 
 /// Remote `fs_write_file` (atomic tmp+rename on the host).
@@ -1872,6 +1976,22 @@ Host !secret prod
     }
 
     #[test]
+    fn b64decode_inverts_b64encode_for_every_padding() {
+        let data: Vec<u8> = (0..=255u8).chain([0, 0xff, 0x89]).collect();
+        for len in 0..data.len() {
+            let chunk = &data[..len];
+            assert_eq!(b64decode(&b64encode(chunk)).as_deref(), Some(chunk), "len {len}");
+        }
+    }
+
+    #[test]
+    fn b64decode_rejects_malformed_input() {
+        for bad in ["Zg", "Zg=", "Z===", "Zg==Zg==", "Zm9v\n", "Zm-v", "Z=9v", "Zm9v===="] {
+            assert_eq!(b64decode(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
     fn extracts_json_after_sentinel_skipping_preamble() {
         let stdout = b"motd banner\nWelcome back\n__TERAX_JSON__{\"ok\":true,\"data\":1}";
         let idx = find_subslice(stdout, TERAX_SENTINEL).expect("sentinel present");
@@ -2073,6 +2193,167 @@ Host !secret prod
         let expected = std::fs::canonicalize(&target).unwrap();
         assert_eq!(resolved, expected.to_string_lossy());
         assert_ne!(resolved, link.to_string_lossy(), "must not echo the link back");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn embedded_helper_read_bytes_returns_exact_bytes_within_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("photo.png");
+        let bytes: Vec<u8> = [0x89, b'P', b'N', b'G', 0, 0xff, 0x0a].repeat(40);
+        std::fs::write(&png, &bytes).unwrap();
+        let path = png.to_string_lossy();
+
+        let req = serde_json::json!({ "op": "read_bytes", "path": path, "limit": bytes.len() });
+        let Some(env) = run_helper("", &req) else {
+            return;
+        };
+        assert_eq!(env["ok"], serde_json::Value::Bool(true), "{env}");
+        let file = parse_read_bytes(env["data"].clone()).expect("read_bytes reply");
+        assert_eq!(file.bytes, bytes);
+        let canonical = std::fs::canonicalize(&png).unwrap();
+        assert_eq!(file.resolved_path, canonical.to_string_lossy());
+
+        let over = serde_json::json!({ "op": "read_bytes", "path": path, "limit": bytes.len() - 1 });
+        let env = run_helper("", &over).unwrap();
+        assert_eq!(env["ok"], serde_json::Value::Bool(false));
+        assert!(env["error"].as_str().unwrap().contains("too large"), "{env}");
+
+        let folder = serde_json::json!({ "op": "read_bytes", "path": dir.path().to_string_lossy() });
+        let env = run_helper("", &folder).unwrap();
+        assert_eq!(env["ok"], serde_json::Value::Bool(false));
+        assert!(env["error"].as_str().unwrap().contains("not a regular file"), "{env}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn embedded_helper_read_bytes_reports_the_symlink_target() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".ssh")).unwrap();
+        std::fs::create_dir(dir.path().join("repo")).unwrap();
+        let key = dir.path().join(".ssh/id_ed25519");
+        std::fs::write(&key, b"PRIVATE KEY").unwrap();
+        let shot = dir.path().join("repo/shot.png");
+        std::os::unix::fs::symlink(&key, &shot).unwrap();
+
+        let req = serde_json::json!({ "op": "read_bytes", "path": shot.to_string_lossy() });
+        let Some(env) = run_helper("", &req) else {
+            return;
+        };
+        assert_eq!(env["ok"], serde_json::Value::Bool(true), "{env}");
+        let file = parse_read_bytes(env["data"].clone()).expect("read_bytes reply");
+        let target = std::fs::canonicalize(&key).unwrap();
+        assert_eq!(file.resolved_path, target.to_string_lossy());
+        assert_ne!(file.resolved_path, shot.to_string_lossy());
+        assert!(
+            crate::modules::fs::guard::check_read_str(&file.resolved_path).is_err(),
+            "the reported target must be what the deny-list sees: {}",
+            file.resolved_path
+        );
+    }
+
+    #[test]
+    fn read_bytes_reply_rejects_a_missing_target_or_bad_base64() {
+        let missing = serde_json::json!({ "b64": "Zm9v" });
+        assert!(parse_read_bytes(missing).is_err());
+        let garbled = serde_json::json!({ "real": "/x/a.png", "b64": "Zm9" });
+        assert!(parse_read_bytes(garbled).is_err());
+        let ok = parse_read_bytes(serde_json::json!({ "real": "/x/a.png", "b64": "Zm9v" }))
+            .unwrap();
+        assert_eq!((ok.resolved_path.as_str(), ok.bytes.as_slice()), ("/x/a.png", &b"foo"[..]));
+    }
+
+    #[test]
+    fn the_largest_read_bytes_reply_fits_under_the_stdout_cap() {
+        let cap = crate::modules::fs::file::MAX_READ_BYTES;
+        assert!(
+            REMOTE_PYTHON.contains(&format!("\nMAX_READ = {} * 1024 * 1024\n", cap >> 20)),
+            "the helper cap must match MAX_READ_BYTES"
+        );
+        // A PATH_MAX `real` escaped at 6 bytes per byte (\uXXXX), plus keys and sentinel.
+        let path = 4096 * 6;
+        let envelope = TERAX_SENTINEL.len() + r#"{"ok": true, "data": {"real": "", "b64": ""}}"#.len();
+        let b64 = b64encode(&vec![0; usize::try_from(cap).unwrap()]).len();
+        let reply = b64 + path + envelope;
+        assert!(reply < MAX_REMOTE_STDOUT, "{reply} >= {MAX_REMOTE_STDOUT}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn embedded_helper_read_bytes_clamps_the_limit_to_the_cap() {
+        let cap = usize::try_from(crate::modules::fs::file::MAX_READ_BYTES).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let over = dir.path().join("over.png");
+        std::fs::write(&over, vec![0u8; cap + 1]).unwrap();
+        let req = serde_json::json!({
+            "op": "read_bytes", "path": over.to_string_lossy(), "limit": cap * 2,
+        });
+        let Some(env) = run_helper("", &req) else {
+            return;
+        };
+        assert_eq!(env["ok"], serde_json::Value::Bool(false));
+        assert!(env["error"].as_str().unwrap().contains("too large"), "{env}");
+
+        let full = dir.path().join("full.png");
+        std::fs::write(&full, vec![0u8; cap]).unwrap();
+        let req = serde_json::json!({ "op": "read_bytes", "path": full.to_string_lossy() });
+        let (code, stdout, stderr) = helper_output("", &req).unwrap();
+        assert_eq!(code, Some(0), "{stderr}");
+        assert!(stdout.len() < MAX_REMOTE_STDOUT, "{} bytes", stdout.len());
+        let i = find_subslice(&stdout, TERAX_SENTINEL).expect("sentinel present");
+        let env: serde_json::Value = serde_json::from_slice(&stdout[i + TERAX_SENTINEL.len()..]).unwrap();
+        assert_eq!(env["ok"], serde_json::Value::Bool(true));
+        assert_eq!(parse_read_bytes(env["data"].clone()).unwrap().bytes.len(), cap);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn embedded_helper_read_bytes_refuses_a_swapped_in_fifo_without_blocking() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe.png");
+        let c_path = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        // The stat still sees a regular file, as if the FIFO replaced it after.
+        let prelude = [
+            "import os",
+            "_stat = os.stat",
+            "class _Regular: st_mode = 0o100600; st_size = 0",
+            "os.stat = lambda p, *a, **k: _Regular() if str(p).endswith('pipe.png') else _stat(p, *a, **k)",
+            "",
+        ]
+        .join("\n");
+        // A blocked open is released by a writer after 3 s, so a regression fails, not hangs.
+        let writer_path = fifo.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(writer_path);
+        });
+
+        let started = std::time::Instant::now();
+        let req = serde_json::json!({ "op": "read_bytes", "path": fifo.to_string_lossy() });
+        let Some(env) = run_helper(&prelude, &req) else {
+            return;
+        };
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "the open blocked");
+        assert_eq!(env["ok"], serde_json::Value::Bool(false));
+        assert!(env["error"].as_str().unwrap().contains("not a regular file"), "{env}");
+    }
+
+    #[test]
+    fn read_bytes_budgets_for_the_known_size_and_falls_back_to_the_cap() {
+        let cap = 10 * 1024 * 1024;
+        let secs = |size: Option<u64>| read_bytes_timeout(cap, size).as_secs();
+        assert_eq!(secs(Some(4096)), 31);
+        assert_eq!(secs(Some(1024 * 1024)), write_timeout(1024 * 1024).as_secs());
+        assert_eq!(secs(None), 30 + 214);
+        assert_eq!(secs(Some(cap * 4)), 30 + 214);
+        for size in [None, Some(0), Some(1), Some(cap)] {
+            assert!(read_bytes_timeout(cap, size) >= REMOTE_FS_TIMEOUT, "{size:?}");
+        }
     }
 
     #[test]
