@@ -1,0 +1,68 @@
+import { extOf, remoteImageMime } from "@/modules/editor/lib/binaryPreview";
+import { type WorkspaceEnv, workspaceScopeKey } from "@/modules/workspace";
+import { invoke } from "@tauri-apps/api/core";
+import { useEffect, useRef, useState } from "react";
+
+export type RemoteImage =
+  | { status: "loading" }
+  | { status: "ready"; url: string }
+  | { status: "failed"; message: string };
+
+const LOADING: RemoteImage = { status: "loading" };
+
+export function useRemoteImage(
+  path: string,
+  workspace: WorkspaceEnv | null,
+  size?: number,
+): RemoteImage {
+  const key =
+    workspace === null ? null : `${workspaceScopeKey(workspace)}\n${path}`;
+  const [loaded, setLoaded] = useState<{
+    key: string;
+    image: RemoteImage;
+  } | null>(null);
+  const workspaceRef = useRef(workspace);
+  workspaceRef.current = workspace;
+  const sizeRef = useRef(size);
+  sizeRef.current = size;
+
+  useEffect(() => {
+    if (key === null) return;
+    const mime = remoteImageMime(extOf(path));
+    if (!mime) {
+      setLoaded({
+        key,
+        image: { status: "failed", message: "Not supported over SSH" },
+      });
+      return;
+    }
+    let cancelled = false;
+    let url: string | null = null;
+    invoke<ArrayBuffer>("fs_read_remote_image", {
+      path,
+      workspace: workspaceRef.current,
+      // Scales the read timeout; the host still enforces the real size.
+      size: sizeRef.current,
+    })
+      .then((bytes) => {
+        if (cancelled) return;
+        url = URL.createObjectURL(
+          new Blob([new Uint8Array(bytes)], { type: mime }),
+        );
+        setLoaded({ key, image: { status: "ready", url } });
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setLoaded({ key, image: { status: "failed", message: String(e) } });
+        }
+      });
+    return () => {
+      cancelled = true;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [key, path]);
+
+  // An entry for the previous path must not render: its URL is being revoked.
+  if (key === null || loaded?.key !== key) return LOADING;
+  return loaded.image;
+}
