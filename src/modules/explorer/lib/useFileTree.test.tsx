@@ -153,7 +153,7 @@ describe("useFileTree read promises", () => {
     await vi.waitFor(() => expect(seen).toEqual(["a", "b"]));
   });
 
-  it("settles an overtaken read together with the newest one", async () => {
+  it("lands an overtaken read that answers first, then the newer one", async () => {
     const pending = reads();
     const { result } = renderHook(() => useFileTree("/ws"));
     await act(async () => pending[0].resolve([entry("a")]));
@@ -165,10 +165,37 @@ describe("useFileTree read promises", () => {
     });
     const [older, newer] = pending.slice(1);
     await act(async () => older.resolve([entry("old")]));
-    expect(settled).toEqual([]);
+    await vi.waitFor(() => expect(settled).toEqual(["older"]));
+    expect(listing(result.current, "/ws")).toEqual(["old"]);
     await act(async () => newer.resolve([entry("new")]));
-    await vi.waitFor(() => expect(settled.sort()).toEqual(["newer", "older"]));
+    await vi.waitFor(() => expect(settled).toEqual(["older", "newer"]));
     expect(listing(result.current, "/ws")).toEqual(["new"]);
+  });
+
+  it("keeps updating a folder whose every read is overtaken before it answers", async () => {
+    const pending = reads();
+    const { result } = renderHook(() => useFileTree("/busy"));
+    await act(async () => pending[0].resolve([entry("a")]));
+
+    const settled: number[] = [];
+    act(() => {
+      void result.current.refresh("/busy").then(() => settled.push(1));
+    });
+    for (let round = 1; round <= 3; round++) {
+      act(() => {
+        void result.current
+          .refresh("/busy")
+          .then(() => settled.push(round + 1));
+      });
+      const overtaken = pending[round];
+      await act(async () =>
+        overtaken.resolve([entry("a"), entry(`v${round}`)]),
+      );
+      expect(listing(result.current, "/busy")).toEqual(["a", `v${round}`]);
+      await vi.waitFor(() => expect(settled).toContain(round));
+    }
+    await act(async () => pending[4].resolve([entry("a"), entry("v4")]));
+    await vi.waitFor(() => expect(settled).toEqual([1, 2, 3, 4]));
   });
 
   it("settles a read finishing after the newer one landed only once that listing rendered", async () => {

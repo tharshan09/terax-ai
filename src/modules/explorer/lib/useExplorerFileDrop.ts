@@ -13,6 +13,7 @@ type Options = {
   scope: ExplorerScope | null;
   isCurrent: (scope: ExplorerScope) => boolean;
   isDir: (path: string) => boolean | undefined;
+  isExpanded: (dir: string) => boolean;
   onDrop: () => void;
   onCopied: (destDir: string) => void;
 };
@@ -56,7 +57,8 @@ export function useExplorerFileDrop(options: Options) {
     void getCurrentWebview()
       .onDragDropEvent((e) => {
         const p = e.payload;
-        const { scope, isCurrent, isDir, onDrop, onCopied } = optsRef.current;
+        const { scope, isCurrent, isDir, isExpanded, onDrop, onCopied } =
+          optsRef.current;
         const rootPath = scope?.rootPath ?? null;
         if (p.type === "enter" || p.type === "over") {
           setTargetDir(dirAt(p.position.x, p.position.y, rootPath, isDir));
@@ -81,7 +83,9 @@ export function useExplorerFileDrop(options: Options) {
             .then(reportCopyFailures)
             .catch((err) => toast.error(`Copy failed: ${String(err)}`))
             .finally(() => {
-              if (!disposed && isCurrent(scope)) onCopied(dir);
+              // A collapsed folder is read when it opens, as after a paste.
+              const open = dir === scope.rootPath || isExpanded(dir);
+              if (!disposed && isCurrent(scope) && open) onCopied(dir);
             });
         }
       })

@@ -1435,6 +1435,9 @@ fn plan_upload(
         });
         for entry in std::fs::read_dir(src)? {
             let entry = entry?;
+            if !copy::is_copyable(entry.file_type()?) {
+                continue;
+            }
             let name = entry.file_name();
             let name = name.to_str().ok_or_else(|| {
                 std::io::Error::new(
@@ -3538,6 +3541,35 @@ Host !secret prod
                 "folder symlinks cannot be copied to an SSH host"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sockets_and_fifos_inside_an_uploaded_folder_are_left_out() {
+        let src = tempfile::tempdir().unwrap();
+        let pkg = src.path().join("pkg");
+        std::fs::create_dir(&pkg).unwrap();
+        std::fs::write(pkg.join("a.txt"), b"a").unwrap();
+        let _socket = std::os::unix::net::UnixListener::bind(pkg.join("socket")).unwrap();
+        let fifo = std::ffi::CString::new(pkg.join("pipe").to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let reg = crate::modules::workspace::WorkspaceRegistry::default();
+
+        let mut plan = Vec::new();
+        plan_upload(&pkg, String::new(), 0, false, &mut plan, &reg).unwrap();
+        let rels: Vec<&str> = plan
+            .iter()
+            .map(|step| match step {
+                Upload::Dir { rel, .. } | Upload::File { rel, .. } => rel.as_str(),
+            })
+            .collect();
+        assert_eq!(rels, ["", "/a.txt"]);
+
+        let (result, _) = stub_copy(&[pkg.join("pipe").to_string_lossy().into_owned()], healthy);
+        assert_eq!(
+            result.unwrap().failed[0].message,
+            "only files, folders and symbolic links can be copied"
+        );
     }
 
     #[cfg(unix)]

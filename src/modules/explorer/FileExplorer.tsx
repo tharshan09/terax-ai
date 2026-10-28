@@ -204,6 +204,10 @@ export const FileExplorer = memo(
       gitDecorations,
     );
     const [selectedPath, setSelectedPath] = useState<string | null>(null);
+    const selectedPathRef = useRef(selectedPath);
+    useLayoutEffect(() => {
+      selectedPathRef.current = selectedPath;
+    }, [selectedPath]);
     const [isSearchOpen, setIsSearchOpen] = useState(false);
     const [isSearchActive, setIsSearchActive] = useState(false);
     const searchRef = useRef<ExplorerSearchHandle>(null);
@@ -212,7 +216,7 @@ export const FileExplorer = memo(
     const workspace = useWorkspaceEnvStore((s) => s.env);
     const pasteBusyRef = useRef(false);
     // The paste lock frees before the re-read, so only the newest paste or drop
-    // may still move the selection.
+    // may still move the selection, and only if the user has not moved it since.
     const transferGenRef = useRef(0);
     const scope = useMemo<ExplorerScope | null>(
       () => (rootPath ? { rootPath, workspace } : null),
@@ -297,6 +301,7 @@ export const FileExplorer = memo(
       scope,
       isCurrent,
       isDir: isDirAt,
+      isExpanded: tree.isExpanded,
       onDrop: () => {
         transferGenRef.current += 1;
       },
@@ -339,6 +344,7 @@ export const FileExplorer = memo(
       async (destDir: string, token: ExplorerScope) => {
         await pasteExclusively(pasteBusyRef, async (release) => {
           const gen = ++transferGenRef.current;
+          const selectedBefore = selectedPathRef.current;
           await pasteClipboardFiles(destDir, {
             scope: token,
             isCurrent,
@@ -348,6 +354,7 @@ export const FileExplorer = memo(
             hasRow: (path) => entryIndexRef.current.has(path),
             select: (path) => {
               if (transferGenRef.current !== gen) return;
+              if (selectedPathRef.current !== selectedBefore) return;
               setSelectedPath(path);
               requestAnimationFrame(() => scrollEntryIntoView(path));
             },

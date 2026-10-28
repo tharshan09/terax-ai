@@ -112,9 +112,12 @@ export function useFileTree(rootPath: string | null, options?: Options) {
   const expandedRef = useRef(expanded);
   const nodesRef = useRef(nodes);
   const watchedRef = useRef<Set<string>>(new Set());
-  // Reads of one folder can finish out of order: only the newest one lands.
+  // Reads of one folder can finish out of order: one lands unless a newer one
+  // already did, so a folder under steady change still updates.
   const readCountRef = useRef(0);
-  const newestReadRef = useRef(new Map<string, number>());
+  const landedRef = useRef(new Map<string, number>());
+  // Reads started before the last root change never land.
+  const floorRef = useRef(0);
   const waitersRef = useRef(new Map<string, Waiter[]>());
 
   useEffect(() => {
@@ -149,8 +152,13 @@ export function useFileTree(rootPath: string | null, options?: Options) {
   }, []);
 
   const readChildren = useCallback(async (path: string, gen: number) => {
-    const newest = newestReadRef.current;
-    newest.set(path, gen);
+    const landed = landedRef.current;
+    const lands = () => {
+      if (gen <= Math.max(floorRef.current, landed.get(path) ?? 0))
+        return false;
+      landed.set(path, gen);
+      return true;
+    };
     if (nodesRef.current[path]?.status !== "loaded") {
       setNodes((s) => ({ ...s, [path]: { status: "loading" } }));
     }
@@ -161,8 +169,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
         gitDecorations: gitDecorationsRef.current,
         workspace: currentWorkspaceEnv(),
       });
-      if (newest.get(path) !== gen) return;
-      newest.delete(path);
+      if (!lands()) return;
 
       const prev = nodesRef.current[path];
       if (prev?.status === "loaded" && sameDirListing(prev.entries, entries)) {
@@ -208,15 +215,14 @@ export function useFileTree(rootPath: string | null, options?: Options) {
         const toUnwatch: string[] = [];
         for (const d of dead) {
           // A removed folder's late answer must not bring it back.
-          newest.delete(d);
+          landed.set(d, readCountRef.current);
           release(waitersRef.current, d, Number.POSITIVE_INFINITY);
           if (watchedRef.current.delete(d)) toUnwatch.push(d);
         }
         watchRemove(toUnwatch);
       }
     } catch (e) {
-      if (newest.get(path) !== gen) return;
-      newest.delete(path);
+      if (!lands()) return;
       const node: ChildrenState = { status: "error", message: String(e) };
       readOf.set(node, gen);
       setNodes((s) => ({ ...s, [path]: node }));
@@ -246,7 +252,8 @@ export function useFileTree(rootPath: string | null, options?: Options) {
   // Root change → restore the cached expansion for this root, re-scope watches,
   // and persist the outgoing root's expansion on the way out.
   useEffect(() => {
-    newestReadRef.current.clear();
+    landedRef.current.clear();
+    floorRef.current = readCountRef.current;
     if (!rootPath) {
       setNodes({});
       setExpanded(new Set());

@@ -326,3 +326,96 @@ describe("FileExplorer paste shortcut", () => {
     await settle();
   });
 });
+
+describe("FileExplorer selection and drops", () => {
+  const entry = (name: string, kind: "dir" | "file" = "file") => ({
+    name,
+    kind,
+    size: 0,
+    mtime: 0,
+    gitignored: false,
+  });
+  const selected = (name: string) =>
+    screen.getByText(name).closest("button")?.classList.contains("bg-accent");
+
+  it("leaves a selection the user made while the paste re-read", async () => {
+    const restore = rowsInView();
+    try {
+      const held: ((entries: unknown) => void)[] = [];
+      let listed = false;
+      serve({
+        fs_read_dir: () => {
+          if (listed) return new Promise((resolve) => held.push(resolve));
+          listed = true;
+          return Promise.resolve([entry("x.txt"), entry("y.txt")]);
+        },
+        fs_clipboard_paths: () =>
+          Promise.resolve({ paths: ["/x/n.txt"], unresolved: 0 }),
+        fs_copy: () => Promise.resolve({ created: ["/us/n.txt"], failed: [] }),
+      });
+      render(explorer("/us"));
+      fireEvent.contextMenu(await screen.findByText("x.txt"));
+      fireEvent.click(await screen.findByText("Paste"));
+      await vi.waitFor(() => expect(held).toHaveLength(1));
+
+      fireEvent.click(screen.getByText("y.txt"));
+      expect(selected("y.txt")).toBe(true);
+      await act(async () =>
+        held[0]([entry("n.txt"), entry("x.txt"), entry("y.txt")]),
+      );
+      await settle();
+      expect(await screen.findByText("n.txt")).toBeTruthy();
+      expect(selected("n.txt")).toBe(false);
+      expect(selected("y.txt")).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it("re-reads a drop's folder only while that folder is open", async () => {
+    const restore = rowsInView();
+    try {
+      serve({
+        fs_read_dir: (args) =>
+          Promise.resolve(
+            (args as { path: string }).path === "/dr"
+              ? [entry("d", "dir")]
+              : [],
+          ),
+        fs_copy: () => Promise.resolve({ created: [], failed: [] }),
+      });
+      render(explorer("/dr"));
+      const row = await screen.findByText("d");
+      const folder = row.closest("button");
+      Object.defineProperty(document, "elementFromPoint", {
+        configurable: true,
+        value: () => folder,
+      });
+      const drop = () =>
+        act(async () =>
+          webview.drop?.({
+            payload: {
+              type: "drop",
+              paths: ["/x/f.txt"],
+              position: { x: 10, y: 10 },
+            },
+          }),
+        );
+
+      let before = invoke.mock.calls.length;
+      await drop();
+      await settle();
+      expect(commands(before)).toEqual(["fs_copy"]);
+
+      fireEvent.click(row);
+      await settle();
+      before = invoke.mock.calls.length;
+      await drop();
+      await settle();
+      expect(commands(before)).toEqual(["fs_copy", "fs_read_dir"]);
+      expect(reads(before)).toEqual(["/dr/d"]);
+    } finally {
+      restore();
+    }
+  });
+});

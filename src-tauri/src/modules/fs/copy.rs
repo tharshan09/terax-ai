@@ -161,7 +161,7 @@ pub(crate) fn check_source<'a>(
         .file_name()
         .ok_or_else(|| invalid("copy source has no filename"))?;
     let kind = std::fs::symlink_metadata(src)?.file_type();
-    if !(kind.is_file() || kind.is_dir() || kind.is_symlink()) {
+    if !is_copyable(kind) {
         return Err(unsupported_kind());
     }
     let canonical = if kind.is_symlink() {
@@ -285,6 +285,11 @@ pub(crate) fn check_depth(depth: usize) -> io::Result<()> {
         return Err(invalid("folder nesting exceeds the copy limit"));
     }
     Ok(())
+}
+
+// Like Finder, a socket or FIFO inside a folder is left out; as the item itself it fails.
+pub(crate) fn is_copyable(kind: std::fs::FileType) -> bool {
+    kind.is_file() || kind.is_dir() || kind.is_symlink()
 }
 
 pub(crate) fn unsupported_kind() -> io::Error {
@@ -857,6 +862,9 @@ fn copy_dir(
     keep_dir_mode(src, dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
+        if !is_copyable(entry.file_type()?) {
+            continue;
+        }
         guard_entry(registry, &entry, linked)?;
         let target = dst.join(entry.file_name());
         copy_recursive(
@@ -960,12 +968,13 @@ fn copy_symlink(_src: &Path, _dst: &Path) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
-/// Finder naming: ` copy`, ` copy n` before a file's last extension (folders and
-/// dotfiles take it at the end); a name already ending in ` copy n` counts on.
+/// Finder naming: ` copy`, ` copy n` before the last extension of a file or package
+/// (other folders and dotfiles take it at the end); ` copy n` already there counts on.
 fn copy_name(name: &OsStr, n: usize, is_dir: bool) -> OsString {
     let path = Path::new(name);
-    let (stem, ext) = match (is_dir, path.file_stem(), path.extension()) {
-        (false, Some(stem), Some(ext)) => (stem, Some(ext)),
+    let file_style = !is_dir || is_package(path);
+    let (stem, ext) = match (file_style, path.file_stem(), path.extension()) {
+        (true, Some(stem), Some(ext)) => (stem, Some(ext)),
         _ => (name, None),
     };
     let (base, count) = match stem.to_str().and_then(copy_count) {
@@ -982,6 +991,37 @@ fn copy_name(name: &OsStr, n: usize, is_dir: bool) -> OsString {
         out.push(ext);
     }
     out
+}
+
+// Finder treats these folders as documents, so a copy keeps the extension last.
+const PACKAGE_EXTENSIONS: [&str; 19] = [
+    "app",
+    "bundle",
+    "framework",
+    "plugin",
+    "kext",
+    "rtfd",
+    "pages",
+    "numbers",
+    "key",
+    "xcodeproj",
+    "xcworkspace",
+    "playground",
+    "photoslibrary",
+    "prefPane",
+    "appex",
+    "qlgenerator",
+    "mdimporter",
+    "saver",
+    "wdgt",
+];
+
+fn is_package(path: &Path) -> bool {
+    path.extension().and_then(OsStr::to_str).is_some_and(|ext| {
+        PACKAGE_EXTENSIONS
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case(ext))
+    })
 }
 
 /// `a copy` is copy 1 of `a`, `a copy 7` copy 7; a count never starts with 0
@@ -1070,6 +1110,24 @@ mod tests {
         assert_eq!(name("report", 1, false), "report copy");
         assert_eq!(name("v1.2", 1, true), "v1.2 copy");
         assert_eq!(name("a.txt", 10_000, false), "a copy 10000.txt");
+    }
+
+    #[test]
+    fn packages_keep_their_extension_like_files_but_other_folders_do_not() {
+        let name = |n: &str, i, dir| copy_name(OsStr::new(n), i, dir);
+        assert_eq!(name("Foo.app", 1, true), "Foo copy.app");
+        assert_eq!(name("Foo.app", 2, true), "Foo copy 2.app");
+        assert_eq!(name("Foo copy.app", 1, true), "Foo copy 2.app");
+        assert_eq!(name("Notes.RTFD", 1, true), "Notes copy.RTFD");
+        assert_eq!(name("Pane.prefpane", 1, true), "Pane copy.prefpane");
+        assert_eq!(name("Proj.xcodeproj", 3, true), "Proj copy 3.xcodeproj");
+        assert_eq!(name("conf.d", 1, true), "conf.d copy");
+        assert_eq!(name("v1.2", 1, true), "v1.2 copy");
+        assert_eq!(name(".app", 1, true), ".app copy");
+        let first: Vec<OsString> = copy_candidates(OsStr::new("Foo.app"), true)
+            .take(3)
+            .collect();
+        assert_eq!(first, ["Foo.app", "Foo copy.app", "Foo copy 2.app"]);
     }
 
     #[test]
@@ -1545,16 +1603,20 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn unsupported_nested_entries_leave_no_partial_directory() {
+    fn sockets_and_fifos_inside_a_folder_are_left_out() {
         let src = tempfile::tempdir().unwrap();
         let dest = tempfile::tempdir().unwrap();
-        std::fs::create_dir(src.path().join("d")).unwrap();
+        std::fs::create_dir_all(src.path().join("d/sub")).unwrap();
         std::fs::write(src.path().join("d/a"), b"a").unwrap();
         let _socket = std::os::unix::net::UnixListener::bind(src.path().join("d/socket")).unwrap();
+        let fifo = src.path().join("d/sub/pipe");
+        let c = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
         let result = copy(&[src.path().join("d")], dest.path(), true);
-        assert!(result.created.is_empty());
-        assert_eq!(result.failed.len(), 1);
-        assert!(names(dest.path()).is_empty());
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        assert_eq!(result.created, [s(dest.path().join("d"))]);
+        assert_eq!(names(&dest.path().join("d")), ["a", "sub"]);
+        assert!(names(&dest.path().join("d/sub")).is_empty());
     }
 
     #[cfg(unix)]
