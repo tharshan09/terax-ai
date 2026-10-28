@@ -103,8 +103,8 @@ type Options = {
   onPathRenamed?: (from: string, to: string) => void;
   onPathDeleted?: (path: string) => void;
   /**
-   * Default true. While false the tree holds no native watchers and ignores
-   * `fs:changed`; showing it re-registers them and reloads every loaded folder.
+   * Default true. Hidden, the tree holds no native watchers and ignores
+   * `fs:changed`; showing it re-reads the root and the expanded folders.
    */
   visible?: boolean;
 };

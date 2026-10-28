@@ -133,6 +133,31 @@ const tracked: GitPanelSnapshot = {
 };
 
 describe("useSourceControl context switches", () => {
+  it("drops a snapshot that lands after nobody watches and the context left its repo", async () => {
+    let land = (_s: GitPanelSnapshot) => {};
+    native.gitPanelSnapshot.mockImplementation(
+      () =>
+        new Promise<GitPanelSnapshot>((resolve) => {
+          land = resolve;
+        }),
+    );
+    const { result, rerender } = renderHook(
+      ({ path, live }) => useSourceControl(path, true, { live }),
+      { initialProps: { path: "/repo/app", live: true } },
+    );
+    await settle();
+    expect(native.gitPanelSnapshot).toHaveBeenCalledWith("/repo/app");
+
+    await act(async () => rerender({ path: "/other", live: false }));
+    await settle(1000);
+    await act(async () => land(snapshot));
+    await settle();
+    expect(result.current.repo).toBeNull();
+    expect(result.current.hasRepo).toBe(false);
+    expect(result.current.isLoading).toBe(false);
+    expect(gitStatusRuns()).toBe(1);
+  });
+
   it("refreshes a new context while a refresh of the old one is running", async () => {
     const answer = new Map<string, (s: GitPanelSnapshot) => void>();
     native.gitPanelSnapshot.mockImplementation(

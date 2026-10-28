@@ -290,6 +290,14 @@ export function useSourceControl(
       // A refresh bound to a context already left never writes its status.
       if (!enabledRef.current || contextKey !== contextKeyRef.current) return;
       const requestId = ++requestIdRef.current;
+      // A newer request owns the state; a context left meanwhile only stops
+      // the loading state, so its snapshot never lands under another path.
+      const isCurrent = () => {
+        if (requestId !== requestIdRef.current) return false;
+        if (contextKey === contextKeyRef.current) return true;
+        setState((s) => (s.isLoading ? { ...s, isLoading: false } : s));
+        return false;
+      };
 
       if (!contextPath) {
         setState({
@@ -320,7 +328,7 @@ export function useSourceControl(
           try {
             repo = stateRef.current.repo ?? null;
             status = await native.gitStatus(reusableRoot);
-            if (requestId !== requestIdRef.current) return;
+            if (!isCurrent()) return;
             if (!repo || repo.repoRoot !== reusableRoot) {
               repo = {
                 repoRoot: reusableRoot,
@@ -331,7 +339,7 @@ export function useSourceControl(
             }
           } catch {
             const snapshot = await native.gitPanelSnapshot(contextPath);
-            if (requestId !== requestIdRef.current) return;
+            if (!isCurrent()) return;
             if (!snapshot.repo) {
               setState((current) => ({
                 ...current,
@@ -348,7 +356,7 @@ export function useSourceControl(
           }
         } else {
           const snapshot = await native.gitPanelSnapshot(contextPath);
-          if (requestId !== requestIdRef.current) return;
+          if (!isCurrent()) return;
           if (!snapshot.repo) {
             setState((current) => ({
               ...current,
@@ -390,12 +398,13 @@ export function useSourceControl(
             await native.gitFetch(repo.repoRoot);
             touchAutoFetch(autoFetchByRepoRef.current, repo.repoRoot);
             nextRemoteError = null;
-            if (requestId !== requestIdRef.current) return;
+            if (!isCurrent()) return;
             status = await native.gitStatus(repo.repoRoot);
-            if (requestId !== requestIdRef.current) return;
+            if (!isCurrent()) return;
           } catch (error) {
             nextRemoteError = normalizeError(error);
           }
+          if (!isCurrent()) return;
         }
 
         setState((current) => ({
@@ -408,7 +417,7 @@ export function useSourceControl(
           lastRemoteError: nextRemoteError,
         }));
       } catch (error) {
-        if (requestId !== requestIdRef.current) return;
+        if (!isCurrent()) return;
         setState((current) => ({
           ...current,
           repo: null,

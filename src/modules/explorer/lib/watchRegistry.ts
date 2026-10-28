@@ -69,7 +69,7 @@ export function createWatchRegistry(io: WatchIo, armed = true): WatchRegistry {
 
 export type VisibilityEdgePlan = {
   arm: boolean;
-  /** Reload every loaded folder once. */
+  /** Re-read the root and the expanded folders once. */
   resync: boolean;
   /** Loaded data may predate changes nobody was watching for. */
   stale: boolean;
