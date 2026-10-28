@@ -90,19 +90,24 @@ fn is_skipped(path: &Path) -> bool {
         .is_some_and(|n| SKIP_DIRS.contains(&n))
 }
 
-type Watched<'a> = dyn Fn(&Path) -> bool + 'a;
+/// The nearest watched folder at or above a path.
+type WatchedAncestor<'a> = dyn Fn(&Path) -> Option<PathBuf> + 'a;
+
+fn has_staging_segment(path: &Path) -> bool {
+    path.components()
+        .any(|c| c.as_os_str().to_str().is_some_and(is_staging_name))
+}
 
 // A copy in progress is invisible; only its publish under the real name is news.
 // Only names below the watched folder count: the folder may sit under such a name.
-fn in_staging(path: &Path, watched: &Watched) -> bool {
-    let below = path
-        .ancestors()
-        .find(|dir| watched(dir))
-        .and_then(|dir| path.strip_prefix(dir).ok())
-        .unwrap_or(path);
-    below
-        .components()
-        .any(|c| c.as_os_str().to_str().is_some_and(is_staging_name))
+fn in_staging(path: &Path, watched_ancestor: &WatchedAncestor) -> bool {
+    if !has_staging_segment(path) {
+        return false;
+    }
+    match watched_ancestor(path) {
+        Some(dir) => path.strip_prefix(dir).is_ok_and(has_staging_segment),
+        None => true,
+    }
 }
 
 #[derive(Default)]
@@ -111,11 +116,13 @@ pub struct FsWatchState {
 }
 
 impl FsWatchState {
-    fn watches(&self, dir: &Path) -> bool {
+    // One lock for the whole walk up, not one per ancestor.
+    fn watched_ancestor(&self, path: &Path) -> Option<PathBuf> {
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        guard
-            .as_ref()
-            .is_some_and(|inner| inner.refcounts.contains_key(dir))
+        let inner = guard.as_ref()?;
+        path.ancestors()
+            .find(|dir| inner.refcounts.contains_key(*dir))
+            .map(Path::to_path_buf)
     }
 }
 
@@ -161,7 +168,7 @@ fn ensure_started(state: &FsWatchState, app: &AppHandle) -> Result<(), String> {
 
 fn drain_loop(rx: mpsc::Receiver<notify::Result<Event>>, app: AppHandle) {
     let state = app.state::<FsWatchState>();
-    let watched = |dir: &Path| state.watches(dir);
+    let watched = |path: &Path| state.watched_ancestor(path);
     loop {
         let first = match rx.recv() {
             Ok(ev) => ev,
@@ -196,7 +203,7 @@ fn drain_loop(rx: mpsc::Receiver<notify::Result<Event>>, app: AppHandle) {
     }
 }
 
-fn collect(set: &mut HashSet<String>, ev: notify::Result<Event>, watched: &Watched) {
+fn collect(set: &mut HashSet<String>, ev: notify::Result<Event>, watched: &WatchedAncestor) {
     let Ok(ev) = ev else { return };
     if matches!(ev.kind, EventKind::Access(_)) {
         return;
@@ -206,32 +213,20 @@ fn collect(set: &mut HashSet<String>, ev: notify::Result<Event>, watched: &Watch
     }
 }
 
-/// Returns the requested spellings now watched whose events carry that same
-/// path: events always name the canonical one.
-fn add_paths(inner: &mut WatchInner, paths: Vec<(String, PathBuf)>) -> Vec<String> {
-    let mut reported = Vec::new();
-    for (raw, canonical) in paths {
+fn add_paths(inner: &mut WatchInner, paths: Vec<PathBuf>) {
+    for canonical in paths {
         let current = inner.refcounts.get(&canonical).copied().unwrap_or(0);
-        let watched = if current == 0 {
+        if current == 0 {
             match inner.watcher.watch(&canonical, RecursiveMode::NonRecursive) {
-                Ok(()) => true,
-                Err(e) => {
-                    log::debug!("fs_watch add {} failed: {e}", canonical.display());
-                    false
+                Ok(()) => {
+                    inner.refcounts.insert(canonical, 1);
                 }
+                Err(e) => log::debug!("fs_watch add {} failed: {e}", canonical.display()),
             }
         } else {
-            true
-        };
-        if !watched {
-            continue;
+            inner.refcounts.insert(canonical, current + 1);
         }
-        if to_canon(&canonical) == raw {
-            reported.push(raw);
-        }
-        inner.refcounts.insert(canonical, current + 1);
     }
-    reported
 }
 
 fn remove_paths(inner: &mut WatchInner, paths: Vec<PathBuf>) {
@@ -251,7 +246,7 @@ fn prepare_add(
     registry: &WorkspaceRegistry,
     workspace: &WorkspaceEnv,
     paths: Vec<String>,
-) -> Vec<(String, PathBuf)> {
+) -> Vec<PathBuf> {
     paths
         .into_iter()
         .filter_map(|raw| {
@@ -260,7 +255,7 @@ fn prepare_add(
             if !canonical.is_dir() || is_skipped(&canonical) || !registry.is_authorized(&canonical) {
                 return None;
             }
-            Some((raw, canonical))
+            Some(canonical)
         })
         .collect()
 }
@@ -272,24 +267,24 @@ pub fn fs_watch_add(
     app: AppHandle,
     state: State<'_, FsWatchState>,
     registry: State<'_, WorkspaceRegistry>,
-) -> Result<Vec<String>, String> {
+) -> Result<(), String> {
     let workspace = WorkspaceEnv::from_option(workspace);
     // No live FS events over ssh — remote watching isn't wired up; the explorer
     // refreshes on navigation instead. (A local watcher can't observe a remote
     // path anyway.)
     if workspace.is_ssh() {
-        return Ok(Vec::new());
+        return Ok(());
     }
     let prepared = prepare_add(&registry, &workspace, paths);
     if prepared.is_empty() {
-        return Ok(Vec::new());
+        return Ok(());
     }
     ensure_started(&state, &app)?;
     let mut guard = state.inner.lock().unwrap_or_else(|e| e.into_inner());
-    Ok(guard
-        .as_mut()
-        .map(|inner| add_paths(inner, prepared))
-        .unwrap_or_default())
+    if let Some(inner) = guard.as_mut() {
+        add_paths(inner, prepared);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -331,8 +326,8 @@ mod tests {
         assert!(!is_skipped(Path::new("/a/node_modules/pkg")));
     }
 
-    fn watching(dir: &'static str) -> impl Fn(&Path) -> bool {
-        move |path| path == Path::new(dir)
+    fn watching(dir: &'static str) -> impl Fn(&Path) -> Option<PathBuf> {
+        move |path| path.ancestors().find(|a| *a == Path::new(dir)).map(Path::to_path_buf)
     }
 
     #[test]
@@ -360,36 +355,6 @@ mod tests {
         collect(&mut set, modify(), &watched);
         collect(&mut set, modify(), &watched);
         assert_eq!(set.len(), 1);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn only_a_folder_named_like_its_events_counts_as_reported() {
-        let tmp = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(tmp.path()).unwrap();
-        for dir in ["src", "node_modules"] {
-            std::fs::create_dir(base.join(dir)).unwrap();
-        }
-        std::os::unix::fs::symlink(base.join("src"), base.join("alias")).unwrap();
-        let registry = WorkspaceRegistry::default();
-        registry.authorize(&base).unwrap();
-        let mut inner = WatchInner {
-            watcher: RecommendedWatcher::new(|_: notify::Result<Event>| {}, Config::default())
-                .unwrap(),
-            refcounts: HashMap::new(),
-        };
-        let src = to_canon(base.join("src"));
-        let requested = vec![
-            src.clone(),
-            to_canon(base.join("alias")),
-            format!("{src}/"),
-            to_canon(base.join("node_modules")),
-            to_canon(base.join("gone")),
-        ];
-        let prepared = prepare_add(&registry, &WorkspaceEnv::Local, requested);
-        assert_eq!(add_paths(&mut inner, prepared), [src]);
-        assert_eq!(inner.refcounts.get(&base.join("src")), Some(&3));
-        assert_eq!(inner.refcounts.len(), 1);
     }
 
     fn event(kind: EventKind, paths: &[&str]) -> notify::Result<Event> {
@@ -462,6 +427,30 @@ mod tests {
         assert_eq!(
             set,
             HashSet::from([to_canon("/x/.terax-copy-old/proj/a.txt"), to_canon(root)])
+        );
+    }
+
+    #[test]
+    fn only_a_path_with_a_staging_segment_looks_up_its_watched_folder() {
+        use notify::event::CreateKind;
+        let lookups = std::cell::Cell::new(0);
+        let inner = watching("/ws");
+        let watched = |path: &Path| {
+            lookups.set(lookups.get() + 1);
+            inner(path)
+        };
+        let mut set = HashSet::new();
+        for path in ["/ws/a.txt", "/ws/src/.terax-copyx", "/ws/.terax-copy-ab12/item"] {
+            collect(
+                &mut set,
+                event(EventKind::Create(CreateKind::Any), &[path]),
+                &watched,
+            );
+        }
+        assert_eq!(lookups.get(), 1);
+        assert_eq!(
+            set,
+            HashSet::from([to_canon("/ws/a.txt"), to_canon("/ws/src/.terax-copyx")])
         );
     }
 }

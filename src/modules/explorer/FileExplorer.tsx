@@ -43,8 +43,6 @@ import {
   pasteExclusively,
   pasteKeyAction,
   pasteTargetDir,
-  pendingPasteAction,
-  rereadUnlessWatched,
 } from "@/modules/explorer/lib/clipboardPaste";
 import { fileIconUrl, folderIconUrl } from "./lib/iconResolver";
 import { COMPACT_CONTENT, COMPACT_ITEM } from "./lib/menuItemClass";
@@ -201,7 +199,6 @@ export const FileExplorer = memo(
   ) {
     const tree = useFileTree(rootPath, { onPathRenamed, onPathDeleted });
     const gitDecorations = usePreferencesStore((s) => s.explorerGitDecorations);
-    const showHidden = usePreferencesStore((s) => s.showHidden);
     const { lookup: lookupGitStatus } = useGitStatus(
       rootPath,
       gitDecorations ? gitStatus : null,
@@ -216,15 +213,6 @@ export const FileExplorer = memo(
     const workspace = useWorkspaceEnvStore((s) => s.env);
     const pasteBusyRef = useRef(false);
     const pasteScopeRef = useRef<PasteScope>({ rootPath, workspace });
-    // `selection` is the selection the paste started from; once the user picks
-    // something else, the pasted item must not take it over.
-    const [pastedSelection, setPastedSelection] = useState<{
-      scope: PasteScope;
-      path: string;
-      selection: string | null;
-      dir: string;
-      folderAtPaste: ReturnType<typeof tree.nodeAt>;
-    } | null>(null);
     useLayoutEffect(() => {
       pasteScopeRef.current = { rootPath, workspace };
       return () => {
@@ -244,6 +232,11 @@ export const FileExplorer = memo(
       tree.pendingCreate,
       lookupGitStatus,
     ]);
+    // The rows of the last commit, for code that resumes after an await.
+    const entryIndexRef = useRef(entryIndexByPath);
+    useLayoutEffect(() => {
+      entryIndexRef.current = entryIndexByPath;
+    }, [entryIndexByPath]);
 
     const rowActions = useMemo<RowActions>(
       () => ({
@@ -291,7 +284,7 @@ export const FileExplorer = memo(
     const fileDrop = useExplorerFileDrop({
       rootPath,
       isDir: isDirAt,
-      onCopied: (dir) => rereadUnlessWatched(dir, tree.isWatched, tree.refresh),
+      onCopied: tree.refresh,
     });
 
     const dropTargetDir = dnd.dropTargetDir ?? fileDrop.externalTargetDir;
@@ -319,78 +312,40 @@ export const FileExplorer = memo(
 
     const scrollEntryIntoView = useCallback(
       (path: string) => {
-        const index = entryIndexByPath.get(path);
+        const index = entryIndexRef.current.get(path);
         if (index === undefined) return;
         virtualizer.scrollToIndex(index, { align: "auto" });
       },
-      [entryIndexByPath, virtualizer],
+      [virtualizer],
     );
-
-    // Select only once the row exists: the reset effect above clears any
-    // selection that is not in the tree yet.
-    useEffect(() => {
-      if (!pastedSelection) return;
-      const { scope, path, selection, dir, folderAtPaste } = pastedSelection;
-      if (scope !== pasteScopeRef.current || selection !== selectedPath) {
-        setPastedSelection(null);
-        return;
-      }
-      const action = pendingPasteAction(
-        path,
-        entryIndexByPath.has(path),
-        tree.nodes[dir],
-        folderAtPaste,
-        showHidden,
-      );
-      if (action === "wait") return;
-      setPastedSelection(null);
-      if (action === "drop") return;
-      setSelectedPath(path);
-      requestAnimationFrame(() => scrollEntryIntoView(path));
-    }, [
-      pastedSelection,
-      selectedPath,
-      entryIndexByPath,
-      tree.nodes,
-      showHidden,
-      scrollEntryIntoView,
-    ]);
 
     const pasteInto = useCallback(
       async (destDir: string) => {
         if (!rootPath) return;
         await pasteExclusively(pasteBusyRef, async () => {
           const scope = pasteScopeRef.current;
-          const isCurrent = () => pasteScopeRef.current === scope;
-          const created = await pasteClipboardFiles(destDir, {
+          await pasteClipboardFiles(destDir, {
             workspace,
             rootPath,
-            isCurrent,
+            isCurrent: () => pasteScopeRef.current === scope,
             isExpanded: tree.isExpanded,
-            isWatched: tree.isWatched,
             refresh: tree.refresh,
             expand: tree.expand,
-          });
-          const first = created[0];
-          if (!first || !isCurrent()) return;
-          setPastedSelection({
-            scope,
-            path: first,
-            selection: selectedPath,
-            dir: destDir,
-            folderAtPaste: tree.nodeAt(destDir),
+            hasRow: (path) => entryIndexRef.current.has(path),
+            select: (path) => {
+              setSelectedPath(path);
+              requestAnimationFrame(() => scrollEntryIntoView(path));
+            },
           });
         });
       },
       [
         rootPath,
         workspace,
-        selectedPath,
         tree.refresh,
         tree.expand,
         tree.isExpanded,
-        tree.isWatched,
-        tree.nodeAt,
+        scrollEntryIntoView,
       ],
     );
 

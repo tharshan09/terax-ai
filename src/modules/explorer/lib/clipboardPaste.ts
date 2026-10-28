@@ -1,10 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import { basename } from "@/lib/utils";
-import {
-  isTerminalPasteChord,
-  type TerminalKeyEvent,
-} from "@/modules/terminal/lib/keymap";
+import type { TerminalKeyEvent } from "@/modules/terminal/lib/keymap";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import { dirname } from "./useFileTree";
 
@@ -35,9 +31,14 @@ export async function pasteExclusively(
   }
 }
 
+const LATIN_LETTER = /^[a-z]$/i;
+
 // Files come from the macOS pasteboard only, so other platforms get no shortcut.
+// The physical V key counts only on a non-Latin layout, so Dvorak Cmd+K stays K.
 export function isPasteShortcut(e: TerminalKeyEvent, isMac: boolean): boolean {
-  return isMac && isTerminalPasteChord(e, { isMac });
+  if (!isMac || !e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return false;
+  if (LATIN_LETTER.test(e.key)) return e.key === "v" || e.key === "V";
+  return e.code === "KeyV";
 }
 
 // Holding Cmd+V repeats keydown: only the first press pastes.
@@ -47,27 +48,6 @@ export function pasteKeyAction(
 ): "paste" | "swallow" | null {
   if (!isPasteShortcut(e, isMac)) return null;
   return e.repeat ? "swallow" : "paste";
-}
-
-type FolderState = { status: string } | undefined;
-
-export type PendingPaste = "select" | "wait" | "drop";
-
-// A re-read that leaves the folder listing unchanged causes no tree update, so
-// a name the listing filters out (hidden while show-hidden is off) drops at once.
-export function pendingPasteAction(
-  path: string,
-  inTree: boolean,
-  folder: FolderState,
-  folderAtPaste: FolderState,
-  showHidden: boolean,
-): PendingPaste {
-  if (inTree) return "select";
-  if (!showHidden && basename(path).startsWith(".")) return "drop";
-  const reread =
-    folder !== folderAtPaste &&
-    (folder?.status === "loaded" || folder?.status === "error");
-  return reread ? "drop" : "wait";
 }
 
 export type CopyResult = {
@@ -81,19 +61,12 @@ type PasteOptions = {
   rootPath: string;
   isCurrent: () => boolean;
   isExpanded: (dir: string) => boolean;
-  isWatched: (dir: string) => boolean;
-  refresh: (dir: string) => void;
-  expand: (dir: string) => void;
+  // Both settle once the folder's re-read shows in the tree.
+  refresh: (dir: string) => Promise<void>;
+  expand: (dir: string) => Promise<void>;
+  hasRow: (path: string) => boolean;
+  select: (path: string) => void;
 };
-
-// The local watcher reports a publish into a watched folder; SSH has no watcher.
-export function rereadUnlessWatched(
-  dir: string,
-  isWatched: (dir: string) => boolean,
-  refresh: (dir: string) => void,
-): void {
-  if (!isWatched(dir)) refresh(dir);
-}
 
 // A lost connection explains every failure after it, so it beats the first one.
 export function reportCopyFailures(result: CopyResult): void {
@@ -105,8 +78,9 @@ export function reportCopyFailures(result: CopyResult): void {
   });
 }
 
-// Copies the files on the OS clipboard into `destDir` and returns the created
-// paths, or nothing once the explorer has moved to another root or workspace.
+// Copies the files on the OS clipboard into `destDir`, re-reads it and selects
+// the first new row. Returns the created paths, or nothing once the explorer
+// has moved to another root or workspace.
 export async function pasteClipboardFiles(
   destDir: string,
   {
@@ -114,14 +88,14 @@ export async function pasteClipboardFiles(
     rootPath,
     isCurrent,
     isExpanded,
-    isWatched,
     refresh,
     expand,
+    hasRow,
+    select,
   }: PasteOptions,
 ): Promise<string[]> {
   // A collapsed folder is read when it opens, so it gets no extra re-read.
   const isOpen = () => destDir === rootPath || isExpanded(destDir);
-  const reread = () => rereadUnlessWatched(destDir, isWatched, refresh);
   let copyStarted = false;
   try {
     const sources = await invoke<string[]>("fs_clipboard_paths");
@@ -139,12 +113,15 @@ export async function pasteClipboardFiles(
     });
     reportCopyFailures(result);
     if (!isCurrent()) return [];
-    if (isOpen()) reread();
-    else if (result.created.length > 0) expand(destDir);
+    if (isOpen()) await refresh(destDir);
+    else if (result.created.length > 0) await expand(destDir);
+    if (!isCurrent()) return [];
+    const first = result.created[0];
+    if (first && hasRow(first)) select(first);
     return result.created;
   } catch (err) {
     toast.error(`Paste failed: ${String(err)}`);
-    if (copyStarted && isCurrent() && isOpen()) reread();
+    if (copyStarted && isCurrent() && isOpen()) await refresh(destDir);
     return [];
   }
 }

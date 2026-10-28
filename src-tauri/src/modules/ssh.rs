@@ -1106,11 +1106,21 @@ pub fn read_dir(
     path: &str,
     show_hidden: bool,
 ) -> Result<Vec<crate::modules::fs::tree::DirEntry>, String> {
-    let data = run_remote_json(
-        host,
-        &serde_json::json!({ "op": "read_dir", "path": path, "showHidden": show_hidden }),
-        Some(REMOTE_FS_TIMEOUT),
-    )?;
+    read_dir_with(
+        &mut |request, timeout| run_remote_json(host, request, timeout),
+        path,
+        show_hidden,
+    )
+}
+
+/// The `read_dir` request and its parsing over any transport (the copy's stub too).
+fn read_dir_with(
+    run: &mut RemoteRun,
+    path: &str,
+    show_hidden: bool,
+) -> Result<Vec<crate::modules::fs::tree::DirEntry>, String> {
+    let request = serde_json::json!({ "op": "read_dir", "path": path, "showHidden": show_hidden });
+    let data = run(&request, Some(REMOTE_FS_TIMEOUT))?;
     serde_json::from_value(data).map_err(|e| format!("bad read_dir response: {e}"))
 }
 
@@ -1480,14 +1490,7 @@ fn listed_names(
     host: &str,
     dest_dir: &str,
 ) -> std::collections::HashSet<String> {
-    let request = serde_json::json!({ "op": "read_dir", "path": dest_dir, "showHidden": true });
-    let listing = run(&request, Some(REMOTE_FS_TIMEOUT))
-        .map_err(String::from)
-        .and_then(|data| {
-            serde_json::from_value::<Vec<crate::modules::fs::tree::DirEntry>>(data)
-                .map_err(|e| format!("bad read_dir response: {e}"))
-        });
-    match listing {
+    match read_dir_with(run, dest_dir, true) {
         Ok(entries) => entries.into_iter().map(|entry| entry.name).collect(),
         Err(error) => {
             log::warn!("ssh copy: could not list {host}:{dest_dir}, trying every name: {error}");

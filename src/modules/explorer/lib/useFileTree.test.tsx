@@ -2,10 +2,7 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { invoke, watchAdd } = vi.hoisted(() => ({
-  invoke: vi.fn(),
-  watchAdd: vi.fn(),
-}));
+const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("sonner", () => ({ toast: { error: vi.fn() } }));
 vi.mock("@/modules/workspace", () => ({
@@ -16,7 +13,7 @@ vi.mock("@/modules/settings/preferences", () => ({
     select({ showHidden: false, explorerGitDecorations: false }),
 }));
 vi.mock("./watch", () => ({
-  watchAdd,
+  watchAdd: vi.fn(),
   watchRemove: vi.fn(),
   listenFsChanged: () => Promise.resolve(() => {}),
 }));
@@ -51,16 +48,13 @@ const entry = (name: string, kind: DirEntry["kind"] = "file"): DirEntry => ({
 type Tree = ReturnType<typeof useFileTree>;
 
 function listing(tree: Tree, dir: string): string[] | string | undefined {
-  const node = tree.nodeAt(dir);
+  const node = tree.nodes[dir];
   return node?.status === "loaded"
     ? node.entries.map((e) => e.name)
     : node?.status;
 }
 
-beforeEach(() => {
-  vi.resetAllMocks();
-  watchAdd.mockResolvedValue([]);
-});
+beforeEach(() => vi.resetAllMocks());
 afterEach(cleanup);
 
 describe("useFileTree folder reads", () => {
@@ -93,42 +87,85 @@ describe("useFileTree folder reads", () => {
     const { result, rerender } = renderHook(({ root }) => useFileTree(root), {
       initialProps: { root: "/a" },
     });
+    let stale: Promise<void> | undefined;
+    act(() => {
+      stale = result.current.refresh("/a");
+    });
     rerender({ root: "/b" });
-    expect(pending.map((r) => r.path)).toEqual(["/a", "/b"]);
-    await act(async () => pending[0].resolve([entry("from-a")]));
-    expect(result.current.nodeAt("/a")).toBeUndefined();
-    await act(async () => pending[1].resolve([entry("from-b")]));
+    expect(pending.map((r) => r.path)).toEqual(["/a", "/a", "/b"]);
+    await act(async () => {
+      pending[0].resolve([entry("from-a")]);
+      pending[1].resolve([entry("from-a")]);
+    });
+    await act(async () => {
+      await stale;
+    });
+    expect(result.current.nodes["/a"]).toBeUndefined();
+    await act(async () => pending[2].resolve([entry("from-b")]));
     expect(listing(result.current, "/b")).toEqual(["from-b"]);
   });
 });
 
-describe("useFileTree watch state", () => {
-  it("counts a folder as watched once the watcher reports its key and it is loaded", async () => {
+describe("useFileTree read promises", () => {
+  it("settles refresh only once the read shows in the rendered tree", async () => {
     const pending = reads();
-    watchAdd.mockImplementation(async (paths: string[]) =>
-      paths.filter((p) => p !== "/ws/build"),
-    );
-    const { result } = renderHook(() => useFileTree("/ws"));
-    expect(result.current.isWatched("/ws")).toBe(false);
-    await act(async () =>
-      pending[0].resolve([entry("docs", "dir"), entry("build", "dir")]),
-    );
-    expect(result.current.isWatched("/ws")).toBe(true);
+    let rendered: string[] | string | undefined;
+    const { result } = renderHook(() => {
+      const tree = useFileTree("/ws");
+      rendered = listing(tree, "/ws");
+      return tree;
+    });
+    await act(async () => pending[0].resolve([entry("a")]));
 
+    let seen: string[] | string | undefined;
     act(() => {
-      result.current.expand("/ws/docs");
-      result.current.expand("/ws/build");
+      void result.current.refresh("/ws").then(() => {
+        seen = rendered;
+      });
+    });
+    await act(async () => {});
+    expect(seen).toBeUndefined();
+    await act(async () => pending[1].resolve([entry("a"), entry("b")]));
+    await vi.waitFor(() => expect(seen).toEqual(["a", "b"]));
+  });
+
+  it("settles an overtaken read together with the newest one", async () => {
+    const pending = reads();
+    const { result } = renderHook(() => useFileTree("/ws"));
+    await act(async () => pending[0].resolve([entry("a")]));
+
+    const settled: string[] = [];
+    act(() => {
+      void result.current.refresh("/ws").then(() => settled.push("older"));
+      void result.current.refresh("/ws").then(() => settled.push("newer"));
+    });
+    const [older, newer] = pending.slice(1);
+    await act(async () => older.resolve([entry("old")]));
+    expect(settled).toEqual([]);
+    await act(async () => newer.resolve([entry("new")]));
+    await vi.waitFor(() => expect(settled.sort()).toEqual(["newer", "older"]));
+    expect(listing(result.current, "/ws")).toEqual(["new"]);
+  });
+
+  it("settles expand once the folder's listing is in the tree", async () => {
+    const pending = reads();
+    const { result } = renderHook(() => useFileTree("/ws"));
+    await act(async () => pending[0].resolve([entry("docs", "dir")]));
+
+    let expanding: Promise<void> | undefined;
+    act(() => {
+      expanding = result.current.expand("/ws/docs");
     });
     expect(result.current.isExpanded("/ws/docs")).toBe(true);
+    await act(async () => pending[1].resolve([entry("a.txt")]));
     await act(async () => {
-      pending[1].resolve([]);
-      pending[2].resolve([]);
+      await expanding;
     });
-    expect(result.current.isWatched("/ws/docs")).toBe(true);
-    expect(result.current.isWatched("/ws/build")).toBe(false);
+    expect(listing(result.current, "/ws/docs")).toEqual(["a.txt"]);
 
-    act(() => result.current.toggle("/ws/docs"));
-    expect(result.current.isExpanded("/ws/docs")).toBe(false);
-    expect(result.current.isWatched("/ws/docs")).toBe(false);
+    await act(async () => {
+      await result.current.expand("/ws/docs");
+    });
+    expect(pending).toHaveLength(2);
   });
 });

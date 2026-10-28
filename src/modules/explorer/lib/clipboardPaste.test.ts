@@ -5,9 +5,7 @@ import {
   pasteExclusively,
   pasteKeyAction,
   pasteTargetDir,
-  pendingPasteAction,
   reportCopyFailures,
-  rereadUnlessWatched,
 } from "@/modules/explorer/lib/clipboardPaste";
 import { dirname } from "@/modules/explorer/lib/useFileTree";
 import type { WorkspaceEnv } from "@/modules/workspace";
@@ -96,49 +94,6 @@ describe("pasteExclusively", () => {
   });
 });
 
-describe("pendingPasteAction", () => {
-  const before = { status: "loaded" };
-
-  it("selects the pasted row as soon as it is in the tree", () => {
-    expect(pendingPasteAction("/ws/a.txt", true, before, before, false)).toBe(
-      "select",
-    );
-  });
-
-  it("waits while the folder has not been re-read yet", () => {
-    expect(pendingPasteAction("/ws/a.txt", false, before, before, false)).toBe(
-      "wait",
-    );
-    const loading = { status: "loading" };
-    expect(
-      pendingPasteAction("/ws/a.txt", false, loading, undefined, false),
-    ).toBe("wait");
-  });
-
-  it("drops once the re-read is done and the row is still missing", () => {
-    const reread = { status: "loaded" };
-    expect(pendingPasteAction("/ws/a.txt", false, reread, before, false)).toBe(
-      "drop",
-    );
-    const failed = { status: "error" };
-    expect(
-      pendingPasteAction("/ws/a.txt", false, failed, undefined, false),
-    ).toBe("drop");
-  });
-
-  it("drops a hidden item at once while hidden files are not shown", () => {
-    expect(
-      pendingPasteAction("/ws/.gitignore", false, before, before, false),
-    ).toBe("drop");
-    expect(
-      pendingPasteAction("/ws/.gitignore", false, before, before, true),
-    ).toBe("wait");
-    expect(
-      pendingPasteAction("/ws/.gitignore", true, before, before, false),
-    ).toBe("select");
-  });
-});
-
 describe("isPasteShortcut", () => {
   const key = (k: Partial<KeyboardEvent>) => ({
     key: "v",
@@ -155,6 +110,14 @@ describe("isPasteShortcut", () => {
     expect(
       isPasteShortcut(key({ key: "м", code: "KeyM", metaKey: true }), true),
     ).toBe(false);
+  });
+
+  it("goes by the letter on Latin layouts, so Dvorak Cmd+K is no paste", () => {
+    expect(isPasteShortcut(key({ key: "k", metaKey: true }), true)).toBe(false);
+    expect(
+      isPasteShortcut(key({ key: "v", code: "Period", metaKey: true }), true),
+    ).toBe(true);
+    expect(isPasteShortcut(key({ metaKey: true }), true)).toBe(true);
   });
 
   it("offers no shortcut off macOS, where files cannot be read", () => {
@@ -219,16 +182,6 @@ describe("reportCopyFailures", () => {
   });
 });
 
-describe("rereadUnlessWatched", () => {
-  it("leaves a watched folder to the watcher and re-reads any other", () => {
-    const refresh = vi.fn((_dir: string) => {});
-    rereadUnlessWatched("/ws/docs", (dir) => dir === "/ws/docs", refresh);
-    expect(refresh).not.toHaveBeenCalled();
-    rereadUnlessWatched("/ws", (dir) => dir === "/ws/docs", refresh);
-    expect(refresh).toHaveBeenCalledWith("/ws");
-  });
-});
-
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => {
@@ -245,9 +198,10 @@ function options(
     rootPath: "/ws",
     isCurrent: vi.fn(() => true),
     isExpanded: vi.fn((_dir: string) => false),
-    isWatched: vi.fn((_dir: string) => false),
-    refresh: vi.fn((_path: string) => {}),
-    expand: vi.fn((_path: string) => {}),
+    refresh: vi.fn((_path: string) => Promise.resolve()),
+    expand: vi.fn((_path: string) => Promise.resolve()),
+    hasRow: vi.fn((_path: string) => true),
+    select: vi.fn((_path: string) => {}),
   };
 }
 
@@ -295,41 +249,63 @@ describe("pasteClipboardFiles", () => {
     expect(collapsed.expand).not.toHaveBeenCalled();
   });
 
-  it("leaves a watched local folder to the watcher but re-reads the rest", async () => {
-    const copied = (dir: string) => ({ created: [`${dir}/a.txt`], failed: [] });
-    const watched = options({ kind: "local" });
-    watched.isExpanded.mockReturnValue(true);
-    watched.isWatched.mockImplementation((dir) => dir === "/ws/docs");
-    invoke
-      .mockResolvedValueOnce(["/tmp/a.txt"])
-      .mockResolvedValueOnce(copied("/ws/docs"));
-    expect(await pasteClipboardFiles("/ws/docs", watched)).toEqual([
-      "/ws/docs/a.txt",
-    ]);
-    expect(watched.isWatched).toHaveBeenCalledWith("/ws/docs");
-    expect(watched.refresh).not.toHaveBeenCalled();
-    expect(watched.expand).not.toHaveBeenCalled();
+  it("re-reads the folder locally and over SSH, then selects the first new row", async () => {
+    for (const workspace of [
+      { kind: "local" },
+      { kind: "ssh", host: "litha-claude" },
+    ] as WorkspaceEnv[]) {
+      invoke.mockResolvedValueOnce(["/tmp/a.txt"]).mockResolvedValueOnce({
+        created: ["/ws/docs/a.txt", "/ws/docs/b.txt"],
+        failed: [],
+      });
+      const opts = options(workspace);
+      opts.isExpanded.mockReturnValue(true);
+      await pasteClipboardFiles("/ws/docs", opts);
+      expect(opts.refresh).toHaveBeenCalledWith("/ws/docs");
+      expect(opts.select).toHaveBeenCalledTimes(1);
+      expect(opts.select).toHaveBeenCalledWith("/ws/docs/a.txt");
+    }
+  });
 
+  it("selects only after the re-read has landed", async () => {
+    const reread = deferred<void>();
     invoke
       .mockResolvedValueOnce(["/tmp/a.txt"])
-      .mockResolvedValueOnce(copied("/ws"));
-    await pasteClipboardFiles("/ws", watched);
-    expect(watched.refresh).toHaveBeenCalledWith("/ws");
+      .mockResolvedValueOnce({ created: ["/ws/a.txt"], failed: [] });
+    const opts = options();
+    opts.refresh.mockReturnValueOnce(reread.promise);
+    const paste = pasteClipboardFiles("/ws", opts);
+    await vi.waitFor(() => expect(opts.refresh).toHaveBeenCalledWith("/ws"));
+    expect(opts.select).not.toHaveBeenCalled();
+    reread.resolve();
+    expect(await paste).toEqual(["/ws/a.txt"]);
+    expect(opts.hasRow).toHaveBeenCalledWith("/ws/a.txt");
+    expect(opts.select).toHaveBeenCalledWith("/ws/a.txt");
+  });
 
-    const ssh = options();
-    ssh.isExpanded.mockReturnValue(true);
+  it("selects nothing when the new row is not in the tree", async () => {
     invoke
-      .mockResolvedValueOnce(["/tmp/a.txt"])
-      .mockResolvedValueOnce(copied("/ws/docs"));
-    await pasteClipboardFiles("/ws/docs", ssh);
-    expect(ssh.refresh).toHaveBeenCalledWith("/ws/docs");
+      .mockResolvedValueOnce(["/tmp/.env"])
+      .mockResolvedValueOnce({ created: ["/ws/.env"], failed: [] });
+    const opts = options();
+    opts.hasRow.mockReturnValue(false);
+    expect(await pasteClipboardFiles("/ws", opts)).toEqual(["/ws/.env"]);
+    expect(opts.select).not.toHaveBeenCalled();
+  });
 
+  it("selects nothing after a root change during the re-read", async () => {
+    const reread = deferred<void>();
     invoke
       .mockResolvedValueOnce(["/tmp/a.txt"])
-      .mockRejectedValueOnce("copy destination is not a directory");
-    watched.refresh.mockClear();
-    await pasteClipboardFiles("/ws/docs", watched);
-    expect(watched.refresh).not.toHaveBeenCalled();
+      .mockResolvedValueOnce({ created: ["/ws/a.txt"], failed: [] });
+    const opts = options();
+    opts.refresh.mockReturnValueOnce(reread.promise);
+    const paste = pasteClipboardFiles("/ws", opts);
+    await vi.waitFor(() => expect(opts.refresh).toHaveBeenCalled());
+    opts.isCurrent.mockReturnValue(false);
+    reread.resolve();
+    expect(await paste).toEqual([]);
+    expect(opts.select).not.toHaveBeenCalled();
   });
 
   it("stops with a hint when the clipboard holds no files", async () => {
@@ -364,10 +340,12 @@ describe("pasteClipboardFiles", () => {
       created: [],
       failed: [{ source: "/x/gone.txt", message: "No such file or directory" }],
     });
-    expect(await pasteClipboardFiles("/ws", options())).toEqual([]);
+    const opts = options();
+    expect(await pasteClipboardFiles("/ws", opts)).toEqual([]);
     expect(toast.error).toHaveBeenCalledWith("Could not copy 1 item", {
       description: "/x/gone.txt: No such file or directory",
     });
+    expect(opts.select).not.toHaveBeenCalled();
   });
 
   it("re-reads the folder after a whole-call copy failure", async () => {

@@ -343,16 +343,20 @@ fn is_taken(error: &io::Error, target: &Path) -> bool {
         || (cfg!(windows) && std::fs::symlink_metadata(target).is_ok())
 }
 
+// ENOSYS: no renameat2/renamex_np; EPERM: a sandbox or filesystem refusing the
+// flag. EEXIST never counts: that name is taken.
 #[cfg(target_os = "macos")]
-const NO_REPLACE_UNSUPPORTED: Option<i32> = Some(libc::ENOTSUP);
+const NO_REPLACE_UNSUPPORTED: &[i32] = &[libc::ENOTSUP, libc::ENOSYS, libc::EPERM];
 #[cfg(target_os = "linux")]
-const NO_REPLACE_UNSUPPORTED: Option<i32> = Some(libc::EINVAL);
+const NO_REPLACE_UNSUPPORTED: &[i32] = &[libc::EINVAL, libc::ENOSYS, libc::EPERM];
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-const NO_REPLACE_UNSUPPORTED: Option<i32> = None;
+const NO_REPLACE_UNSUPPORTED: &[i32] = &[];
 
 fn is_unsupported(error: &io::Error) -> bool {
     error.kind() == io::ErrorKind::Unsupported
-        || (NO_REPLACE_UNSUPPORTED.is_some() && error.raw_os_error() == NO_REPLACE_UNSUPPORTED)
+        || error
+            .raw_os_error()
+            .is_some_and(|code| NO_REPLACE_UNSUPPORTED.contains(&code))
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -394,18 +398,46 @@ fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
+// windows-sys codes, spelled out so the retry decision is testable on any host.
+#[cfg(any(target_os = "windows", test))]
+const ERROR_ACCESS_DENIED: i32 = 5;
+#[cfg(any(target_os = "windows", test))]
+const ERROR_SHARING_VIOLATION: i32 = 32;
+#[cfg(any(target_os = "windows", test))]
+const MOVE_ATTEMPTS: usize = 5;
+#[cfg(target_os = "windows")]
+const MOVE_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// A scanner or indexer briefly holding the fresh copy open denies the move; a
+/// taken target denies it for good (see `is_taken`), so that is not retried.
+#[cfg(any(target_os = "windows", test))]
+fn retries_move(code: Option<i32>, attempts: usize, target_taken: bool) -> bool {
+    attempts < MOVE_ATTEMPTS
+        && !target_taken
+        && matches!(code, Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION))
+}
+
 #[cfg(target_os = "windows")]
 fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
 
-    let from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
-    let to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
-    let result = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_WRITE_THROUGH) };
-    if result != 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
+    let wide_from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+    let wide_to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let result =
+            unsafe { MoveFileExW(wide_from.as_ptr(), wide_to.as_ptr(), MOVEFILE_WRITE_THROUGH) };
+        if result != 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        let taken = std::fs::symlink_metadata(to).is_ok();
+        if !retries_move(error.raw_os_error(), attempts, taken) {
+            return Err(error);
+        }
+        std::thread::sleep(MOVE_RETRY_PAUSE);
     }
 }
 
@@ -1340,7 +1372,7 @@ mod tests {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn unsupported_rename_falls_back_to_reservation_and_eexist_moves_on() {
-        let unsupported = NO_REPLACE_UNSUPPORTED.unwrap();
+        let unsupported = NO_REPLACE_UNSUPPORTED[0];
         let dest = tempfile::tempdir().unwrap();
         std::fs::write(dest.path().join("a.txt"), b"old").unwrap();
         let stage = |body: &[u8]| {
@@ -1403,6 +1435,56 @@ mod tests {
         assert_eq!(std::fs::read(dest.path().join("v/keep")).unwrap(), b"k");
         assert_eq!(std::fs::read(dest.path().join("a.txt")).unwrap(), b"old");
         assert!(no_staging_left(dest.path()));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn enosys_and_eperm_fall_back_to_reservation_but_eexist_never_does() {
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::write(dest.path().join("a.txt"), b"old").unwrap();
+        for (code, expected) in [(libc::ENOSYS, "a copy.txt"), (libc::EPERM, "a copy 2.txt")] {
+            let staged = dest.path().join(format!("{STAGING_PREFIX}t"));
+            std::fs::write(&staged, b"new").unwrap();
+            let name = publish(
+                &staged,
+                dest.path(),
+                OsStr::new("a.txt"),
+                false,
+                true,
+                |_, _| Err(io::Error::from_raw_os_error(code)),
+            )
+            .unwrap();
+            assert_eq!(name, expected);
+            assert_eq!(std::fs::read(dest.path().join(expected)).unwrap(), b"new");
+        }
+        assert_eq!(std::fs::read(dest.path().join("a.txt")).unwrap(), b"old");
+        assert!(no_staging_left(dest.path()));
+
+        let eexist = io::Error::from_raw_os_error(libc::EEXIST);
+        assert!(!is_unsupported(&eexist));
+        let staged = dest.path().join(format!("{STAGING_PREFIX}t"));
+        std::fs::write(&staged, b"new").unwrap();
+        let error = place(&staged, &dest.path().join("free.txt"), false, &|_: &Path, _: &Path| {
+            Err(io::Error::from_raw_os_error(libc::EEXIST))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert!(!dest.path().join("free.txt").exists());
+        assert!(staged.exists());
+    }
+
+    #[test]
+    fn a_denied_windows_move_is_retried_a_few_times_unless_the_target_is_taken() {
+        for code in [ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION] {
+            for attempts in 1..MOVE_ATTEMPTS {
+                assert!(retries_move(Some(code), attempts, false));
+            }
+            assert!(!retries_move(Some(code), MOVE_ATTEMPTS, false));
+            assert!(!retries_move(Some(code), 1, true));
+        }
+        assert!(!retries_move(Some(ERROR_PRIVILEGE_NOT_HELD), 1, false));
+        assert!(!retries_move(Some(183), 1, false));
+        assert!(!retries_move(None, 1, false));
     }
 
     #[test]
