@@ -353,6 +353,7 @@ export default function App() {
     sidebarRef,
     sidebarWidthRef,
     sidebarView,
+    sidebarCollapsed,
     initialSidebarCollapsed,
     persistSidebarView,
     persistSidebarCollapsed,
@@ -854,6 +855,11 @@ export default function App() {
     activeTab?.kind === "html"
       ? activeTab.path
       : null;
+  const explorerGitDecorations = usePreferencesStore(
+    (s) => s.explorerGitDecorations,
+  );
+  const statusbarLayout = usePreferencesStore((s) => s.statusbarLayout);
+  const [zenMode, setZenMode] = useState(false);
   const { sourceControl, toggleSourceControl, openGitGraphFromContext } =
     useSourceControlContext({
       activeTab,
@@ -864,12 +870,13 @@ export default function App() {
       launchCwdResolved,
       home,
       sidebarView,
+      sidebarCollapsed,
+      explorerGitDecorations,
+      zenMode,
+      statusbarLayout,
       cycleSidebarView,
       openCommitHistoryTab,
     });
-  const explorerGitDecorations = usePreferencesStore(
-    (s) => s.explorerGitDecorations,
-  );
 
   const openPreviewTab = useCallback(
     (url: string) => {
@@ -900,8 +907,6 @@ export default function App() {
     }
     void handleClose(activeId);
   }, [activeId, closeActivePane, handleClose]);
-
-  const [zenMode, setZenMode] = useState(false);
 
   // Focus an agent's tab, switching to its space first so the header and tab
   // strip don't end up showing a different space than the focused pane.
@@ -1604,6 +1609,7 @@ export default function App() {
                         onPathDeleted={handlePathDeleted}
                         onRevealInTerminal={cdInNewTab}
                         onAttachToAgent={handleAttachFileToAgent}
+                        visible={!sidebarCollapsed}
                       />
                     ) : (
                       <SourceControlPanel

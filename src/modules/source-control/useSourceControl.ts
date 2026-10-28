@@ -4,7 +4,14 @@ import {
   type GitStatusSnapshot,
 } from "@/modules/ai/lib/native";
 import { useWorkspaceEnvStore, workspaceScopeKey } from "@/modules/workspace";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 const AUTO_FETCH_THROTTLE_MS = 5 * 60_000;
 const AUTO_FETCH_LRU_LIMIT = 16;
@@ -67,6 +74,22 @@ type SourceControlSummaryState = {
   localError: string | null;
   busyAction: SourceControlRemoteAction | null;
   lastRemoteError: string | null;
+};
+
+const EMPTY_STATE: SourceControlSummaryState = {
+  repo: null,
+  status: null,
+  hasRepo: false,
+  isLoading: false,
+  localError: null,
+  busyAction: null,
+  lastRemoteError: null,
+};
+
+type InflightRefresh = {
+  contextKey: string;
+  mode: SourceControlRefreshMode;
+  promise: Promise<void>;
 };
 
 function normalizeError(error: unknown): string {
@@ -138,6 +161,47 @@ export function getSourceControlRemoteIndicator(
   };
 }
 
+function containsContext(
+  repoRoot: string | null,
+  contextPath: string | null,
+): boolean {
+  if (!repoRoot || !contextPath) return false;
+  return contextPath === repoRoot || contextPath.startsWith(`${repoRoot}/`);
+}
+
+type ContextRefreshPlan =
+  | "refresh"
+  /** Fresh data already covers this context. */
+  | "reuse"
+  /** Nobody is looking and the loaded repo no longer applies. */
+  | "clear"
+  /** Nobody is looking: leave the loaded snapshot alone. */
+  | "keep";
+
+/**
+ * What a context change, or a consumer appearing, does. Without a live consumer
+ * git never runs; the snapshot is only kept while it still describes the
+ * context's repository, so the next consumer never shows another repo's data.
+ */
+export function planContextRefresh(input: {
+  live: boolean;
+  contextPath: string | null;
+  repoRoot: string | null;
+  hasRepo: boolean;
+  /** Milliseconds since the last completed refresh. */
+  ageMs: number;
+}): ContextRefreshPlan {
+  const sameRepo = containsContext(input.repoRoot, input.contextPath);
+  if (!input.live) {
+    if (!input.hasRepo && input.repoRoot === null) return "keep";
+    return sameRepo ? "keep" : "clear";
+  }
+  if (input.ageMs < SC_STATUS_TTL_MS && sameRepo && input.hasRepo) {
+    return "reuse";
+  }
+  return "refresh";
+}
+
 function touchAutoFetch(map: Map<string, number>, key: string): void {
   map.delete(key);
   map.set(key, Date.now());
@@ -148,9 +212,18 @@ function touchAutoFetch(map: Map<string, number>, key: string): void {
   }
 }
 
+export type UseSourceControlOptions = {
+  /**
+   * Default true. A consumer of the status is on screen; while false, window
+   * focus and context changes run no git, and turning true refreshes once.
+   */
+  live?: boolean;
+};
+
 export function useSourceControl(
   contextPath: string | null,
   enabled: boolean = true,
+  { live = true }: UseSourceControlOptions = {},
 ): SourceControlSummary {
   const workspaceEnv = useWorkspaceEnvStore((s) => s.env);
   const workspaceKey = workspaceScopeKey(workspaceEnv);
@@ -165,11 +238,17 @@ export function useSourceControl(
   });
   const stateRef = useRef(state);
   const requestIdRef = useRef(0);
-  const inflightRef = useRef<Promise<void> | null>(null);
-  const inflightModeRef = useRef<SourceControlRefreshMode>("never");
+  const inflightRef = useRef<InflightRefresh | null>(null);
   const autoFetchByRepoRef = useRef(new Map<string, number>());
   const enabledRef = useRef(enabled);
   const lastRefreshAtRef = useRef(0);
+  const contextKey = `${workspaceKey}\u0000${contextPath ?? ""}`;
+  const contextKeyRef = useRef(contextKey);
+  const errorContextRef = useRef<string | null>(null);
+
+  useLayoutEffect(() => {
+    contextKeyRef.current = contextKey;
+  }, [contextKey]);
 
   useEffect(() => {
     stateRef.current = state;
@@ -182,7 +261,6 @@ export function useSourceControl(
   useEffect(() => {
     requestIdRef.current++;
     inflightRef.current = null;
-    inflightModeRef.current = "never";
     autoFetchByRepoRef.current.clear();
     setState({
       repo: null,
@@ -209,8 +287,24 @@ export function useSourceControl(
 
   const doRefresh = useCallback(
     async (remoteMode: SourceControlRefreshMode): Promise<void> => {
-      if (!enabledRef.current) return;
+      // A refresh bound to a context already left never writes its status.
+      if (!enabledRef.current || contextKey !== contextKeyRef.current) return;
       const requestId = ++requestIdRef.current;
+      // A newer request owns the state; a context left meanwhile only stops
+      // the loading state, so its snapshot never lands under another path.
+      const isCurrent = () => {
+        if (requestId !== requestIdRef.current) return false;
+        if (contextKey === contextKeyRef.current) return true;
+        setState((s) => (s.isLoading ? { ...s, isLoading: false } : s));
+        return false;
+      };
+      // Only a result that lands counts as fresh for the reuse and focus gates.
+      const land = (
+        update: (s: SourceControlSummaryState) => SourceControlSummaryState,
+      ) => {
+        lastRefreshAtRef.current = Date.now();
+        setState(update);
+      };
 
       if (!contextPath) {
         setState({
@@ -227,8 +321,7 @@ export function useSourceControl(
 
       const activeRoot = stateRef.current.repo?.repoRoot ?? null;
       const reusableRoot =
-        activeRoot &&
-        (contextPath === activeRoot || contextPath.startsWith(`${activeRoot}/`))
+        activeRoot && containsContext(activeRoot, contextPath)
           ? activeRoot
           : undefined;
 
@@ -242,7 +335,7 @@ export function useSourceControl(
           try {
             repo = stateRef.current.repo ?? null;
             status = await native.gitStatus(reusableRoot);
-            if (requestId !== requestIdRef.current) return;
+            if (!isCurrent()) return;
             if (!repo || repo.repoRoot !== reusableRoot) {
               repo = {
                 repoRoot: reusableRoot,
@@ -253,9 +346,9 @@ export function useSourceControl(
             }
           } catch {
             const snapshot = await native.gitPanelSnapshot(contextPath);
-            if (requestId !== requestIdRef.current) return;
+            if (!isCurrent()) return;
             if (!snapshot.repo) {
-              setState((current) => ({
+              land((current) => ({
                 ...current,
                 repo: null,
                 status: null,
@@ -270,9 +363,9 @@ export function useSourceControl(
           }
         } else {
           const snapshot = await native.gitPanelSnapshot(contextPath);
-          if (requestId !== requestIdRef.current) return;
+          if (!isCurrent()) return;
           if (!snapshot.repo) {
-            setState((current) => ({
+            land((current) => ({
               ...current,
               repo: null,
               status: null,
@@ -287,7 +380,7 @@ export function useSourceControl(
         }
 
         if (!repo) {
-          setState((current) => ({
+          land((current) => ({
             ...current,
             repo: null,
             status: null,
@@ -312,15 +405,16 @@ export function useSourceControl(
             await native.gitFetch(repo.repoRoot);
             touchAutoFetch(autoFetchByRepoRef.current, repo.repoRoot);
             nextRemoteError = null;
-            if (requestId !== requestIdRef.current) return;
+            if (!isCurrent()) return;
             status = await native.gitStatus(repo.repoRoot);
-            if (requestId !== requestIdRef.current) return;
+            if (!isCurrent()) return;
           } catch (error) {
             nextRemoteError = normalizeError(error);
           }
+          if (!isCurrent()) return;
         }
 
-        setState((current) => ({
+        land((current) => ({
           ...current,
           repo,
           status,
@@ -330,8 +424,8 @@ export function useSourceControl(
           lastRemoteError: nextRemoteError,
         }));
       } catch (error) {
-        if (requestId !== requestIdRef.current) return;
-        setState((current) => ({
+        if (!isCurrent()) return;
+        land((current) => ({
           ...current,
           repo: null,
           hasRepo: false,
@@ -339,35 +433,41 @@ export function useSourceControl(
           isLoading: false,
           localError: normalizeError(error),
         }));
-      } finally {
-        lastRefreshAtRef.current = Date.now();
       }
     },
-    [contextPath, workspaceKey],
+    [contextKey, contextPath],
   );
 
   const refresh = useCallback(
     async (options?: { remote?: SourceControlRefreshMode }) => {
       const remoteMode = options?.remote ?? "never";
       const inflight = inflightRef.current;
-      if (inflight) {
-        const cur = inflightModeRef.current;
+      if (inflight?.contextKey === contextKey) {
+        const cur = inflight.mode;
         const upgrade =
           (cur === "never" && remoteMode !== "never") ||
           (cur === "auto" && remoteMode === "always");
-        if (!upgrade) return inflight;
+        if (!upgrade) return inflight.promise;
       }
-      inflightModeRef.current = remoteMode;
       const run = doRefresh(remoteMode).finally(() => {
-        if (inflightRef.current === run) {
-          inflightRef.current = null;
-          inflightModeRef.current = "never";
-        }
+        if (inflightRef.current?.promise === run) inflightRef.current = null;
       });
-      inflightRef.current = run;
+      inflightRef.current = { contextKey, mode: remoteMode, promise: run };
       return run;
     },
-    [doRefresh],
+    [contextKey, doRefresh],
+  );
+
+  // Follow-ups to a push or commit refresh whatever context is current when
+  // they finish, not the one captured before the action started.
+  const refreshRef = useRef(refresh);
+  useLayoutEffect(() => {
+    refreshRef.current = refresh;
+  }, [refresh]);
+  const refreshCurrent = useCallback(
+    (options?: { remote?: SourceControlRefreshMode }) =>
+      refreshRef.current(options),
+    [],
   );
 
   const runRemoteAction = useCallback(
@@ -401,45 +501,65 @@ export function useSourceControl(
           await native.gitPush(repo.repoRoot);
         }
         setState((current) => ({ ...current, lastRemoteError: null }));
-        await refresh({ remote: "never" });
+        await refreshCurrent({ remote: "never" });
         return { ok: true, action };
       } catch (error) {
         const message = normalizeError(error);
         setState((current) => ({ ...current, lastRemoteError: message }));
-        await refresh({ remote: "never" }).catch(() => {});
+        await refreshCurrent({ remote: "never" }).catch(() => {});
         return { ok: false, action, error: message };
       } finally {
         setState((current) => ({ ...current, busyAction: null }));
       }
     },
-    [refresh],
+    [refreshCurrent],
   );
 
   useEffect(() => {
     if (!enabled) {
       requestIdRef.current++;
-      setState({
-        repo: null,
-        status: null,
-        hasRepo: false,
-        isLoading: false,
-        localError: null,
-        busyAction: null,
-        lastRemoteError: null,
-      });
+      errorContextRef.current = null;
+      setState(EMPTY_STATE);
       return;
     }
-    setState((current) => ({ ...current, lastRemoteError: null }));
+    // A remote error belongs to its context; a consumer coming or going keeps it.
+    if (errorContextRef.current !== contextKey) {
+      errorContextRef.current = contextKey;
+      setState((current) => ({ ...current, lastRemoteError: null }));
+    }
     const run = () => {
-      const root = stateRef.current.repo?.repoRoot;
-      const sameRepo =
-        !!root &&
-        !!contextPath &&
-        (contextPath === root || contextPath.startsWith(`${root}/`));
-      const fresh = Date.now() - lastRefreshAtRef.current < SC_STATUS_TTL_MS;
-      if (fresh && sameRepo && stateRef.current.hasRepo) return;
-      void refresh({ remote: "never" });
+      const current = stateRef.current;
+      const plan = planContextRefresh({
+        live,
+        contextPath,
+        repoRoot: current.repo?.repoRoot ?? null,
+        hasRepo: current.hasRepo,
+        ageMs: Date.now() - lastRefreshAtRef.current,
+      });
+      if (plan === "refresh") {
+        void refresh({ remote: "never" });
+      } else if (plan === "clear") {
+        // Drop a refresh still in flight for the context just left; a running
+        // remote action keeps its busy state and error.
+        requestIdRef.current++;
+        inflightRef.current = null;
+        setState((s) => ({
+          ...s,
+          repo: null,
+          status: null,
+          hasRepo: false,
+          isLoading: false,
+          localError: null,
+        }));
+      }
     };
+    // A consumer with nothing to show must not wait for an idle slot, or it
+    // would flash "no repository" first.
+    const current = stateRef.current;
+    if (live && contextPath && !current.hasRepo && !current.isLoading) {
+      run();
+      return;
+    }
     const idle =
       typeof window.requestIdleCallback === "function"
         ? window.requestIdleCallback(run, { timeout: 600 })
@@ -455,10 +575,10 @@ export function useSourceControl(
         window.clearTimeout(idle as number);
       }
     };
-  }, [refresh, contextPath, enabled, workspaceKey]);
+  }, [refresh, contextKey, contextPath, enabled, live]);
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled || !live) return;
     let timer = 0;
     const onFocus = () => {
       if (timer) window.clearTimeout(timer);
@@ -474,7 +594,7 @@ export function useSourceControl(
       window.removeEventListener("focus", onFocus);
       if (timer) window.clearTimeout(timer);
     };
-  }, [refresh, enabled]);
+  }, [refresh, enabled, live]);
 
   return useMemo<SourceControlSummary>(
     () => ({
@@ -492,9 +612,9 @@ export function useSourceControl(
       busyAction: state.busyAction,
       lastRemoteError: state.lastRemoteError,
       applyStatus,
-      refresh,
+      refresh: refreshCurrent,
       runRemoteAction,
     }),
-    [state, applyStatus, refresh, runRemoteAction],
+    [state, applyStatus, refreshCurrent, runRemoteAction],
   );
 }

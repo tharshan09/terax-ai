@@ -1,7 +1,9 @@
 import { useCallback, useMemo } from "react";
 import { native } from "@/modules/ai/lib/native";
 import type { SidebarViewId } from "@/modules/sidebar";
+import type { StatusbarLayout } from "@/modules/statusbar/layout";
 import type { Tab } from "@/modules/tabs";
+import { statusConsumers } from "./statusConsumers";
 import { useSourceControl } from "./useSourceControl";
 
 function dirname(path: string | null): string | null {
@@ -21,6 +23,10 @@ type Params = {
   launchCwdResolved: boolean;
   home: string | null;
   sidebarView: SidebarViewId;
+  sidebarCollapsed: boolean;
+  explorerGitDecorations: boolean;
+  zenMode: boolean;
+  statusbarLayout: StatusbarLayout;
   cycleSidebarView: (view: SidebarViewId) => void;
   openCommitHistoryTab: (args: {
     repoRoot: string;
@@ -42,6 +48,10 @@ export function useSourceControlContext({
   launchCwdResolved,
   home,
   sidebarView,
+  sidebarCollapsed,
+  explorerGitDecorations,
+  zenMode,
+  statusbarLayout,
   cycleSidebarView,
   openCommitHistoryTab,
 }: Params) {
@@ -76,17 +86,26 @@ export function useSourceControlContext({
   const sourceControlPath = sourceControlActive
     ? sourceControlContextPath
     : badgeContextPath;
+  const { live } = statusConsumers({
+    sidebarView,
+    sidebarCollapsed,
+    activeTabKind: activeTab?.kind,
+    explorerGitDecorations,
+    statusbarLayout,
+    zenMode,
+  });
   // Git is routed over SSH now: the Rust git layer runs on the host over the
   // shared ControlMaster, so the summary stays enabled on every workspace and
   // the rail badge reflects the remote repo you are navigating.
-  const sourceControl = useSourceControl(sourceControlPath, true);
+  const sourceControl = useSourceControl(sourceControlPath, true, { live });
 
   const toggleSourceControl = useCallback(() => {
     cycleSidebarView("source-control");
   }, [cycleSidebarView]);
 
   const openGitGraphFromContext = useCallback(async () => {
-    const known = sourceControl.hasRepo ? sourceControl.repo : null;
+    // A snapshot nobody refreshes may predate a branch switch or a cd.
+    const known = live && sourceControl.hasRepo ? sourceControl.repo : null;
     if (known) {
       openCommitHistoryTab({
         repoRoot: known.repoRoot,
@@ -103,6 +122,7 @@ export function useSourceControlContext({
       /* noop */
     }
   }, [
+    live,
     openCommitHistoryTab,
     sourceControl.hasRepo,
     sourceControl.repo,
