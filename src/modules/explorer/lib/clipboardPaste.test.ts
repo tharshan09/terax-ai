@@ -438,7 +438,7 @@ describe("pasteClipboardFiles", () => {
     expect(opts.refresh).not.toHaveBeenCalled();
   });
 
-  it("neither reads the clipboard nor touches the tree when its scope is already stale", async () => {
+  it("says the paste is cancelled, reading nothing, when its scope is already stale", async () => {
     const opts = options();
     opts.isCurrent.mockReturnValue(false);
     expect(await pasteClipboardFiles("/ws/docs", opts)).toEqual([]);
@@ -448,19 +448,31 @@ describe("pasteClipboardFiles", () => {
     expect(opts.expand).not.toHaveBeenCalled();
     expect(opts.select).not.toHaveBeenCalled();
     expect(opts.onCopySettled).not.toHaveBeenCalled();
-    expect(toast.message).not.toHaveBeenCalled();
+    expect(toast.message).toHaveBeenCalledTimes(1);
+    expect(toast.message).toHaveBeenCalledWith(
+      "Paste cancelled: the explorer changed",
+    );
     expect(toast.error).not.toHaveBeenCalled();
   });
 
-  it("cancels before copying when the root changed during the clipboard read", async () => {
-    const clipboard = deferred<ReturnType<typeof clip>>();
-    invoke.mockReturnValueOnce(clipboard.promise);
-    const opts = options();
-    const paste = pasteClipboardFiles("/ws-a", opts);
-    opts.isCurrent.mockReturnValue(false);
-    clipboard.resolve(clip(["/x/a"]));
-    expect(await paste).toEqual([]);
-    expect(invoke).toHaveBeenCalledTimes(1);
+  it("says the paste is cancelled when the root changed during the clipboard read", async () => {
+    for (const files of [clip(["/x/a"]), clip([])]) {
+      vi.resetAllMocks();
+      const clipboard = deferred<ReturnType<typeof clip>>();
+      invoke.mockReturnValueOnce(clipboard.promise);
+      const opts = options();
+      const paste = pasteClipboardFiles("/ws-a", opts);
+      opts.isCurrent.mockReturnValue(false);
+      clipboard.resolve(files);
+      expect(await paste).toEqual([]);
+      expect(invoke).toHaveBeenCalledTimes(1);
+      expect(toast.message).toHaveBeenCalledTimes(1);
+      expect(toast.message).toHaveBeenCalledWith(
+        "Paste cancelled: the explorer changed",
+      );
+      expect(toast.error).not.toHaveBeenCalled();
+      expect(opts.onCopySettled).not.toHaveBeenCalled();
+    }
   });
 
   it("returns nothing after a root change during the copy, but still reports failures", async () => {

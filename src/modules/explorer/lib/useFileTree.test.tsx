@@ -2,7 +2,10 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
+const { invoke, watcher } = vi.hoisted(() => ({
+  invoke: vi.fn(),
+  watcher: { changed: (_paths: string[]) => {} },
+}));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("sonner", () => ({ toast: { error: vi.fn() } }));
 vi.mock("@/modules/workspace", () => ({
@@ -15,7 +18,10 @@ vi.mock("@/modules/settings/preferences", () => ({
 vi.mock("./watch", () => ({
   watchAdd: vi.fn(),
   watchRemove: vi.fn(),
-  listenFsChanged: () => Promise.resolve(() => {}),
+  listenFsChanged: (onChange: (paths: string[]) => void) => {
+    watcher.changed = onChange;
+    return Promise.resolve(() => {});
+  },
 }));
 
 import { type DirEntry, useFileTree } from "./useFileTree";
@@ -261,5 +267,45 @@ describe("useFileTree read promises", () => {
     await act(async () => docs.resolve([entry("a.txt")]));
     expect(result.current.nodes["/ws/docs"]).toBeUndefined();
     expect(result.current.isExpanded("/ws/docs")).toBe(false);
+  });
+});
+
+describe("useFileTree mutations", () => {
+  it("keeps the create row until a watcher read that overtook the re-read has rendered", async () => {
+    const pending = reads();
+    const frames: { creating: boolean; rows: ReturnType<typeof listing> }[] =
+      [];
+    const { result } = renderHook(() => {
+      const tree = useFileTree("/mk");
+      frames.push({
+        creating: tree.pendingCreate !== null,
+        rows: listing(tree, "/mk"),
+      });
+      return tree;
+    });
+    await act(async () => pending[0].resolve([entry("a")]));
+
+    act(() => result.current.beginCreate("/mk", "file"));
+    const opened = frames.length;
+    let creating: Promise<void> | undefined;
+    act(() => {
+      creating = result.current.commitCreate("b");
+    });
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    act(() => watcher.changed(["/mk/b"]));
+    expect(pending.map((r) => r.path)).toEqual(["/mk", "/mk", "/mk"]);
+    const [reread, watched] = pending.slice(1);
+
+    await act(async () => reread.resolve([entry("a"), entry("b")]));
+    expect(result.current.pendingCreate).not.toBeNull();
+    expect(listing(result.current, "/mk")).toEqual(["a"]);
+
+    await act(async () => watched.resolve([entry("a"), entry("b")]));
+    await act(async () => {
+      await creating;
+    });
+    expect(result.current.pendingCreate).toBeNull();
+    const closed = frames.slice(opened).find((frame) => !frame.creating);
+    expect(closed?.rows).toEqual(["a", "b"]);
   });
 });

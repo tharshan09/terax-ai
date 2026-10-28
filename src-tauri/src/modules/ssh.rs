@@ -338,12 +338,6 @@ def list_subdirs(req):
     return out
 
 
-def list_names(req):
-    # The copy's free-name search needs names only, so no entry is stat'ed.
-    names = os.listdir(os.path.expanduser(req["path"]))
-    return [n for n in names if not _staging(n) and _utf8_ok(n)][:MAX_ENTRIES]
-
-
 def stat(req):
     path = os.path.expanduser(req["path"])
     st = os.stat(path, follow_symlinks=True)
@@ -492,6 +486,10 @@ def write_bytes(req):
 NO_HARDLINKS = (errno.ENOTSUP, errno.EOPNOTSUPP, errno.EPERM, errno.ENOSYS)
 
 
+class _Taken(Exception):
+    pass
+
+
 def _reserve_and_swap(src, dst, is_dir):
     # The exclusive placeholder makes the rename replace only our own empty
     # entry, never something another writer put at `dst` meanwhile.
@@ -501,7 +499,7 @@ def _reserve_and_swap(src, dst, is_dir):
         else:
             os.close(os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
     except FileExistsError:
-        raise FileExistsError("already exists: " + dst)
+        raise _Taken()
     try:
         os.rename(src, dst)
     except BaseException:
@@ -521,7 +519,7 @@ def _place(src, dst):
     try:
         os.link(src, dst)
     except FileExistsError:
-        raise FileExistsError("already exists: " + dst)
+        raise _Taken()
     except OSError as ex:
         if ex.errno not in NO_HARDLINKS:
             raise
@@ -534,13 +532,20 @@ def _place(src, dst):
 
 
 def publish(req):
-    src = os.path.expanduser(req["from"]); dst = os.path.expanduser(req["to"])
-    _place(src, dst)
-    # Cleanup rides on the publish run; only a staging dir is ever removed.
-    staging = req.get("staging")
-    if staging and _staging(os.path.basename(staging)):
-        shutil.rmtree(os.path.expanduser(staging), ignore_errors=True)
-    return True
+    # The first name not taken wins; only a claim moves on, so a failing swap
+    # onto our own placeholder fails the item, as in copy.rs. None: all taken.
+    src = os.path.expanduser(req["from"]); base = os.path.expanduser(req["dir"])
+    for name in req["names"]:
+        try:
+            _place(src, base + name)
+        except _Taken:
+            continue
+        # Cleanup rides on the publish run; only a staging dir is ever removed.
+        staging = req.get("staging")
+        if staging and _staging(os.path.basename(staging)):
+            shutil.rmtree(os.path.expanduser(staging), ignore_errors=True)
+        return name
+    return None
 
 
 def _subseq(needle, hay):
@@ -632,7 +637,7 @@ def grep(req):
     return {"hits": hits, "truncated": truncated, "files_scanned": files}
 
 
-OPS = {"read_dir": read_dir, "list_subdirs": list_subdirs, "list_names": list_names, "stat": stat,
+OPS = {"read_dir": read_dir, "list_subdirs": list_subdirs, "stat": stat,
        "realpath": realpath, "read_file": read_file, "write_file": write_file,
        "create_file": create_file, "create_dir": create_dir, "mkstage": mkstage,
        "rename": rename, "delete": delete, "publish": publish,
@@ -1512,11 +1517,6 @@ fn copy_with(
 ) -> Result<crate::modules::fs::copy::CopyResult, String> {
     use crate::modules::fs::copy::{created_path, CopyFailure, CopyResult};
     let dest = dest_dir.trim_end_matches('/');
-    let mut taken = TakenNames {
-        host,
-        dir: dest_dir,
-        listing: Listing::NotYet,
-    };
     let mut result = CopyResult::default();
     let failure = |source: &String, message: &str| CopyFailure {
         source: source.clone(),
@@ -1528,7 +1528,6 @@ fn copy_with(
             std::path::Path::new(source),
             dest,
             rename_on_conflict,
-            &mut taken,
             registry,
         );
         match item {
@@ -1564,69 +1563,8 @@ fn copy_with(
     Ok(result)
 }
 
-const LISTING_ATTEMPTS: usize = 2;
-/// Each publish run costs a round trip, so without a listing an item stops early.
-const UNLISTED_NAME_TRIES: usize = 32;
-const NO_LISTING: &str = "could not list the destination to find a free name";
-
-enum Listing {
-    NotYet,
-    Listed(std::collections::HashSet<String>),
-    Failed,
-}
-
-/// Names known to be in `dir`, only to skip doomed publish runs. The folder is
-/// listed on the first clash, retried once; the no-replace publish is the real check.
-struct TakenNames<'a> {
-    host: &'a str,
-    dir: &'a str,
-    listing: Listing,
-}
-
-impl TakenNames<'_> {
-    fn contains(&self, name: &str) -> bool {
-        matches!(&self.listing, Listing::Listed(names) if names.contains(name))
-    }
-
-    fn unlisted(&self) -> bool {
-        matches!(self.listing, Listing::Failed)
-    }
-
-    fn published(&mut self, name: String) {
-        if let Listing::Listed(names) = &mut self.listing {
-            names.insert(name);
-        }
-    }
-
-    fn clashed(&mut self, run: &mut RemoteRun, name: String) {
-        if matches!(self.listing, Listing::NotYet) {
-            self.listing = list_names(run, self.host, self.dir);
-        }
-        if let Listing::Listed(names) = &mut self.listing {
-            names.insert(name);
-        }
-    }
-}
-
-fn list_names(run: &mut RemoteRun, host: &str, dest_dir: &str) -> Listing {
-    let request = serde_json::json!({ "op": "list_names", "path": dest_dir });
-    for attempt in 1..=LISTING_ATTEMPTS {
-        let names = run(&request, Some(REMOTE_FS_TIMEOUT))
-            .map_err(String::from)
-            .and_then(|data| {
-                serde_json::from_value(data).map_err(|e| format!("bad list_names response: {e}"))
-            });
-        match names {
-            Ok(names) => return Listing::Listed(names),
-            Err(error) => {
-                log::warn!(
-                    "ssh copy: could not list {host}:{dest_dir} (attempt {attempt}): {error}"
-                )
-            }
-        }
-    }
-    Listing::Failed
-}
+/// Names one publish run tries in order; a block without a free one moves on.
+const NAMES_PER_PUBLISH: usize = 64;
 
 // The remote landing gets no deny-list check, like a remote editor save.
 fn copy_one(
@@ -1634,7 +1572,6 @@ fn copy_one(
     src: &std::path::Path,
     dest: &str,
     rename_on_conflict: bool,
-    taken: &mut TakenNames<'_>,
     registry: &crate::modules::workspace::WorkspaceRegistry,
 ) -> Result<String, ItemError> {
     use crate::modules::fs::copy;
@@ -1650,15 +1587,7 @@ fn copy_one(
     // Without a staging dir of its own the item returns here, before any cleanup.
     let staging = make_staging(run, dest)?;
     let outcome = match upload(run, &plan, &format!("{staging}/{}", copy::STAGED_ITEM)) {
-        Ok(()) => publish_staged(
-            run,
-            &staging,
-            dest,
-            name,
-            source.is_dir,
-            rename_on_conflict,
-            taken,
-        ),
+        Ok(()) => publish_staged(run, &staging, dest, name, source.is_dir, rename_on_conflict),
         Err(error) => Err(error.into()),
     };
     // A successful publish already removed the staging dir; without a
@@ -1677,8 +1606,8 @@ fn copy_one(
     outcome
 }
 
-/// The listing only saves runs; a case-insensitive host refuses a case variant
-/// in the no-replace publish itself, which moves on to the next candidate.
+/// The helper claims each name without replacing, so a case-insensitive host
+/// refuses a case variant itself and the run moves on to the next name.
 fn publish_staged(
     run: &mut RemoteRun,
     staging: &str,
@@ -1686,42 +1615,36 @@ fn publish_staged(
     name: &str,
     is_dir: bool,
     rename_on_conflict: bool,
-    taken: &mut TakenNames<'_>,
 ) -> Result<String, ItemError> {
     use crate::modules::fs::copy;
     let staged = format!("{staging}/{}", copy::STAGED_ITEM);
-    let mut unlisted_tries = 0;
-    for candidate in copy::copy_candidates(std::ffi::OsStr::new(name), is_dir) {
-        let candidate = candidate.to_string_lossy().into_owned();
-        if taken.contains(&candidate) {
-            continue;
-        }
-        if taken.unlisted() {
-            if unlisted_tries == UNLISTED_NAME_TRIES {
-                return Err(RemoteError::Failed(NO_LISTING.to_string()).into());
-            }
-            unlisted_tries += 1;
+    let tries = if rename_on_conflict { usize::MAX } else { 1 };
+    let mut candidates = copy::copy_candidates(std::ffi::OsStr::new(name), is_dir)
+        .take(tries)
+        .map(|candidate| candidate.to_string_lossy().into_owned());
+    loop {
+        let block: Vec<String> = candidates.by_ref().take(NAMES_PER_PUBLISH).collect();
+        if block.is_empty() {
+            return Err(RemoteError::Failed(copy::no_free_copy_name().to_string()).into());
         }
         let request = serde_json::json!({
-            "op": "publish", "from": staged, "to": format!("{dest}/{candidate}"),
+            "op": "publish", "from": staged, "dir": format!("{dest}/"), "names": block,
             "staging": staging,
         });
         match run(&request, Some(REMOTE_FS_TIMEOUT)) {
-            Ok(_) => {
-                taken.published(candidate.clone());
-                return Ok(candidate);
+            Ok(serde_json::Value::String(used)) if block.contains(&used) => return Ok(used),
+            Ok(serde_json::Value::Null) if rename_on_conflict => {}
+            Ok(serde_json::Value::Null) => {
+                let taken = copy::already_exists(format!("{dest}/{name}"));
+                return Err(RemoteError::Failed(taken.to_string()).into());
             }
-            Err(RemoteError::Failed(message)) if message.starts_with("already exists: ") => {
-                if !rename_on_conflict {
-                    return Err(RemoteError::Failed(message).into());
-                }
-                taken.clashed(run, candidate);
+            Ok(other) => {
+                return Err(RemoteError::Failed(format!("bad publish response: {other}")).into())
             }
             Err(RemoteError::Transport(message)) => return Err(ItemError::PublishLost(message)),
             Err(error) => return Err(error.into()),
         }
     }
-    Err(RemoteError::Failed(copy::no_free_copy_name().to_string()).into())
 }
 
 #[cfg(test)]
@@ -2139,54 +2062,118 @@ Host !secret prod
         assert_eq!(rels(&grep["hits"]), [".hidden/report"]);
     }
 
+    /// A publish request trying `names`, in order, in `dir` (ending in `/`).
+    #[cfg(unix)]
+    fn publish_request(from: &str, dir: &str, names: &[&str]) -> serde_json::Value {
+        serde_json::json!({ "op": "publish", "from": from, "dir": dir, "names": names })
+    }
+
+    #[cfg(unix)]
+    fn used(name: &str) -> serde_json::Value {
+        serde_json::json!({ "ok": true, "data": name })
+    }
+
+    #[cfg(unix)]
+    fn all_taken() -> serde_json::Value {
+        serde_json::json!({ "ok": true, "data": null })
+    }
+
     #[cfg(unix)]
     #[test]
     fn embedded_helper_publish_never_replaces() {
         let dir = tempfile::tempdir().unwrap();
         let p = |rel: &str| dir.path().join(rel).to_string_lossy().into_owned();
+        let base = format!("{}/", dir.path().display());
         let stage = |rel: &str, body: &[u8]| {
             let path = dir.path().join(".terax-copy-s5Vd3_Jf").join(rel);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, body).unwrap();
             path.to_string_lossy().into_owned()
         };
-        let publish = |prelude: &str, from: &str, to: &str| {
-            run_helper(
-                prelude,
-                &serde_json::json!({ "op": "publish", "from": from, "to": to }),
-            )
-        };
-        let refused =
-            |to: &str| serde_json::json!({ "ok": false, "error": format!("already exists: {to}") });
-        let ok = serde_json::json!({ "ok": true, "data": true });
+        let publish =
+            |from: &str, names: &[&str]| run_helper("", &publish_request(from, &base, names));
 
         let staged = stage("f1", b"new");
-        let Some(env) = publish("", &staged, &p("free.txt")) else {
+        let Some(env) = publish(&staged, &["free.txt"]) else {
             return;
         };
-        assert_eq!(env, ok);
+        assert_eq!(env, used("free.txt"));
         assert_eq!(std::fs::read(p("free.txt")).unwrap(), b"new");
         assert!(!std::path::Path::new(&staged).exists());
 
         std::fs::write(p("taken.txt"), b"old").unwrap();
         let staged = stage("f2", b"new");
-        assert_eq!(
-            publish("", &staged, &p("taken.txt")).unwrap(),
-            refused(&p("taken.txt"))
-        );
+        assert_eq!(publish(&staged, &["taken.txt"]).unwrap(), all_taken());
         assert_eq!(std::fs::read(p("taken.txt")).unwrap(), b"old");
         assert!(std::path::Path::new(&staged).exists());
 
-        // A failing swap (folder into itself) must take its reservation back.
+        // A failing swap (folder into itself) takes its reservation back and
+        // tries no further name.
         let item = dir.path().join(".terax-copy-s5Vd3_Jf/item");
         std::fs::create_dir(&item).unwrap();
-        let inside = item.join("sub");
-        let env = publish("", &item.to_string_lossy(), &inside.to_string_lossy()).unwrap();
+        let inside = format!("{}/", item.display());
+        let env = run_helper(
+            "",
+            &publish_request(&item.to_string_lossy(), &inside, &["sub", "sub copy"]),
+        )
+        .unwrap();
         assert_eq!(env["ok"], false, "{env}");
-        assert!(!inside.exists(), "reservation must be removed");
-        assert_eq!(publish("", &item.to_string_lossy(), &p("folder")).unwrap(), ok);
+        assert!(!item.join("sub").exists(), "reservation must be removed");
+        assert!(!item.join("sub copy").exists(), "{env}");
+        assert_eq!(
+            publish(&item.to_string_lossy(), &["folder"]).unwrap(),
+            used("folder")
+        );
         assert!(dir.path().join("folder").is_dir());
         assert!(!item.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn embedded_helper_publish_takes_the_first_free_name_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = format!("{}/", dir.path().display());
+        let staging = dir.path().join(".terax-copy-s5Vd3_Jf");
+        std::fs::create_dir(&staging).unwrap();
+        for taken in ["a.txt", "a copy.txt", "a copy 3.txt"] {
+            std::fs::write(dir.path().join(taken), taken).unwrap();
+        }
+        std::fs::create_dir(dir.path().join("v")).unwrap();
+        let staged = staging.join("a.txt");
+        std::fs::write(&staged, b"new").unwrap();
+        let names = ["a.txt", "a copy.txt", "a copy 2.txt", "a copy 3.txt"];
+        let Some(env) = run_helper(
+            "",
+            &publish_request(&staged.to_string_lossy(), &base, &names),
+        ) else {
+            return;
+        };
+        assert_eq!(env, used("a copy 2.txt"));
+        assert_eq!(
+            std::fs::read(dir.path().join("a copy 2.txt")).unwrap(),
+            b"new"
+        );
+        for taken in ["a.txt", "a copy.txt", "a copy 3.txt"] {
+            assert_eq!(
+                std::fs::read(dir.path().join(taken)).unwrap(),
+                taken.as_bytes()
+            );
+        }
+
+        let folder = staging.join("v");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("x"), b"x").unwrap();
+        let folder = folder.to_string_lossy().into_owned();
+        let env = run_helper("", &publish_request(&folder, &base, &["v", "a.txt"])).unwrap();
+        assert_eq!(env, all_taken());
+        assert!(std::path::Path::new(&folder).join("x").exists());
+        let env = run_helper("", &publish_request(&folder, &base, &["v", "v copy"])).unwrap();
+        assert_eq!(env, used("v copy"));
+        assert_eq!(std::fs::read(dir.path().join("v copy/x")).unwrap(), b"x");
+        assert!(std::fs::read_dir(dir.path().join("v"))
+            .unwrap()
+            .next()
+            .is_none());
     }
 
     #[cfg(unix)]
@@ -2204,7 +2191,7 @@ Host !secret prod
                 "def _onto_reservation(a, b):".into(),
                 "    if os.path.islink(b) or not os.path.isfile(b) or os.path.getsize(b):".into(),
                 "        raise OSError(errno.EIO, 'no reservation at ' + b)".into(),
-                format!("    if {fail}: raise OSError(errno.EXDEV, 'swap failed')"),
+                format!("    if {fail}: raise OSError(errno.EEXIST, 'swap failed')"),
                 "    _rename(a, b)".into(),
                 "os.rename = _onto_reservation".into(),
                 String::new(),
@@ -2213,17 +2200,15 @@ Host !secret prod
         };
         let dir = tempfile::tempdir().unwrap();
         let p = |rel: &str| dir.path().join(rel).to_string_lossy().into_owned();
+        let base = format!("{}/", dir.path().display());
         let stage = |rel: &str, body: &[u8]| {
             let path = dir.path().join(".terax-copy-s5Vd3_Jf").join(rel);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, body).unwrap();
             path.to_string_lossy().into_owned()
         };
-        let publish = |prelude: &str, from: &str, to: &str| {
-            run_helper(
-                prelude,
-                &serde_json::json!({ "op": "publish", "from": from, "to": to }),
-            )
+        let publish = |prelude: &str, from: &str, names: &[&str]| {
+            run_helper(prelude, &publish_request(from, &base, names))
         };
         std::fs::write(p("taken.txt"), b"old").unwrap();
         std::os::unix::fs::symlink(p("victim"), p("dangling.txt")).unwrap();
@@ -2231,26 +2216,19 @@ Host !secret prod
         for code in ["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS"] {
             let prelude = without_links(code, false);
             let staged = stage(code, b"fallback");
-            let to = p(&format!("{code}.txt"));
-            let Some(env) = publish(&prelude, &staged, &to) else {
+            let name = format!("{code}.txt");
+            let Some(env) = publish(&prelude, &staged, &["taken.txt", "dangling.txt", &name])
+            else {
                 return;
             };
-            assert_eq!(
-                env,
-                serde_json::json!({ "ok": true, "data": true }),
-                "{code}"
-            );
-            assert_eq!(std::fs::read(&to).unwrap(), b"fallback");
+            assert_eq!(env, used(&name), "{code}");
+            assert_eq!(std::fs::read(p(&name)).unwrap(), b"fallback");
             assert!(!std::path::Path::new(&staged).exists());
 
             for taken in ["taken.txt", "dangling.txt"] {
                 let staged = stage(code, b"new");
-                let env = publish(&prelude, &staged, &p(taken)).unwrap();
-                assert_eq!(
-                    env["error"],
-                    format!("already exists: {}", p(taken)),
-                    "{code}"
-                );
+                let env = publish(&prelude, &staged, &[taken]).unwrap();
+                assert_eq!(env, all_taken(), "{code}");
                 assert!(std::path::Path::new(&staged).exists());
             }
         }
@@ -2260,13 +2238,18 @@ Host !secret prod
             "must not write through the link"
         );
 
+        // EEXIST from the swap onto our own placeholder is no taken name.
         let staged = stage("swap", b"new");
-        let env = publish(&without_links("ENOSYS", true), &staged, &p("swap.txt")).unwrap();
+        let env = publish(
+            &without_links("ENOSYS", true),
+            &staged,
+            &["swap.txt", "swap copy.txt"],
+        )
+        .unwrap();
         assert_eq!(env["ok"], false, "{env}");
-        assert!(
-            !dir.path().join("swap.txt").exists(),
-            "reservation must be removed"
-        );
+        for name in ["swap.txt", "swap copy.txt"] {
+            assert!(!dir.path().join(name).exists(), "{name}");
+        }
         assert!(std::path::Path::new(&staged).exists());
     }
 
@@ -2278,24 +2261,17 @@ Host !secret prod
         let insensitive = dir.path().join("a.txt").exists();
         let staged = dir.path().join(".terax-copy-s5Vd3_Jf");
         std::fs::write(&staged, b"new").unwrap();
-        let to = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
-        let publish = |name: &str| {
-            run_helper(
-                "",
-                &serde_json::json!({
-                    "op": "publish", "from": staged.to_string_lossy(), "to": to(name),
-                }),
-            )
-        };
-        let Some(env) = publish("a.txt") else {
+        let request = publish_request(
+            &staged.to_string_lossy(),
+            &format!("{}/", dir.path().display()),
+            &["a.txt", "a copy.txt"],
+        );
+        let Some(env) = run_helper("", &request) else {
             return;
         };
-        if insensitive {
-            assert_eq!(env["error"], format!("already exists: {}", to("a.txt")));
-            assert_eq!(publish("a copy.txt").unwrap()["ok"], true);
-        } else {
-            assert_eq!(env["ok"], true);
-        }
+        let expected = if insensitive { "a copy.txt" } else { "a.txt" };
+        assert_eq!(env, used(expected));
+        assert_eq!(std::fs::read(dir.path().join(expected)).unwrap(), b"new");
         assert_eq!(std::fs::read(dir.path().join("A.txt")).unwrap(), b"old");
     }
 
@@ -2304,32 +2280,41 @@ Host !secret prod
     fn embedded_helper_publish_removes_its_staging_dir() {
         let dir = tempfile::tempdir().unwrap();
         let path = |rel: &str| dir.path().join(rel).to_string_lossy().into_owned();
-        let publish = |from: &str, to: &str, staging: &str| {
-            run_helper(
-                "",
-                &serde_json::json!({
-                    "op": "publish", "from": path(from), "to": path(to), "staging": path(staging),
-                }),
-            )
+        let base = format!("{}/", dir.path().display());
+        let publish = |from: &str, names: &[&str], staging: &str| {
+            let mut request = publish_request(&path(from), &base, names);
+            request["staging"] = path(staging).into();
+            run_helper("", &request)
         };
         std::fs::create_dir_all(dir.path().join(".terax-copy-s5Vd3_Jf/item/sub")).unwrap();
         std::fs::write(dir.path().join(".terax-copy-s5Vd3_Jf/item/sub/x"), b"x").unwrap();
         std::fs::write(dir.path().join("taken"), b"old").unwrap();
 
-        let Some(env) = publish(".terax-copy-s5Vd3_Jf/item", "taken", ".terax-copy-s5Vd3_Jf")
-        else {
+        let Some(env) = publish(
+            ".terax-copy-s5Vd3_Jf/item",
+            &["taken"],
+            ".terax-copy-s5Vd3_Jf",
+        ) else {
             return;
         };
-        assert_eq!(env["error"], format!("already exists: {}", path("taken")));
+        assert_eq!(env, all_taken());
         assert!(dir.path().join(".terax-copy-s5Vd3_Jf/item/sub/x").exists());
 
-        let env = publish(".terax-copy-s5Vd3_Jf/item", "free", ".terax-copy-s5Vd3_Jf").unwrap();
-        assert_eq!(env, serde_json::json!({ "ok": true, "data": true }));
+        let env = publish(
+            ".terax-copy-s5Vd3_Jf/item",
+            &["taken", "free"],
+            ".terax-copy-s5Vd3_Jf",
+        )
+        .unwrap();
+        assert_eq!(env, used("free"));
         assert!(dir.path().join("free/sub/x").exists());
         assert!(!dir.path().join(".terax-copy-s5Vd3_Jf").exists());
 
         std::fs::create_dir_all(dir.path().join("keep/item")).unwrap();
-        assert_eq!(publish("keep/item", "moved", "keep").unwrap()["ok"], true);
+        assert_eq!(
+            publish("keep/item", &["moved"], "keep").unwrap(),
+            used("moved")
+        );
         assert!(
             dir.path().join("keep").is_dir(),
             "only a staging dir is removed"
@@ -2370,38 +2355,6 @@ Host !secret prod
         assert_eq!(mode("shared"), 0o775, "the umask must not cut the mode");
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn embedded_helper_list_names_lists_without_a_stat() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join(".terax-copy-x9Kq2_Lm")).unwrap();
-        std::fs::create_dir(dir.path().join("sub")).unwrap();
-        std::fs::write(dir.path().join(".env"), b"").unwrap();
-        std::fs::write(dir.path().join("a.txt"), b"").unwrap();
-        std::os::unix::fs::symlink("gone", dir.path().join("dead")).unwrap();
-        let no_stat = [
-            "import os",
-            "def _no_stat(*a, **k): raise OSError('list_names must not stat')",
-            "os.stat = os.lstat = os.scandir = _no_stat",
-            "",
-        ]
-        .join("\n");
-        let request =
-            serde_json::json!({ "op": "list_names", "path": dir.path().to_string_lossy() });
-        let Some(env) = run_helper(&no_stat, &request) else {
-            return;
-        };
-        assert_eq!(env["ok"], true, "{env}");
-        let mut names: Vec<&str> = env["data"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|name| name.as_str().unwrap())
-            .collect();
-        names.sort_unstable();
-        assert_eq!(names, [".env", "a.txt", "dead", "sub"]);
-    }
-
     /// Runs the SSH copy loop against `respond` instead of a host and returns
     /// the result with every request it sent.
     fn stub_copy(
@@ -2432,7 +2385,7 @@ Host !secret prod
 
     fn healthy(request: &serde_json::Value) -> RemoteReply {
         Ok(match request["op"].as_str() {
-            Some("list_names") => serde_json::json!([]),
+            Some("publish") => request["names"][0].clone(),
             Some("mkstage") => serde_json::json!(format!(
                 "{}{}stub_9Xk",
                 request["path"].as_str().unwrap(),
@@ -2532,232 +2485,164 @@ Host !secret prod
         );
     }
 
-    #[test]
-    fn copy_lists_twice_before_trying_names_without_a_listing() {
-        let src = tempfile::tempdir().unwrap();
-        let sources = local_sources(src.path(), &["a.txt"]);
-        let listings: [fn() -> RemoteReply; 3] = [
-            || Err(RemoteError::Transport("SSH request timed out".into())),
-            || Err(RemoteError::Failed("Permission denied".into())),
-            || Ok(serde_json::json!("not a listing")),
-        ];
-        for listing in listings {
-            let (result, requests) = stub_copy(&sources, |request| {
-                if request["op"] == "list_names" {
-                    return listing();
-                }
-                if request["op"] == "publish" && request["to"] == "/remote/a.txt" {
-                    return Err(RemoteError::Failed("already exists: /remote/a.txt".into()));
-                }
-                healthy(request)
-            });
-            let result = result.unwrap();
-            assert_eq!(result.created, ["/remote/a copy.txt"]);
-            assert!(result.failed.is_empty());
-            let targets: Vec<&serde_json::Value> = requests
-                .iter()
-                .filter(|r| r["op"] == "publish")
-                .map(|r| &r["to"])
-                .collect();
-            assert_eq!(targets, ["/remote/a.txt", "/remote/a copy.txt"]);
-            assert_eq!(
-                ops(&requests, &["list_names", "publish"]),
-                ["publish", "list_names", "list_names", "publish"]
-            );
+    /// Answers a publish like a host holding `taken`: the first free name, or
+    /// null when the whole block is taken.
+    fn publish_into(taken: &[&str], request: &serde_json::Value) -> Option<RemoteReply> {
+        if request["op"] != "publish" {
+            return None;
         }
+        let names = request["names"].as_array().unwrap();
+        let free = names
+            .iter()
+            .find(|name| !taken.contains(&name.as_str().unwrap()));
+        Some(Ok(free.cloned().unwrap_or(serde_json::Value::Null)))
+    }
+
+    fn publishes(requests: &[serde_json::Value]) -> Vec<&serde_json::Value> {
+        requests.iter().filter(|r| r["op"] == "publish").collect()
+    }
+
+    fn deletes(requests: &[serde_json::Value]) -> Vec<&serde_json::Value> {
+        requests
+            .iter()
+            .filter(|r| r["op"] == "delete")
+            .map(|r| &r["path"])
+            .collect()
     }
 
     #[test]
-    fn a_listing_that_works_on_the_retry_is_used() {
-        let src = tempfile::tempdir().unwrap();
-        let sources = local_sources(src.path(), &["a.txt"]);
-        let mut listings = 0;
-        let (result, requests) = stub_copy(&sources, |request| {
-            if request["op"] == "list_names" {
-                listings += 1;
-                if listings == 1 {
-                    return Err(RemoteError::Failed(
-                        "Resource temporarily unavailable".into(),
-                    ));
-                }
-                return listing(&["a.txt", "a copy.txt"]);
-            }
-            refuse(&["/remote/a.txt"], request).unwrap_or_else(|| healthy(request))
-        });
-        assert_eq!(result.unwrap().created, ["/remote/a copy 2.txt"]);
-        assert_eq!(
-            publish_targets(&requests),
-            ["/remote/a.txt", "/remote/a copy 2.txt"]
-        );
-        assert_eq!(
-            ops(&requests, &["list_names", "publish"]),
-            ["publish", "list_names", "list_names", "publish"]
-        );
-    }
-
-    #[test]
-    fn without_a_listing_an_item_gives_up_after_a_few_names() {
+    fn a_clash_moves_on_inside_one_publish_run() {
         let src = tempfile::tempdir().unwrap();
         let sources = local_sources(src.path(), &["a.txt", "b.txt"]);
         let (result, requests) = stub_copy(&sources, |request| {
-            if request["op"] == "list_names" {
-                return Err(RemoteError::Failed("Permission denied".into()));
-            }
+            publish_into(&["a.txt", "a copy.txt"], request).unwrap_or_else(|| healthy(request))
+        });
+        assert_eq!(
+            result.unwrap().created,
+            ["/remote/a copy 2.txt", "/remote/b.txt"]
+        );
+        let runs = publishes(&requests);
+        assert_eq!(runs.len(), 2);
+        let names = runs[0]["names"].as_array().unwrap();
+        assert_eq!(names.len(), NAMES_PER_PUBLISH);
+        assert_eq!(names[..3], ["a.txt", "a copy.txt", "a copy 2.txt"]);
+        assert_eq!(names[NAMES_PER_PUBLISH - 1], "a copy 63.txt");
+        assert_eq!(runs[0]["dir"], "/remote/");
+        let staging = runs[0]["staging"].as_str().unwrap();
+        assert!(staging.starts_with("/remote/.terax-copy-"), "{staging}");
+        assert_eq!(runs[0]["from"], format!("{staging}/item"));
+        assert!(deletes(&requests).is_empty());
+    }
+
+    #[test]
+    fn a_block_without_a_free_name_moves_on_to_the_next() {
+        let src = tempfile::tempdir().unwrap();
+        let sources = local_sources(src.path(), &["a.txt"]);
+        let mut runs = 0;
+        let (result, requests) = stub_copy(&sources, |request| {
             if request["op"] == "publish" {
-                let target = request["to"].as_str().unwrap();
-                return Err(RemoteError::Failed(format!("already exists: {target}")));
+                runs += 1;
+                if runs == 1 {
+                    return Ok(serde_json::Value::Null);
+                }
+            }
+            healthy(request)
+        });
+        assert_eq!(result.unwrap().created, ["/remote/a copy 64.txt"]);
+        let runs = publishes(&requests);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[1]["names"][0], "a copy 64.txt");
+        assert_eq!(runs[1]["staging"], runs[0]["staging"]);
+    }
+
+    #[test]
+    fn every_block_taken_fails_the_item_with_no_free_copy_name() {
+        let src = tempfile::tempdir().unwrap();
+        let sources = local_sources(src.path(), &["a.txt", "b.txt"]);
+        let (result, requests) = stub_copy(&sources, |request| {
+            if request["op"] == "publish" {
+                return Ok(serde_json::Value::Null);
             }
             healthy(request)
         });
         let result = result.unwrap();
         assert!(result.created.is_empty());
+        let no_free = crate::modules::fs::copy::no_free_copy_name().to_string();
         assert_eq!(
             failures(&result),
             [
-                (sources[0].clone(), NO_LISTING.to_string()),
-                (sources[1].clone(), NO_LISTING.to_string()),
+                (sources[0].clone(), no_free.clone()),
+                (sources[1].clone(), no_free),
             ]
         );
-        assert_eq!(
-            requests.iter().filter(|r| r["op"] == "list_names").count(),
-            LISTING_ATTEMPTS
-        );
-        let targets = publish_targets(&requests);
-        let first_item = 1 + UNLISTED_NAME_TRIES;
-        assert_eq!(targets.len(), first_item + UNLISTED_NAME_TRIES);
-        assert_eq!(targets[0], "/remote/a.txt");
-        assert_eq!(targets[first_item - 1], "/remote/a copy 32.txt");
-        assert_eq!(targets[first_item], "/remote/b.txt");
-        assert_eq!(
-            targets.last().unwrap().as_str(),
-            Some("/remote/b copy 31.txt")
-        );
-        assert_eq!(requests.iter().filter(|r| r["op"] == "delete").count(), 2);
-    }
-
-    fn listing(names: &[&str]) -> RemoteReply {
-        Ok(serde_json::json!(names))
-    }
-
-    fn publish_targets(requests: &[serde_json::Value]) -> Vec<&serde_json::Value> {
-        requests
-            .iter()
-            .filter(|r| r["op"] == "publish")
-            .map(|r| &r["to"])
-            .collect()
-    }
-
-    fn ops<'a>(requests: &'a [serde_json::Value], keep: &[&str]) -> Vec<&'a str> {
-        requests
-            .iter()
-            .filter_map(|r| r["op"].as_str())
-            .filter(|op| keep.contains(op))
-            .collect()
-    }
-
-    fn refuse(to: &[&str], request: &serde_json::Value) -> Option<RemoteReply> {
-        let target = request["to"].as_str()?;
-        (request["op"] == "publish" && to.contains(&target))
-            .then(|| Err(RemoteError::Failed(format!("already exists: {target}"))))
+        let names = crate::modules::fs::copy::copy_candidates(std::ffi::OsStr::new("a.txt"), false);
+        let blocks = names.count().div_ceil(NAMES_PER_PUBLISH);
+        let runs = publishes(&requests);
+        assert_eq!(runs.len(), 2 * blocks);
+        let last = runs[blocks - 1]["names"].as_array().unwrap();
+        assert_eq!(last.last().unwrap(), "a copy 10000.txt");
+        assert_eq!(runs[blocks]["names"][0], "b.txt");
+        assert_eq!(deletes(&requests).len(), 2);
     }
 
     #[test]
-    fn copy_lists_the_destination_only_after_a_clash_and_skips_listed_names() {
+    fn a_publish_failure_without_renaming_or_a_free_name_fails_the_item() {
         let src = tempfile::tempdir().unwrap();
-        let sources = local_sources(src.path(), &["readme.md"]);
-        let (result, requests) = stub_copy(&sources, |request| {
-            if request["op"] == "list_names" {
-                return listing(&["README.md"]);
-            }
-            healthy(request)
-        });
-        assert_eq!(result.unwrap().created, ["/remote/readme.md"]);
-        assert_eq!(publish_targets(&requests), ["/remote/readme.md"]);
-        assert!(!requests.iter().any(|r| r["op"] == "list_names"));
+        let sources = local_sources(src.path(), &["a.txt"]);
+        let reg = crate::modules::workspace::WorkspaceRegistry::default();
+        let mut requests = Vec::new();
+        let result = copy_with(
+            &mut |request, _| {
+                requests.push(request.clone());
+                publish_into(&["a.txt"], request).unwrap_or_else(|| healthy(request))
+            },
+            "stub",
+            &sources,
+            "/remote",
+            false,
+            &reg,
+        )
+        .unwrap();
+        assert_eq!(
+            failures(&result),
+            [(
+                sources[0].clone(),
+                "already exists: /remote/a.txt".to_string()
+            )]
+        );
+        let runs = publishes(&requests);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0]["names"], serde_json::json!(["a.txt"]));
+        assert_eq!(deletes(&requests), [&runs[0]["staging"]]);
 
-        // A case-insensitive host refuses the variant in the publish itself.
-        let (result, requests) = stub_copy(&sources, |request| {
-            if request["op"] == "list_names" {
-                return listing(&["README.md"]);
-            }
-            if request["op"] == "publish" && request["to"] == "/remote/readme.md" {
-                return Err(RemoteError::Failed(
-                    "already exists: /remote/readme.md".into(),
-                ));
-            }
-            healthy(request)
-        });
-        assert_eq!(result.unwrap().created, ["/remote/readme copy.md"]);
-        assert_eq!(
-            publish_targets(&requests),
-            ["/remote/readme.md", "/remote/readme copy.md"]
-        );
-        assert_eq!(
-            ops(&requests, &["list_names", "publish"]),
-            ["publish", "list_names", "publish"]
-        );
-
-        let (result, requests) = stub_copy(&sources, |request| {
-            if request["op"] == "list_names" {
-                return listing(&["readme.md", "readme copy.md"]);
-            }
-            refuse(&["/remote/readme.md"], request).unwrap_or_else(|| healthy(request))
-        });
-        assert_eq!(result.unwrap().created, ["/remote/readme copy 2.md"]);
-        let publishes: Vec<&serde_json::Value> =
-            requests.iter().filter(|r| r["op"] == "publish").collect();
-        assert_eq!(
-            publish_targets(&requests),
-            ["/remote/readme.md", "/remote/readme copy 2.md"]
-        );
-        let staging = publishes[1]["staging"].as_str().unwrap();
-        assert!(staging.starts_with("/remote/.terax-copy-"), "{staging}");
-        assert_eq!(publishes[1]["from"], format!("{staging}/item"));
-        assert!(!requests.iter().any(|r| r["op"] == "delete"));
-
-        let (result, requests) = stub_copy(&sources, |request| {
-            if request["op"] == "publish" {
-                return Err(RemoteError::Failed("Permission denied".into()));
-            }
-            healthy(request)
-        });
-        assert_eq!(result.unwrap().failed[0].message, "Permission denied");
-        let staging = requests
-            .iter()
-            .find(|r| r["op"] == "publish")
-            .map(|r| r["staging"].clone())
-            .unwrap();
-        assert_eq!(staging, "/remote/.terax-copy-stub_9Xk");
-        let deletes: Vec<&serde_json::Value> = requests
-            .iter()
-            .filter(|r| r["op"] == "delete")
-            .map(|r| &r["path"])
-            .collect();
-        assert_eq!(deletes, [&staging]);
-    }
-
-    #[test]
-    fn one_listing_serves_every_clash_of_the_batch() {
-        let src = tempfile::tempdir().unwrap();
-        let sources = local_sources(src.path(), &["a.txt", "b.txt"]);
-        let (result, requests) = stub_copy(&sources, |request| {
-            if request["op"] == "list_names" {
-                return listing(&["a.txt", "b.txt"]);
-            }
-            refuse(&["/remote/a.txt", "/remote/b.txt"], request).unwrap_or_else(|| healthy(request))
-        });
-        assert_eq!(
-            result.unwrap().created,
-            ["/remote/a copy.txt", "/remote/b copy.txt"]
-        );
-        assert_eq!(
-            publish_targets(&requests),
-            ["/remote/a.txt", "/remote/a copy.txt", "/remote/b copy.txt"]
-        );
-        assert_eq!(
-            requests.iter().filter(|r| r["op"] == "list_names").count(),
-            1
-        );
+        type Reply = fn() -> RemoteReply;
+        let replies: [(Reply, &str); 2] = [
+            (
+                || Err(RemoteError::Failed("Permission denied".into())),
+                "Permission denied",
+            ),
+            (
+                || Ok(serde_json::json!("elsewhere.txt")),
+                "bad publish response: \"elsewhere.txt\"",
+            ),
+        ];
+        for (reply, message) in replies {
+            let (result, requests) = stub_copy(&sources, |request| {
+                if request["op"] == "publish" {
+                    return reply();
+                }
+                healthy(request)
+            });
+            assert_eq!(
+                failures(&result.unwrap()),
+                [(sources[0].clone(), message.to_string())]
+            );
+            assert_eq!(publishes(&requests).len(), 1);
+            assert_eq!(
+                deletes(&requests),
+                [&serde_json::json!("/remote/.terax-copy-stub_9Xk")]
+            );
+        }
     }
 
     #[test]
@@ -2857,9 +2742,6 @@ Host !secret prod
         let result = copy_with(
             &mut |request, timeout| {
                 budgets.push((request["op"].as_str().unwrap().to_string(), timeout));
-                if let Some(refused) = refuse(&["/remote/pkg"], request) {
-                    return refused;
-                }
                 if request["op"] == "publish" {
                     return Err(RemoteError::Failed("Permission denied".into()));
                 }
@@ -2878,8 +2760,6 @@ Host !secret prod
             ("mkstage", control),
             ("create_dir", control),
             ("write_bytes", None),
-            ("publish", control),
-            ("list_names", control),
             ("publish", control),
             ("delete", control),
         ];

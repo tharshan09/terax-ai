@@ -338,7 +338,8 @@ fn copy_item(
         &mut Vec::new(),
     );
     let result = walk.and_then(|()| {
-        publish(
+        let lock = unlock(&staged)?;
+        let published = publish(
             &staged,
             dest,
             name,
@@ -346,16 +347,91 @@ fn copy_item(
             rename_on_conflict,
             rename_no_replace,
             swap_onto_claim,
-        )
+        )?;
+        relock(&dest.join(&published), lock);
+        Ok(published)
     });
+    discard_staging(staging);
+    result
+}
+
+// A lock the copy brought along would leave a failed item's rest undeletable.
+fn discard_staging(staging: tempfile::TempDir) {
+    unlock_tree(staging.path());
+    let path = staging.path().to_path_buf();
     if let Err(error) = staging.close() {
         log::warn!(
             "fs_copy: could not remove staging {}: {error}",
-            staged.parent().unwrap_or(dest).display()
+            path.display()
         );
     }
-    result
 }
+
+// std::fs::copy keeps Finder's lock (uchg) and the append-only flags; each
+// refuses the publish rename and every delete.
+#[cfg(target_os = "macos")]
+const LOCK_FLAGS: u32 = libc::UF_IMMUTABLE | libc::UF_APPEND | libc::SF_IMMUTABLE | libc::SF_APPEND;
+
+// libc offers no lchflags on Apple; unlike chflags it never follows a link.
+#[cfg(target_os = "macos")]
+fn set_flags(path: &Path, flags: u32) -> io::Result<()> {
+    extern "C" {
+        fn lchflags(path: *const libc::c_char, flags: libc::c_uint) -> libc::c_int;
+    }
+    let path = c_path(path)?;
+    if unsafe { lchflags(path.as_ptr(), flags) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Lifts a lock off `path` and returns the flags to put back: a Finder copy of
+/// a locked item is locked too.
+#[cfg(target_os = "macos")]
+fn unlock(path: &Path) -> io::Result<Option<u32>> {
+    use std::os::macos::fs::MetadataExt;
+    let flags = std::fs::symlink_metadata(path)?.st_flags();
+    if flags & LOCK_FLAGS == 0 {
+        return Ok(None);
+    }
+    set_flags(path, flags & !LOCK_FLAGS)?;
+    Ok(Some(flags))
+}
+
+#[cfg(target_os = "macos")]
+fn relock(path: &Path, flags: Option<u32>) {
+    let Some(flags) = flags else { return };
+    if let Err(error) = set_flags(path, flags) {
+        log::warn!("fs_copy: could not lock {} again: {error}", path.display());
+    }
+}
+
+/// Best effort before a removal; a link is never followed out of `dir`.
+#[cfg(target_os = "macos")]
+fn unlock_tree(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let _ = unlock(&path);
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            unlock_tree(&path);
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn unlock(_path: &Path) -> io::Result<Option<u32>> {
+    Ok(None)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn relock(_path: &Path, _flags: Option<u32>) {}
+
+#[cfg(not(target_os = "macos"))]
+fn unlock_tree(_dir: &Path) {}
 
 /// `rename` must never replace; `swap` only ever replaces our own placeholder.
 fn publish(
@@ -927,6 +1003,60 @@ mod tests {
             b"a"
         );
         assert!(no_staging_left(dest.path()));
+    }
+
+    #[cfg(target_os = "macos")]
+    fn locked(path: &Path) -> bool {
+        use std::os::macos::fs::MetadataExt;
+        std::fs::symlink_metadata(path).is_ok_and(|m| m.st_flags() & libc::UF_IMMUTABLE != 0)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_finder_locked_file_is_copied_locked_without_a_staging_rest() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::create_dir(src.path().join("pkg")).unwrap();
+        for rel in ["a.txt", "pkg/b.txt"] {
+            let file = src.path().join(rel);
+            std::fs::write(&file, rel).unwrap();
+            set_flags(&file, libc::UF_IMMUTABLE).unwrap();
+        }
+        let result = copy(
+            &[src.path().join("a.txt"), src.path().join("pkg")],
+            dest.path(),
+            true,
+        );
+        let copies = ["a.txt", "pkg/b.txt"].map(|rel| locked(&dest.path().join(rel)));
+        let clean = no_staging_left(dest.path());
+        for dir in [src.path(), dest.path()] {
+            unlock_tree(dir);
+        }
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        assert_eq!(copies, [true, true]);
+        assert!(clean, "{:?}", names(dest.path()));
+        assert_eq!(std::fs::read(dest.path().join("a.txt")).unwrap(), b"a.txt");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_failed_item_leaves_no_locked_staging_rest() {
+        let dest = tempfile::tempdir().unwrap();
+        let staging = staging_dir_in(dest.path()).unwrap();
+        let item = staging.path().join(STAGED_ITEM);
+        std::fs::create_dir_all(item.join("sub")).unwrap();
+        for rel in ["a.txt", "sub/b.txt"] {
+            std::fs::write(item.join(rel), b"x").unwrap();
+        }
+        for rel in ["a.txt", "sub/b.txt", "sub"] {
+            set_flags(&item.join(rel), libc::UF_IMMUTABLE).unwrap();
+        }
+        let was_locked = locked(&item.join("sub/b.txt"));
+        discard_staging(staging);
+        let rest = names(dest.path());
+        unlock_tree(dest.path());
+        assert!(was_locked);
+        assert!(rest.is_empty(), "{rest:?}");
     }
 
     fn staged_in(dir: &Path) -> PathBuf {

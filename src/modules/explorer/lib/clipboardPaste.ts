@@ -90,6 +90,11 @@ export function reportCopyFailures(result: CopyResult, unresolved = 0): void {
   });
 }
 
+function cancelled(): string[] {
+  toast.message("Paste cancelled: the explorer changed");
+  return [];
+}
+
 // Copies the clipboard's files into `destDir` and selects the first new row;
 // nothing touches the tree once `scope` is no longer current.
 export async function pasteClipboardFiles(
@@ -106,7 +111,7 @@ export async function pasteClipboardFiles(
   }: PasteOptions,
 ): Promise<string[]> {
   const isCurrent = () => isCurrentScope(scope);
-  if (!isCurrent()) return [];
+  if (!isCurrent()) return cancelled();
   // A collapsed folder is read when it opens, so it gets no extra re-read.
   const isOpen = () => destDir === scope.rootPath || isExpanded(destDir);
   let copyStarted = false;
@@ -115,7 +120,7 @@ export async function pasteClipboardFiles(
     const clipboard = await invoke<ClipboardFiles>("fs_clipboard_paths");
     const sources = clipboard.paths;
     unresolved = clipboard.unresolved;
-    if (!isCurrent()) return [];
+    if (!isCurrent()) return cancelled();
     if (sources.length === 0) {
       if (unresolved > 0)
         reportCopyFailures({ created: [], failed: [] }, unresolved);

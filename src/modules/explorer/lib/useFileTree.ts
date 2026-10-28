@@ -397,7 +397,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
         pendingCreate.kind === "dir" ? "fs_create_dir" : "fs_create_file";
       try {
         await invoke(cmd, { path, workspace: currentWorkspaceEnv() });
-        await fetchChildren(pendingCreate.parentPath);
+        await refresh(pendingCreate.parentPath);
       } catch (e) {
         console.error(`${cmd} failed:`, e);
         toast.error(
@@ -407,7 +407,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
         setPendingCreate(null);
       }
     },
-    [pendingCreate, fetchChildren],
+    [pendingCreate, refresh],
   );
 
   const beginRename = useCallback((path: string) => {
@@ -435,7 +435,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
           workspace: currentWorkspaceEnv(),
         });
         options?.onPathRenamed?.(renaming, to);
-        await fetchChildren(parent);
+        await refresh(parent);
       } catch (e) {
         console.error("fs_rename failed:", e);
         toast.error(`Couldn’t rename to “${trimmed}”: ${String(e)}`);
@@ -443,7 +443,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
         setRenaming(null);
       }
     },
-    [renaming, fetchChildren, options],
+    [renaming, refresh, options],
   );
 
   const deletePath = useCallback(
@@ -451,7 +451,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
       try {
         await invoke("fs_delete", { path, workspace: currentWorkspaceEnv() });
         options?.onPathDeleted?.(path);
-        await fetchChildren(dirname(path));
+        await refresh(dirname(path));
       } catch (e) {
         console.error("fs_delete failed:", e);
         toast.error(
@@ -459,7 +459,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
         );
       }
     },
-    [fetchChildren, options],
+    [refresh, options],
   );
 
   const movePath = useCallback(
@@ -482,13 +482,13 @@ export function useFileTree(rootPath: string | null, options?: Options) {
           workspace: currentWorkspaceEnv(),
         });
         options?.onPathRenamed?.(from, to);
-        await Promise.all([fetchChildren(dirname(from)), fetchChildren(toDir)]);
+        await Promise.all([refresh(dirname(from)), refresh(toDir)]);
       } catch (e) {
         console.error("fs_rename (move) failed:", e);
         toast.error(`Couldn’t move “${name}”: ${String(e)}`);
       }
     },
-    [fetchChildren, options],
+    [refresh, options],
   );
 
   return {
