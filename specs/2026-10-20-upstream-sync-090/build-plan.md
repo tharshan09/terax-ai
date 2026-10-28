@@ -947,7 +947,16 @@ Bau-Reihenfolge (PM): slice-00 → slice-01 → slice-02 → slice-03 → slice-
 
 **Wie gebaut**
 
-_(leer bis zum Merge)_
+- Merge: PR #87, Squash-Commit `535d23a` auf `main`.
+- Review: `/code-review high` 3 Runden (Obergrenze); die zwei Regressionen aus Runde 3 ohne vierte Runde gefixt, Gates grün.
+- Abweichungen vom Plan:
+  - Option heißt `visible` statt upstream `active` (Vertrag).
+  - `statusConsumers` zählt zusätzlich Rail-Badge und Git-Widgets außerhalb Zen (Q&A #5), liefert `live` im Ergebnis.
+  - Upstream-Fixed-Target-Logik in `useSourceControlContext` nicht portiert (Fork hat kein `repositoryTarget`); `planContextRefresh` ohne `reset`.
+  - Laufender Refresh nach Kontext gekeyt, nach jedem await geprüft; Folge-Refresh nach Push/Pull/Commit läuft für den aktuellen Kontext.
+  - Show-Kante liest nur Wurzel und aufgeklappte Ordner neu (SSH-Kosten).
+  - `TreeRow.tsx` unverändert.
+- QA-Punkte und Grenzen: siehe `evidence/slice-04-visible-consumers.json` und PR #87.
 
 ### slice-05-lazy-start: Lazy-Start mit Build-Budget
 

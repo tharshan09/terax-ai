@@ -23,7 +23,7 @@ import {
   useState,
 } from "react";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import { fileIconUrl } from "./lib/iconResolver";
+import { FileIcon } from "./FileIcon";
 import { copyToClipboard, revealInFinder } from "./lib/contextActions";
 import { COMPACT_CONTENT, COMPACT_ITEM } from "./lib/menuItemClass";
 import { cn } from "@/lib/utils";
@@ -237,7 +237,6 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(
                 </div>
               ) : (
                 results.map((hit, index) => {
-                  const url = hit.is_dir ? null : fileIconUrl(hit.name);
                   const isSelected = index === selectedIndex;
                   return (
                     <ContextMenu key={hit.path}>
@@ -259,10 +258,9 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(
                           )}
                           title={hit.path}
                         >
-                          {url ? (
-                            <img
-                              src={url}
-                              alt=""
+                          {!hit.is_dir ? (
+                            <FileIcon
+                              name={hit.name}
                               className="size-3.5 shrink-0"
                             />
                           ) : (
