@@ -495,23 +495,68 @@ describe("FileExplorer after a failed copy", () => {
 });
 
 describe("FileExplorer paste while typing a name", () => {
-  it("offers no context-menu Paste while a new name is being typed", async () => {
-    serve({
-      fs_clipboard_paths: () =>
-        Promise.resolve({ paths: ["/x/f.txt"], unresolved: 0 }),
-    });
-    render(explorer("/typing"));
-    await settle();
-    fireEvent.click(screen.getByTitle("New file"));
-    await settle();
-    fireEvent.contextMenu(treeArea());
-    const paste = await screen.findByText("Paste");
-    const item = paste.closest("[role='menuitem']");
-    expect(item?.getAttribute("aria-disabled")).toBe("true");
-    // Keep the menu open past the input's refocus ticks, which once fought its focus trap.
-    await act(() => new Promise<void>((done) => setTimeout(done, 200)));
-    if (item) fireEvent.click(item);
-    await settle();
-    expect(commands()).not.toContain("fs_clipboard_paths");
-  });
+  it.each([
+    {
+      name: "a new file",
+      begin: () => fireEvent.click(screen.getByTitle("New file")),
+      selection: [0, 0],
+    },
+    {
+      name: "a rename of f.txt",
+      begin: () => fireEvent.doubleClick(screen.getByText("f.txt")),
+      selection: [0, 1],
+    },
+  ])(
+    "offers no context-menu Paste while typing $name, then hands focus back",
+    async ({ begin, selection }) => {
+      const restore = rowsInView();
+      const errors: unknown[] = [];
+      const onError = (e: ErrorEvent) => errors.push(e.error);
+      window.addEventListener("error", onError);
+      try {
+        serve({
+          fs_read_dir: () =>
+            Promise.resolve([
+              {
+                name: "f.txt",
+                kind: "file",
+                size: 0,
+                mtime: 0,
+                gitignored: false,
+              },
+            ]),
+          fs_clipboard_paths: () =>
+            Promise.resolve({ paths: ["/x/f.txt"], unresolved: 0 }),
+        });
+        render(explorer("/typing"));
+        expect(await screen.findByText("f.txt")).toBeTruthy();
+        vi.useFakeTimers();
+        const advance = (ms: number) =>
+          act(() => vi.advanceTimersByTimeAsync(ms));
+        // The input mounts under the open menu, so its first focus loses to the trap.
+        fireEvent.contextMenu(treeArea());
+        begin();
+        const item = screen.getByText("Paste").closest("[role='menuitem']");
+        expect(item?.getAttribute("aria-disabled")).toBe("true");
+        await advance(200);
+        expect(errors).toEqual([]);
+        expect(document.activeElement?.closest("[role='menu']")).toBeTruthy();
+        if (item) fireEvent.click(item);
+        fireEvent.keyDown(document.activeElement ?? document.body, {
+          key: "Escape",
+        });
+        await advance(50);
+        expect(screen.queryByText("Paste")).toBeNull();
+        const input = screen.getByRole<HTMLInputElement>("textbox");
+        expect(document.activeElement).toBe(input);
+        expect([input.selectionStart, input.selectionEnd]).toEqual(selection);
+        expect(errors).toEqual([]);
+        expect(commands()).not.toContain("fs_clipboard_paths");
+      } finally {
+        vi.useRealTimers();
+        window.removeEventListener("error", onError);
+        restore();
+      }
+    },
+  );
 });
