@@ -270,6 +270,25 @@ describe("pasteClipboardFiles", () => {
     expect(toast.error).not.toHaveBeenCalled();
   });
 
+  it("opens a collapsed target only while every folder above it is open", async () => {
+    for (const parentOpen of [true, false]) {
+      invoke
+        .mockResolvedValueOnce(clip(["/tmp/a.txt"]))
+        .mockResolvedValueOnce({ created: ["/ws/a/b/a.txt"], failed: [] });
+      const opts = options();
+      opts.isExpanded.mockImplementation(
+        (dir) => parentOpen && dir === "/ws/a",
+      );
+      expect(await pasteClipboardFiles("/ws/a/b", opts)).toEqual([
+        "/ws/a/b/a.txt",
+      ]);
+      expect(opts.isExpanded).toHaveBeenCalledWith("/ws/a");
+      expect(opts.refresh).not.toHaveBeenCalled();
+      expect(opts.expand).toHaveBeenCalledTimes(parentOpen ? 1 : 0);
+      expect(opts.select).toHaveBeenCalledTimes(parentOpen ? 1 : 0);
+    }
+  });
+
   it("re-reads an open folder and leaves a collapsed one alone when nothing landed", async () => {
     const copied = { created: ["/ws/docs/a.txt"], failed: [] };
     invoke

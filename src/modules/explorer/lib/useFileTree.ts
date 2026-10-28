@@ -116,6 +116,8 @@ export function useFileTree(rootPath: string | null, options?: Options) {
   // already did, so a folder under steady change still updates.
   const readCountRef = useRef(0);
   const landedRef = useRef(new Map<string, number>());
+  // The newest landed state per folder, which may not have rendered yet.
+  const latestRef = useRef(new Map<string, ChildrenState>());
   // Reads started before the last root change never land.
   const floorRef = useRef(0);
   const waitersRef = useRef(new Map<string, Waiter[]>());
@@ -171,8 +173,14 @@ export function useFileTree(rootPath: string | null, options?: Options) {
       });
       if (!lands()) return;
 
+      // Only a listing that is on screen and not about to be replaced by a
+      // queued older one may stand in for this read.
       const prev = nodesRef.current[path];
-      if (prev?.status === "loaded" && sameDirListing(prev.entries, entries)) {
+      if (
+        prev?.status === "loaded" &&
+        latestRef.current.get(path) === prev &&
+        sameDirListing(prev.entries, entries)
+      ) {
         release(waitersRef.current, path, gen);
         return;
       }
@@ -198,6 +206,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
 
       const node: ChildrenState = { status: "loaded", entries };
       readOf.set(node, gen);
+      latestRef.current.set(path, node);
       setNodes((s) => {
         const next: TreeState = {};
         for (const [k, v] of Object.entries(s)) if (!dead.has(k)) next[k] = v;
@@ -216,6 +225,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
         for (const d of dead) {
           // A removed folder's late answer must not bring it back.
           landed.set(d, readCountRef.current);
+          latestRef.current.delete(d);
           release(waitersRef.current, d, Number.POSITIVE_INFINITY);
           if (watchedRef.current.delete(d)) toUnwatch.push(d);
         }
@@ -225,6 +235,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
       if (!lands()) return;
       const node: ChildrenState = { status: "error", message: String(e) };
       readOf.set(node, gen);
+      latestRef.current.set(path, node);
       setNodes((s) => ({ ...s, [path]: node }));
     }
   }, []);
@@ -253,6 +264,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
   // and persist the outgoing root's expansion on the way out.
   useEffect(() => {
     landedRef.current.clear();
+    latestRef.current.clear();
     floorRef.current = readCountRef.current;
     if (!rootPath) {
       setNodes({});

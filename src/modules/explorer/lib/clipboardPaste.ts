@@ -6,6 +6,7 @@ import {
   type TerminalKeyEvent,
 } from "@/modules/terminal/lib/keymap";
 import type { WorkspaceEnv } from "@/modules/workspace";
+import { dirname } from "./paths";
 
 // One paste at a time; a second request says so instead of silently doing
 // nothing. `release` frees the lock early, never one a later paste took.
@@ -69,6 +70,21 @@ type PasteOptions = {
   // Called once fs_copy returns: only the copy itself needs the paste lock.
   onCopySettled: () => void;
 };
+
+// A target under a folder collapsed meanwhile is neither opened nor selected.
+function inView(
+  dir: string,
+  root: string,
+  isExpanded: (dir: string) => boolean,
+): boolean {
+  for (let path = dir; path !== root; ) {
+    const parent = dirname(path);
+    if (parent === path) return false;
+    if (parent !== root && !isExpanded(parent)) return false;
+    path = parent;
+  }
+  return true;
+}
 
 function missingItems(unresolved: number): string {
   return unresolved === 1
@@ -146,8 +162,10 @@ export async function pasteClipboardFiles(
     reportCopyFailures(result, unresolved);
     // A lost connection keeps the last good listing; a re-read could not land.
     if (!isCurrent() || result.aborted) return [];
+    const shown = inView(destDir, scope.rootPath, isExpanded);
     if (isOpen()) await refresh(destDir);
-    else if (result.created.length > 0) await expand(destDir);
+    else if (result.created.length > 0 && shown) await expand(destDir);
+    else return result.created;
     if (!isCurrent()) return [];
     const row = result.created[0];
     if (row && hasRow(row)) select(row);

@@ -232,6 +232,31 @@ describe("useFileTree read promises", () => {
     expect(listing(result.current, "/ws")).toEqual(["a", "new"]);
   });
 
+  it("lets a newer read matching the screen win over an older one still queued", async () => {
+    const pending = reads();
+    const { result } = renderHook(() => useFileTree("/q"));
+    await act(async () => pending[0].resolve([entry("a")]));
+
+    let settled = false;
+    act(() => {
+      void result.current.refresh("/q");
+      void result.current.refresh("/q").then(() => {
+        settled = true;
+      });
+    });
+    const [older, newer] = pending.slice(1);
+    const tick = () => new Promise((done) => setTimeout(done, 0));
+    await act(async () => {
+      older.resolve([entry("a"), entry("b")]);
+      await tick();
+      newer.resolve([entry("a")]);
+      await tick();
+      expect(settled).toBe(false);
+    });
+    expect(listing(result.current, "/q")).toEqual(["a"]);
+    await vi.waitFor(() => expect(settled).toBe(true));
+  });
+
   it("settles expand once the folder's listing is in the tree", async () => {
     const pending = reads();
     const { result } = renderHook(() => useFileTree("/ws"));

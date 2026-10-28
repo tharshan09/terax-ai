@@ -345,6 +345,10 @@ def stat(req):
     return {"size": st.st_size, "mtime": int(st.st_mtime * 1000), "kind": kind}
 
 
+def exists(req):
+    return os.path.lexists(os.path.expanduser(req["path"]))
+
+
 def realpath(req):
     # Resolve symlinks host-side. canonicalize-then-recheck guards depend on
     # seeing the real target; without this op they were a no-op over SSH.
@@ -683,7 +687,7 @@ def grep(req):
 
 
 OPS = {"read_dir": read_dir, "list_subdirs": list_subdirs, "stat": stat,
-       "realpath": realpath, "read_file": read_file, "write_file": write_file,
+       "exists": exists, "realpath": realpath, "read_file": read_file, "write_file": write_file,
        "create_file": create_file, "create_dir": create_dir, "mkstage": mkstage,
        "rename": rename, "delete": delete, "publish": publish,
        "write_bytes": write_bytes, "search": search, "grep": grep}
@@ -1692,6 +1696,15 @@ fn copy_one(
         .ok_or_else(|| RemoteError::Failed(format!("non-UTF-8 filename: {}", src.display())))?;
     let mut plan = Vec::new();
     plan_upload(src, String::new(), 0, source.linked, &mut plan, registry).map_err(failed)?;
+    // Without renaming a taken name fails anyway: one probe spares the upload.
+    // It is only a shortcut; the no-replace publish stays the real guard.
+    if !rename_on_conflict {
+        let target = format!("{dest}/{name}");
+        let probe = serde_json::json!({ "op": "exists", "path": target });
+        if let Ok(serde_json::Value::Bool(true)) = run(&probe, Some(REMOTE_FS_TIMEOUT)) {
+            return Err(RemoteError::Failed(copy::already_exists(&target).to_string()).into());
+        }
+    }
 
     // Without a staging dir of its own the item returns here, before any cleanup.
     let staging = make_staging(run, dest)?;
@@ -2601,6 +2614,7 @@ Host !secret prod
     fn healthy(request: &serde_json::Value) -> RemoteReply {
         Ok(match request["op"].as_str() {
             Some("publish") => request["names"][0].clone(),
+            Some("exists") => serde_json::json!(false),
             Some("mkstage") => serde_json::json!(format!(
                 "{}{}stub_9Xk",
                 request["path"].as_str().unwrap(),
@@ -2796,6 +2810,68 @@ Host !secret prod
         assert_eq!(last.last().unwrap(), "a copy 10000.txt");
         assert_eq!(runs[blocks]["names"][0], "b.txt");
         assert_eq!(deletes(&requests).len(), 2);
+    }
+
+    #[test]
+    fn without_renaming_a_taken_name_fails_before_any_upload() {
+        let src = tempfile::tempdir().unwrap();
+        let sources = local_sources(src.path(), &["a.txt", "b.txt"]);
+        let mut requests = Vec::new();
+        let result = copy_with(
+            &mut |request, _| {
+                requests.push(request.clone());
+                if request["op"] == "exists" {
+                    return Ok(serde_json::json!(request["path"] == "/remote/a.txt"));
+                }
+                healthy(request)
+            },
+            "stub",
+            &sources,
+            "/remote",
+            false,
+            &crate::modules::workspace::WorkspaceRegistry::default(),
+        )
+        .unwrap();
+        assert_eq!(result.created, ["/remote/b.txt"]);
+        assert_eq!(
+            failures(&result),
+            [(
+                sources[0].clone(),
+                "already exists: /remote/a.txt".to_string()
+            )]
+        );
+        let ops: Vec<(&str, &str)> = requests
+            .iter()
+            .take(2)
+            .map(|r| (r["op"].as_str().unwrap(), r["path"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            ops,
+            [("exists", "/remote/a.txt"), ("exists", "/remote/b.txt")]
+        );
+        assert!(!requests
+            .iter()
+            .any(|r| r["op"] == "write_bytes" && r["b64"] == b64encode(b"a.txt")));
+        assert_eq!(requests.iter().filter(|r| creates_staging(r)).count(), 1);
+
+        let (_, requests) = stub_copy(&sources, healthy);
+        assert!(!requests.iter().any(|r| r["op"] == "exists"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn embedded_helper_exists_counts_a_dangling_link() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("gone", dir.path().join("dead")).unwrap();
+        let probe = |name: &str| {
+            let path = dir.path().join(name).to_string_lossy().into_owned();
+            run_helper("", &serde_json::json!({ "op": "exists", "path": path }))
+        };
+        let Some(env) = probe("dead") else {
+            return;
+        };
+        assert_eq!(env["data"], true);
+        assert_eq!(probe("free").unwrap()["data"], false);
     }
 
     #[test]
