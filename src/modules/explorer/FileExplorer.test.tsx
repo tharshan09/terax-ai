@@ -508,6 +508,8 @@ describe("FileExplorer paste while typing a name", () => {
     const paste = await screen.findByText("Paste");
     const item = paste.closest("[role='menuitem']");
     expect(item?.getAttribute("aria-disabled")).toBe("true");
+    // Keep the menu open past the input's refocus ticks, which once fought its focus trap.
+    await act(() => new Promise<void>((done) => setTimeout(done, 200)));
     if (item) fireEvent.click(item);
     await settle();
     expect(commands()).not.toContain("fs_clipboard_paths");

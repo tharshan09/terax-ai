@@ -22,6 +22,9 @@ export function InlineInput({
   const ref = useRef<HTMLInputElement>(null);
   const committedRef = useRef(false);
   const settledRef = useRef(false);
+  // A blur inside our own focus() call means a focus trap (an open modal
+  // menu) took focus straight back; refocusing again would recurse forever.
+  const focusingRef = useRef(false);
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -39,7 +42,13 @@ export function InlineInput({
     // the left edge. We're already rendering the input where it should be
     // visible — there is no scroll-into-view we need from focus().
     const focus = () => {
-      el.focus({ preventScroll: true });
+      focusingRef.current = true;
+      try {
+        el.focus({ preventScroll: true });
+      } finally {
+        focusingRef.current = false;
+      }
+      if (el.ownerDocument.activeElement !== el) return;
       const dot = initial.lastIndexOf(".");
       if (dot > 0) el.setSelectionRange(0, dot);
       else el.select();
@@ -84,7 +93,13 @@ export function InlineInput({
       }}
       onBlur={() => {
         if (!settledRef.current) {
-          ref.current?.focus({ preventScroll: true });
+          if (focusingRef.current) return;
+          focusingRef.current = true;
+          try {
+            ref.current?.focus({ preventScroll: true });
+          } finally {
+            focusingRef.current = false;
+          }
           return;
         }
         commit();
