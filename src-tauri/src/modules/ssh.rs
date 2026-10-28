@@ -255,7 +255,7 @@ def _natcmp(a, b):
 
 
 _natkey = functools.cmp_to_key(_natcmp)
-from stat import S_ISDIR
+from stat import S_IMODE, S_ISDIR
 
 MAX_READ = 10 * 1024 * 1024
 MAX_ENTRIES = 100000
@@ -483,7 +483,11 @@ def write_bytes(req):
     return True
 
 
-NO_HARDLINKS = (errno.ENOTSUP, errno.EOPNOTSUPP, errno.EPERM, errno.ENOSYS)
+NO_HARDLINKS = (errno.ENOTSUP, errno.EOPNOTSUPP, errno.EPERM, errno.ENOSYS,
+                errno.EXDEV, errno.EMLINK)
+# SMB servers refuse a rename onto an existing folder with any of these.
+FOLDER_SWAP_REFUSED = (errno.EEXIST, errno.ENOTEMPTY, errno.EACCES, errno.EPERM,
+                       errno.EISDIR)
 
 
 class _Taken(Exception):
@@ -501,13 +505,45 @@ def _reserve_and_swap(src, dst, is_dir):
     except FileExistsError:
         raise _Taken()
     try:
-        os.rename(src, dst)
+        try:
+            os.rename(src, dst)
+        except OSError as ex:
+            if not is_dir or ex.errno not in FOLDER_SWAP_REFUSED:
+                raise
+            _fill_claim(src, dst)
     except BaseException:
         try:
             (os.rmdir if is_dir else os.unlink)(dst)
         except OSError:
             pass
         raise
+
+
+def _fill_claim(src, dst):
+    # A failure takes back what moved, so the caller only removes an empty claim.
+    try:
+        os.chmod(dst, S_IMODE(os.lstat(src).st_mode))
+    except OSError:
+        pass
+    moved = []
+    try:
+        for name in os.listdir(src):
+            os.rename(os.path.join(src, name), os.path.join(dst, name))
+            moved.append(os.path.join(dst, name))
+    except BaseException:
+        for path in reversed(moved):
+            try:
+                if os.path.isdir(path) and not os.path.islink(path):
+                    shutil.rmtree(path)
+                else:
+                    os.unlink(path)
+            except OSError:
+                pass
+        raise
+    try:
+        os.rmdir(src)
+    except OSError:
+        pass
 
 
 def _place(src, dst):
@@ -710,13 +746,19 @@ pub const REMOTE_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// ops get no kill-timeout (they just run off the main thread).
 pub const REMOTE_FS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-// An upload write scales with its size, so a slow link finishes while a hung
-// host frees the paste instead of holding it until restart.
+// An upload write scales with its size on the wire, so a link doing 64 KiB/s
+// finishes while a hung host frees the paste instead of holding it until restart.
 const WRITE_BASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const WRITE_TIMEOUT_PER_64_KIB: std::time::Duration = std::time::Duration::from_secs(1);
+// The path, the keys and the mode around the base64 body of a write request.
+const WRITE_REQUEST_OVERHEAD: usize = 4096;
 
-fn write_timeout(payload: usize) -> std::time::Duration {
-    let chunks = u32::try_from(payload.div_ceil(64 * 1024)).unwrap_or(u32::MAX);
+fn write_timeout(file_len: usize) -> std::time::Duration {
+    let wire = file_len
+        .div_ceil(3)
+        .saturating_mul(4)
+        .saturating_add(WRITE_REQUEST_OVERHEAD);
+    let chunks = u32::try_from(wire.div_ceil(64 * 1024)).unwrap_or(u32::MAX);
     WRITE_BASE_TIMEOUT + WRITE_TIMEOUT_PER_64_KIB * chunks
 }
 
@@ -1350,6 +1392,8 @@ enum Upload {
         src: std::path::PathBuf,
         rel: String,
         mode: Option<u32>,
+        /// Planned as a link, so the read follows it to the judged target.
+        link: bool,
     },
 }
 
@@ -1388,7 +1432,8 @@ fn plan_upload(
     }
     // The helper writes plain files only: a symlink uploads its target's bytes,
     // so every link is judged here, where the upload reads through it.
-    let target = if meta.file_type().is_symlink() {
+    let link = meta.file_type().is_symlink();
+    let target = if link {
         copy::guard_link(src)?;
         std::fs::metadata(src).map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => broken_symlink(src, &rel),
@@ -1410,6 +1455,7 @@ fn plan_upload(
         src: src.to_path_buf(),
         rel,
         mode: file_mode(&target),
+        link,
     });
     Ok(())
 }
@@ -1439,8 +1485,14 @@ fn upload(run: &mut RemoteRun, plan: &[Upload], item: &str) -> Result<(), Remote
                 }),
                 Some(REMOTE_FS_TIMEOUT),
             ),
-            Upload::File { src, rel, mode } => {
-                let bytes = std::fs::read(src).map_err(|e| RemoteError::Failed(e.to_string()))?;
+            Upload::File {
+                src,
+                rel,
+                mode,
+                link,
+            } => {
+                let bytes =
+                    read_planned(src, *link).map_err(|e| RemoteError::Failed(e.to_string()))?;
                 let request = serde_json::json!({
                     "op": "write_bytes", "path": format!("{item}{rel}"),
                     "b64": b64encode(&bytes), "mode": mode,
@@ -1451,6 +1503,19 @@ fn upload(run: &mut RemoteRun, plan: &[Upload], item: &str) -> Result<(), Remote
         run(&request, budget)?;
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn read_planned(src: &std::path::Path, link: bool) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    crate::modules::fs::copy::open_planned(src, link)?.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+#[cfg(not(unix))]
+fn read_planned(src: &std::path::Path, _link: bool) -> std::io::Result<Vec<u8>> {
+    std::fs::read(src)
 }
 
 #[cfg(unix)]
@@ -2228,7 +2293,14 @@ Host !secret prod
         std::fs::write(p("taken.txt"), b"old").unwrap();
         std::os::unix::fs::symlink(p("victim"), p("dangling.txt")).unwrap();
 
-        for code in ["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS"] {
+        for code in [
+            "EPERM",
+            "ENOTSUP",
+            "EOPNOTSUPP",
+            "ENOSYS",
+            "EXDEV",
+            "EMLINK",
+        ] {
             let prelude = without_links(code, false);
             let staged = stage(code, b"fallback");
             let name = format!("{code}.txt");
@@ -2266,6 +2338,67 @@ Host !secret prod
             assert!(!dir.path().join(name).exists(), "{name}");
         }
         assert!(std::path::Path::new(&staged).exists());
+    }
+
+    // The rename stub refuses any folder target, as SMB does, and can break
+    // the move of one entry to show the fill taken back.
+    #[cfg(unix)]
+    #[test]
+    fn embedded_helper_publish_fills_a_claimed_folder_entry_by_entry() {
+        use std::os::unix::fs::PermissionsExt;
+        let smb = |breaks: &str| {
+            [
+                "import os, errno".to_string(),
+                "_rename = os.rename".into(),
+                "def _smb(a, b):".into(),
+                "    if os.path.isdir(b): raise OSError(errno.EEXIST, 'File exists')".into(),
+                format!("    if os.path.basename(a) == {breaks:?}: raise OSError(errno.EIO, 'io')"),
+                "    _rename(a, b)".into(),
+                "os.rename = _smb".into(),
+                String::new(),
+            ]
+            .join("\n")
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let base = format!("{}/", dir.path().display());
+        let stage = |staging: &str| {
+            let item = dir.path().join(staging).join("item");
+            std::fs::create_dir_all(item.join("sub")).unwrap();
+            std::fs::write(item.join("a.txt"), b"a").unwrap();
+            std::fs::write(item.join("sub/b.txt"), b"b").unwrap();
+            std::fs::set_permissions(&item, std::fs::Permissions::from_mode(0o750)).unwrap();
+            item.to_string_lossy().into_owned()
+        };
+        let publish = |prelude: &str, item: &str, names: &[&str], staging: &str| {
+            let mut request = publish_request(item, &base, names);
+            let staging = dir.path().join(staging);
+            request["staging"] = staging.to_string_lossy().into_owned().into();
+            run_helper(prelude, &request)
+        };
+
+        let item = stage(".terax-copy-s5Vd3_Jf");
+        let Some(env) = publish(&smb(""), &item, &["v"], ".terax-copy-s5Vd3_Jf") else {
+            return;
+        };
+        assert_eq!(env, used("v"));
+        let v = dir.path().join("v");
+        assert_eq!(std::fs::read(v.join("a.txt")).unwrap(), b"a");
+        assert_eq!(std::fs::read(v.join("sub/b.txt")).unwrap(), b"b");
+        let mode = std::fs::metadata(&v).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o750);
+        assert!(!dir.path().join(".terax-copy-s5Vd3_Jf").exists());
+
+        let item = stage(".terax-copy-k2_9xq0a");
+        let env = publish(&smb("sub"), &item, &["v", "v copy"], ".terax-copy-k2_9xq0a").unwrap();
+        assert_eq!(env["ok"], false, "{env}");
+        assert!(!dir.path().join("v copy").exists(), "the claim is removed");
+        let mut kept: Vec<String> = std::fs::read_dir(&v)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        kept.sort();
+        assert_eq!(kept, ["a.txt", "sub"]);
+        assert!(std::path::Path::new(&item).join("sub/b.txt").exists());
     }
 
     #[cfg(unix)]
@@ -2744,13 +2877,27 @@ Host !secret prod
     }
 
     #[test]
-    fn a_write_gets_thirty_seconds_plus_one_per_64_kib() {
-        let secs = |payload: usize| write_timeout(payload).as_secs();
-        assert_eq!(secs(0), 30);
-        assert_eq!(secs(1), 31);
-        assert_eq!(secs(64 * 1024), 31);
-        assert_eq!(secs(64 * 1024 + 1), 32);
-        assert_eq!(secs(10 * 1024 * 1024), 30 + 160);
+    fn a_write_gets_thirty_seconds_plus_one_per_64_kib_of_its_request() {
+        let secs = |file_len: usize| write_timeout(file_len).as_secs();
+        assert_eq!(secs(0), 31);
+        assert_eq!(secs(45_000), 31);
+        assert_eq!(secs(49_152), 32);
+        assert_eq!(secs(64 * 1024), 32);
+        assert_eq!(secs(10 * 1024 * 1024), 30 + 214);
+
+        let path = format!("/remote/.terax-copy-stub_9Xk/item/{}", "d/".repeat(500));
+        for file_len in [0, 1, 1000, 49_152, 65_536, 300_000] {
+            let request = serde_json::json!({
+                "op": "write_bytes", "path": path,
+                "b64": b64encode(&vec![0xff; file_len]), "mode": 0o644,
+            });
+            let wire = serde_json::to_string(&request).unwrap().len() as u64;
+            let room = (secs(file_len) - WRITE_BASE_TIMEOUT.as_secs()) * 64 * 1024;
+            assert!(
+                wire <= room,
+                "{file_len}: {wire} bytes on the wire, {room} budgeted"
+            );
+        }
     }
 
     #[test]
@@ -3112,6 +3259,34 @@ Host !secret prod
             )]
         );
         assert!(!requests.iter().any(creates_staging));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_swapped_for_a_link_after_planning_fails_without_an_upload() {
+        let src = tempfile::tempdir().unwrap();
+        let pkg = src.path().join("pkg");
+        std::fs::create_dir(&pkg).unwrap();
+        std::fs::write(pkg.join("a.txt"), b"a").unwrap();
+        std::fs::write(src.path().join("secret"), b"s").unwrap();
+        let reg = crate::modules::workspace::WorkspaceRegistry::default();
+        let mut plan = Vec::new();
+        plan_upload(&pkg, String::new(), 0, false, &mut plan, &reg).unwrap();
+        std::fs::remove_file(pkg.join("a.txt")).unwrap();
+        std::os::unix::fs::symlink(src.path().join("secret"), pkg.join("a.txt")).unwrap();
+
+        let mut requests = Vec::new();
+        let result = upload(
+            &mut |request, _| {
+                requests.push(request.clone());
+                healthy(request)
+            },
+            &plan,
+            "/remote/.terax-copy-stub_9Xk/item",
+        );
+        let changed = crate::modules::fs::copy::changed_since_plan().to_string();
+        assert!(matches!(result, Err(RemoteError::Failed(m)) if m == changed));
+        assert!(!requests.iter().any(|r| r["op"] == "write_bytes"));
     }
 
     #[cfg(unix)]

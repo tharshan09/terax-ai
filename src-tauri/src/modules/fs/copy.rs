@@ -741,12 +741,95 @@ fn copy_kind(
     } else if kind.is_dir() {
         copy_dir(src, dst, depth, linked, registry, followed)
     } else if kind.is_file() {
-        // `dst` sits in our fresh staging dir, so this cannot follow a planted
-        // link; std::fs::copy clones on APFS instead of streaming bytes.
-        std::fs::copy(src, dst).map(|_| ())
+        copy_file(src, dst)
     } else {
         Err(unsupported_kind())
     }
+}
+
+#[cfg(unix)]
+pub(crate) fn changed_since_plan() -> io::Error {
+    io::Error::other("changed during the copy: no longer a regular file")
+}
+
+/// `follow` only for a link the caller already judged; a plain file swapped
+/// for a link or another kind since it was looked at fails the item.
+#[cfg(unix)]
+pub(crate) fn open_planned(path: &Path, follow: bool) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    // O_NONBLOCK: a FIFO swapped in must not hang the open.
+    let flags = libc::O_NONBLOCK | if follow { 0 } else { libc::O_NOFOLLOW };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags)
+        .open(path)
+        .map_err(|error| match error.raw_os_error() {
+            Some(libc::ELOOP) if !follow => changed_since_plan(),
+            _ => error,
+        })?;
+    if !file.metadata()?.is_file() {
+        return Err(changed_since_plan());
+    }
+    Ok(file)
+}
+
+// `dst` sits in our fresh staging dir, so writing it cannot follow a planted link.
+#[cfg(unix)]
+fn copy_file(src: &Path, dst: &Path) -> io::Result<()> {
+    copy_opened(&open_planned(src, false)?, dst)
+}
+
+#[cfg(not(unix))]
+fn copy_file(src: &Path, dst: &Path) -> io::Result<()> {
+    std::fs::copy(src, dst).map(drop)
+}
+
+// What std::fs::copy does, from the handle already checked: an APFS clone
+// keeps Finder's lock and xattrs, other volumes get fcopyfile.
+#[cfg(target_os = "macos")]
+fn copy_opened(reader: &std::fs::File, dst: &Path) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let to = c_path(dst)?;
+    if unsafe { libc::fclonefileat(reader.as_raw_fd(), libc::AT_FDCWD, to.as_ptr(), 0) } == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if !matches!(error.raw_os_error(), Some(libc::ENOTSUP | libc::EXDEV)) {
+        return Err(error);
+    }
+    let writer = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(reader.metadata()?.permissions().mode())
+        .open(dst)?;
+    let flags = libc::COPYFILE_METADATA | libc::COPYFILE_DATA;
+    let copied = unsafe {
+        libc::fcopyfile(
+            reader.as_raw_fd(),
+            writer.as_raw_fd(),
+            std::ptr::null_mut(),
+            flags,
+        )
+    };
+    if copied == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn copy_opened(reader: &std::fs::File, dst: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let permissions = reader.metadata()?.permissions();
+    let mut writer = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(permissions.mode())
+        .open(dst)?;
+    io::copy(&mut &*reader, &mut writer)?;
+    writer.set_permissions(permissions)
 }
 
 fn copy_dir(
@@ -1458,6 +1541,37 @@ mod tests {
         assert!(result.created.is_empty());
         assert_eq!(result.failed.len(), 1);
         assert!(names(dest.path()).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_swapped_after_it_was_looked_at_fails_the_item() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let secret = src.path().join("secret");
+        std::fs::write(&secret, b"s").unwrap();
+        let file = src.path().join("a.txt");
+        let reg = reg_for(dest.path());
+        for swap in ["link", "fifo"] {
+            std::fs::write(&file, b"a").unwrap();
+            let kind = std::fs::symlink_metadata(&file).unwrap().file_type();
+            std::fs::remove_file(&file).unwrap();
+            if swap == "link" {
+                std::os::unix::fs::symlink(&secret, &file).unwrap();
+            } else {
+                let c = std::ffi::CString::new(file.to_string_lossy().as_bytes()).unwrap();
+                assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+            }
+            let dst = dest.path().join(swap);
+            let error = copy_kind(&file, kind, &dst, 0, false, &reg, &mut Vec::new()).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                changed_since_plan().to_string(),
+                "{swap}"
+            );
+            assert!(std::fs::symlink_metadata(&dst).is_err(), "{swap}");
+            std::fs::remove_file(&file).unwrap();
+        }
     }
 
     #[cfg(unix)]

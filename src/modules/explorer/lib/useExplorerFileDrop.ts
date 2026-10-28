@@ -13,6 +13,7 @@ type Options = {
   scope: ExplorerScope | null;
   isCurrent: (scope: ExplorerScope) => boolean;
   isDir: (path: string) => boolean | undefined;
+  onDrop: () => void;
   onCopied: (destDir: string) => void;
 };
 
@@ -55,7 +56,7 @@ export function useExplorerFileDrop(options: Options) {
     void getCurrentWebview()
       .onDragDropEvent((e) => {
         const p = e.payload;
-        const { scope, isCurrent, isDir, onCopied } = optsRef.current;
+        const { scope, isCurrent, isDir, onDrop, onCopied } = optsRef.current;
         const rootPath = scope?.rootPath ?? null;
         if (p.type === "enter" || p.type === "over") {
           setTargetDir(dirAt(p.position.x, p.position.y, rootPath, isDir));
@@ -70,6 +71,7 @@ export function useExplorerFileDrop(options: Options) {
           setTargetDir(null);
           if (!scope || !dir || p.paths.length === 0 || !isCurrent(scope))
             return;
+          onDrop();
           void invoke<CopyResult>("fs_copy", {
             sources: p.paths,
             destDir: dir,

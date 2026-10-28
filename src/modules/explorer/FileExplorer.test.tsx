@@ -293,3 +293,67 @@ describe("FileExplorer keyboard after an edit", () => {
     }
   });
 });
+
+describe("FileExplorer paste selection", () => {
+  it("keeps the newer paste's selection when an older paste's re-read lands last", async () => {
+    const restore = rowsInView();
+    try {
+      const entry = (name: string, kind: "dir" | "file" = "file") => ({
+        name,
+        kind,
+        size: 0,
+        mtime: 0,
+        gitignored: false,
+      });
+      const held = new Map<string, (entries: unknown) => void>();
+      const clipboard = [["/x/a.txt"], ["/x/b.txt"]];
+      let listed = false;
+      serve({
+        fs_read_dir: (args) => {
+          const { path } = args as { path: string };
+          if (path === "/sel" && !listed) {
+            listed = true;
+            return Promise.resolve([entry("d1", "dir"), entry("x.txt")]);
+          }
+          return new Promise((resolve) => held.set(path, resolve));
+        },
+        fs_clipboard_paths: () =>
+          Promise.resolve({ paths: clipboard.shift() ?? [], unresolved: 0 }),
+        fs_copy: (args) => {
+          const { sources, destDir } = args as {
+            sources: string[];
+            destDir: string;
+          };
+          const created = sources.map((s) => `${destDir}/${s.slice(3)}`);
+          return Promise.resolve({ created, failed: [] });
+        },
+      });
+      const selected = (name: string) =>
+        screen
+          .getByText(name)
+          .closest("button")
+          ?.classList.contains("bg-accent");
+      render(explorer("/sel"));
+
+      fireEvent.contextMenu(await screen.findByText("d1"));
+      fireEvent.click(await screen.findByText("Paste"));
+      await vi.waitFor(() => expect(held.has("/sel/d1")).toBe(true));
+      await settle();
+      fireEvent.contextMenu(treeArea());
+      fireEvent.click(await screen.findByText("Paste"));
+      await vi.waitFor(() => expect(held.has("/sel")).toBe(true));
+
+      const root = [entry("d1", "dir"), entry("b.txt"), entry("x.txt")];
+      await act(async () => held.get("/sel")?.(root));
+      await vi.waitFor(() => expect(selected("b.txt")).toBe(true));
+
+      await act(async () => held.get("/sel/d1")?.([entry("a.txt")]));
+      await settle();
+      expect(await screen.findByText("a.txt")).toBeTruthy();
+      expect(selected("a.txt")).toBe(false);
+      expect(selected("b.txt")).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+});
