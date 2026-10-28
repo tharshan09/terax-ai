@@ -550,6 +550,17 @@ describe("FileExplorer paste while typing a name", () => {
         if (item) fireEvent.click(item);
         await advance(10);
         expect(commands()).not.toContain("fs_clipboard_paths");
+        fireEvent.keyDown(document.activeElement ?? document.body, {
+          key: "Escape",
+        });
+        await advance(10);
+        expect(screen.queryByText("Paste")).toBeNull();
+        const input = screen.getByRole("textbox");
+        expect(document.activeElement).toBe(input);
+        fireEvent.keyDown(input, { key: "Escape" });
+        await advance(10);
+        expect(screen.queryByRole("textbox")).toBeNull();
+        expect(screen.getByText("f.txt")).toBeTruthy();
         expect(errors).toEqual([]);
       } finally {
         restore();

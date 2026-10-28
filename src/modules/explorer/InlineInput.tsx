@@ -89,6 +89,7 @@ export function InlineInput({
   return (
     <input
       ref={ref}
+      data-inline-input=""
       value={value}
       placeholder={placeholder}
       onChange={(e) => setValue(e.target.value)}

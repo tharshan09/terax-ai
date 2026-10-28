@@ -773,7 +773,14 @@ export const FileExplorer = memo(
               key={menuNonce}
               className={COMPACT_CONTENT}
               onCloseAutoFocus={(e) => {
-                if (tree.renaming || tree.pendingCreate) e.preventDefault();
+                if (!tree.renaming && !tree.pendingCreate) return;
+                e.preventDefault();
+                // Focus left with the menu; the pending input may have settled unfocused.
+                const active = document.activeElement;
+                if (active && active !== document.body) return;
+                scrollRef.current
+                  ?.querySelector<HTMLInputElement>("[data-inline-input]")
+                  ?.focus({ preventScroll: true });
               }}
             >
               {menuTarget ? (
