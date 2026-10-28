@@ -27,7 +27,7 @@ pub(crate) fn is_staging_name(name: &str) -> bool {
     })
 }
 
-/// A fresh private staging dir in `dest`; tempfile draws from [A-Za-z0-9].
+/// tempfile draws from [A-Za-z0-9], all inside what `is_staging_name` accepts.
 pub(crate) fn staging_dir_in(dest: &Path) -> io::Result<tempfile::TempDir> {
     tempfile::Builder::new()
         .prefix(STAGING_PREFIX)
@@ -45,7 +45,6 @@ pub(crate) fn not_staging(dent: &ignore::DirEntry) -> bool {
 pub struct CopyResult {
     pub created: Vec<String>,
     pub failed: Vec<CopyFailure>,
-    /// Why the batch stopped early (the connection), when it did.
     pub aborted: Option<String>,
 }
 
@@ -242,6 +241,18 @@ pub(crate) fn guard_read(registry: &WorkspaceRegistry, path: &Path) -> io::Resul
     guard::enforce_read(registry, path, &path.to_string_lossy(), true).map_err(refused)
 }
 
+// The user picked the folder, so its links may lead outside the workspace, as
+// local copies keep them; an innocent name hiding a secret is still refused.
+pub(crate) fn guard_link(path: &Path) -> io::Result<()> {
+    if guard::check_read_str(&path.to_string_lossy()).is_err() {
+        return Ok(());
+    }
+    match std::fs::canonicalize(path) {
+        Ok(target) => guard::check_read_str(&target.to_string_lossy()).map_err(refused),
+        Err(_) => Ok(()),
+    }
+}
+
 /// A symlink entry is judged where a walk reads through it, not here.
 pub(crate) fn guard_entry(
     registry: &WorkspaceRegistry,
@@ -294,7 +305,6 @@ fn into_itself() -> io::Error {
     invalid("cannot copy a folder into itself")
 }
 
-/// The name itself, then the Finder-style alternatives in order.
 pub(crate) fn copy_candidates(name: &OsStr, is_dir: bool) -> impl Iterator<Item = OsString> + '_ {
     std::iter::once(name.to_os_string())
         .chain((1..=MAX_COPY_SUFFIX).map(move |n| copy_name(name, n, is_dir)))
@@ -386,8 +396,7 @@ fn set_flags(path: &Path, flags: u32) -> io::Result<()> {
     }
 }
 
-/// Lifts a lock off `path` and returns the flags to put back: a Finder copy of
-/// a locked item is locked too.
+/// Returns the flags to put back: a Finder copy of a locked item is locked too.
 #[cfg(target_os = "macos")]
 fn unlock(path: &Path) -> io::Result<Option<u32>> {
     use std::os::macos::fs::MetadataExt;
@@ -502,7 +511,11 @@ fn place_reserved(
             .map(drop)
     };
     claimed.map_err(|error| refusal(error, target))?;
-    swap(staged, target).map_err(|error| {
+    let swapped = match swap(staged, target) {
+        Err(error) if is_dir && refuses_folder_swap(&error) => fill_claim(staged, target, swap),
+        other => other,
+    };
+    swapped.map_err(|error| {
         let _ = if is_dir {
             std::fs::remove_dir(target)
         } else {
@@ -514,6 +527,74 @@ fn place_reserved(
 
 fn swap_onto_claim(staged: &Path, target: &Path) -> io::Result<()> {
     std::fs::rename(staged, target)
+}
+
+// SMB servers refuse a rename onto an existing folder with any of these.
+#[cfg(unix)]
+const FOLDER_SWAP_REFUSED: &[i32] = &[
+    libc::EEXIST,
+    libc::ENOTEMPTY,
+    libc::EACCES,
+    libc::EPERM,
+    libc::EISDIR,
+];
+#[cfg(not(unix))]
+const FOLDER_SWAP_REFUSED: &[i32] = &[];
+
+fn refuses_folder_swap(error: &io::Error) -> bool {
+    error
+        .raw_os_error()
+        .is_some_and(|code| FOLDER_SWAP_REFUSED.contains(&code))
+}
+
+/// A failure takes back what moved, so the caller only removes an empty claim.
+fn fill_claim(
+    staged: &Path,
+    claim: &Path,
+    swap: &impl Fn(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    if let Ok(meta) = std::fs::metadata(staged) {
+        let _ = std::fs::set_permissions(claim, meta.permissions());
+    }
+    let mut moved = Vec::new();
+    if let Err(error) = move_entries(staged, claim, swap, &mut moved) {
+        for path in moved.iter().rev() {
+            if let Err(cleanup) = discard_entry(path) {
+                log::warn!("fs_copy: could not remove {}: {cleanup}", path.display());
+            }
+        }
+        return Err(error);
+    }
+    let _ = std::fs::remove_dir(staged);
+    Ok(())
+}
+
+// Names first: a directory changed while it is read may list an entry twice.
+fn move_entries(
+    staged: &Path,
+    claim: &Path,
+    swap: &impl Fn(&Path, &Path) -> io::Result<()>,
+    moved: &mut Vec<PathBuf>,
+) -> io::Result<()> {
+    let names = std::fs::read_dir(staged)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<io::Result<Vec<_>>>()?;
+    for name in names {
+        let to = claim.join(&name);
+        swap(&staged.join(&name), &to)?;
+        moved.push(to);
+    }
+    Ok(())
+}
+
+fn discard_entry(path: &Path) -> io::Result<()> {
+    let _ = unlock(path);
+    if std::fs::symlink_metadata(path)?.is_dir() {
+        unlock_tree(path);
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
 }
 
 fn is_taken(error: &io::Error, target: &Path) -> bool {
@@ -823,8 +904,6 @@ fn copy_count(stem: &str) -> Option<(&str, usize)> {
     Some((base, count))
 }
 
-/// A `git init` repo whose `.gitignore` whitelists every folder and `.txt`
-/// file, with a staging rest and a control file, both matching `needle`.
 #[cfg(test)]
 pub(crate) fn whitelist_repo_with_staging_rest() -> tempfile::TempDir {
     let repo = tempfile::tempdir().unwrap();
@@ -1907,8 +1986,8 @@ mod tests {
         for (is_dir, code) in [
             (false, libc::EEXIST),
             (false, libc::EIO),
-            (true, libc::EEXIST),
-            (true, libc::ENOTEMPTY),
+            (true, libc::EXDEV),
+            (true, libc::EIO),
         ] {
             if is_dir {
                 std::fs::create_dir(&staged).unwrap();
@@ -1939,6 +2018,63 @@ mod tests {
                 std::fs::remove_file(&staged).unwrap();
             }
         }
+    }
+
+    // SMB refuses a rename onto the claimed folder; the swap stub stands in
+    // for that, then for a move that breaks halfway through the fill.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_refused_folder_swap_fills_the_claim_entry_by_entry() {
+        use std::os::unix::fs::PermissionsExt;
+        let dest = tempfile::tempdir().unwrap();
+        let staged = staged_in(dest.path());
+        let stage = || {
+            std::fs::create_dir_all(staged.join("sub")).unwrap();
+            std::fs::write(staged.join("a.txt"), b"a").unwrap();
+            std::fs::write(staged.join("sub/b.txt"), b"b").unwrap();
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o750)).unwrap();
+        };
+        let unsupported =
+            |_: &Path, _: &Path| Err(io::Error::from_raw_os_error(NO_REPLACE_UNSUPPORTED[0]));
+        let refusing = |fail_at: usize| {
+            let calls = std::cell::Cell::new(0);
+            move |from: &Path, to: &Path| {
+                calls.set(calls.get() + 1);
+                match calls.get() {
+                    1 => Err(io::Error::from_raw_os_error(libc::EEXIST)),
+                    n if n == fail_at => Err(io::Error::from_raw_os_error(libc::EIO)),
+                    _ => std::fs::rename(from, to),
+                }
+            }
+        };
+        let publish_dir = |swap: &dyn Fn(&Path, &Path) -> io::Result<()>| {
+            publish(
+                &staged,
+                dest.path(),
+                OsStr::new("v"),
+                true,
+                true,
+                unsupported,
+                swap,
+            )
+        };
+
+        stage();
+        assert_eq!(publish_dir(&refusing(0)).unwrap(), "v");
+        let v = dest.path().join("v");
+        assert_eq!(std::fs::read(v.join("a.txt")).unwrap(), b"a");
+        assert_eq!(std::fs::read(v.join("sub/b.txt")).unwrap(), b"b");
+        let mode = std::fs::metadata(&v).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o750);
+        assert!(!staged.exists());
+
+        stage();
+        let error = publish_dir(&refusing(3)).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EIO));
+        let staged_name = staged.file_name().unwrap().to_string_lossy();
+        assert_eq!(names(dest.path()), [&*staged_name, "v"]);
+        assert_eq!(names(&v), ["a.txt", "sub"], "the earlier copy is untouched");
+        assert_eq!(names(&staged).len(), 1, "the moved entry was removed again");
     }
 
     #[test]

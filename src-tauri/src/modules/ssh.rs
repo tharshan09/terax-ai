@@ -704,11 +704,21 @@ pub const REMOTE_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 
 /// Per-call budget for **user-triggered remote FS reads** (`fs_read_dir`,
 /// `fs_read_file`, `fs_canonicalize`, `fs_stat`) and the control steps of a
-/// copy (staging, folders, publish, cleanup, listing). Generous, because a healthy
+/// copy (staging, folders, publish, cleanup). Generous, because a healthy
 /// but slow transfer must not be truncated; it still bounds a wedged host so a
 /// single open can't hang forever. Only the remote path carries this — local FS
 /// ops get no kill-timeout (they just run off the main thread).
 pub const REMOTE_FS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+// An upload write scales with its size, so a slow link finishes while a hung
+// host frees the paste instead of holding it until restart.
+const WRITE_BASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const WRITE_TIMEOUT_PER_64_KIB: std::time::Duration = std::time::Duration::from_secs(1);
+
+fn write_timeout(payload: usize) -> std::time::Duration {
+    let chunks = u32::try_from(payload.div_ceil(64 * 1024)).unwrap_or(u32::MAX);
+    WRITE_BASE_TIMEOUT + WRITE_TIMEOUT_PER_64_KIB * chunks
+}
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
@@ -1326,10 +1336,10 @@ pub fn delete(host: &str, path: &str) -> Result<(), String> {
 
 type RemoteReply = Result<serde_json::Value, RemoteError>;
 
-/// Runs one helper request for the copy path; tests swap in a stub transport.
+/// The copy path's transport, so tests can swap in a stub.
 type RemoteRun<'a> = dyn FnMut(&serde_json::Value, Option<std::time::Duration>) -> RemoteReply + 'a;
 
-/// One remote step of an upload; `rel` is relative to the staged item.
+/// `rel` is relative to the staged item.
 #[cfg_attr(test, derive(Debug, PartialEq))]
 enum Upload {
     Dir {
@@ -1379,7 +1389,7 @@ fn plan_upload(
     // The helper writes plain files only: a symlink uploads its target's bytes,
     // so every link is judged here, where the upload reads through it.
     let target = if meta.file_type().is_symlink() {
-        copy::guard_read(registry, src)?;
+        copy::guard_link(src)?;
         std::fs::metadata(src).map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => broken_symlink(src, &rel),
             _ => error,
@@ -1435,8 +1445,7 @@ fn upload(run: &mut RemoteRun, plan: &[Upload], item: &str) -> Result<(), Remote
                     "op": "write_bytes", "path": format!("{item}{rel}"),
                     "b64": b64encode(&bytes), "mode": mode,
                 });
-                // No limit: on a slow but healthy link a file may take any time.
-                (request, None)
+                (request, Some(write_timeout(bytes.len())))
             }
         };
         run(&request, budget)?;
@@ -1455,8 +1464,8 @@ fn file_mode(_meta: &std::fs::Metadata) -> Option<u32> {
     None
 }
 
-/// Makes a fresh hidden staging dir in `dest` and returns its path; `dest`
-/// itself is never created. The name check guards the cleanup's recursive delete.
+/// `dest` itself is never created; the name check guards the cleanup's
+/// recursive delete.
 fn make_staging(run: &mut RemoteRun, dest: &str) -> Result<String, RemoteError> {
     let request = serde_json::json!({ "op": "mkstage", "path": format!("{dest}/") });
     let data = run(&request, Some(REMOTE_FS_TIMEOUT))?;
@@ -1494,8 +1503,8 @@ pub fn copy(
 
 const PUBLISH_LOST: &str = "connection lost while publishing; the item may already be in place";
 
-/// How an SSH copy item failed. A connection lost during its publish leaves the
-/// item's fate unknown, so it neither rejects the batch nor counts as created.
+/// A connection lost during an item's publish leaves its fate unknown, so it
+/// neither rejects the batch nor counts as created.
 #[derive(Debug)]
 enum ItemError {
     Remote(RemoteError),
@@ -1564,7 +1573,7 @@ fn copy_with(
     Ok(result)
 }
 
-/// Names one publish run tries in order; a block without a free one moves on.
+/// A block per run keeps a long clash to few round trips and a small request.
 const NAMES_PER_PUBLISH: usize = 64;
 
 // The remote landing gets no deny-list check, like a remote editor save.
@@ -1851,8 +1860,7 @@ Host !secret prod
         );
     }
 
-    /// Exit code, stdout and stderr of the embedded helper on the local python3,
-    /// after an optional `prelude`. `None` when python3 is absent.
+    /// `None` without a local python3, so a test skips instead of failing.
     #[cfg(unix)]
     fn helper_output(
         prelude: &str,
@@ -1888,8 +1896,7 @@ Host !secret prod
         Some((out.status.code(), out.stdout, stderr))
     }
 
-    /// Runs the embedded helper on the local python3, after an optional
-    /// `prelude` that can stub os calls. `None` when python3 is absent.
+    /// The `prelude` can stub os calls; `None` without a local python3.
     #[cfg(unix)]
     fn run_helper(prelude: &str, req: &serde_json::Value) -> Option<serde_json::Value> {
         let (code, stdout, stderr) = helper_output(prelude, req)?;
@@ -2071,7 +2078,6 @@ Host !secret prod
         assert_eq!(rels(&grep["hits"]), [".hidden/report"]);
     }
 
-    /// A publish request trying `names`, in order, in `dir` (ending in `/`).
     #[cfg(unix)]
     fn publish_request(from: &str, dir: &str, names: &[&str]) -> serde_json::Value {
         serde_json::json!({ "op": "publish", "from": from, "dir": dir, "names": names })
@@ -2364,8 +2370,6 @@ Host !secret prod
         assert_eq!(mode("shared"), 0o775, "the umask must not cut the mode");
     }
 
-    /// Runs the SSH copy loop against `respond` instead of a host and returns
-    /// the result with every request it sent.
     fn stub_copy(
         sources: &[String],
         mut respond: impl FnMut(&serde_json::Value) -> RemoteReply,
@@ -2494,8 +2498,6 @@ Host !secret prod
         );
     }
 
-    /// Answers a publish like a host holding `taken`: the first free name, or
-    /// null when the whole block is taken.
     fn publish_into(taken: &[&str], request: &serde_json::Value) -> Option<RemoteReply> {
         if request["op"] != "publish" {
             return None;
@@ -2742,7 +2744,17 @@ Host !secret prod
     }
 
     #[test]
-    fn control_steps_run_on_a_budget_but_uploads_do_not() {
+    fn a_write_gets_thirty_seconds_plus_one_per_64_kib() {
+        let secs = |payload: usize| write_timeout(payload).as_secs();
+        assert_eq!(secs(0), 30);
+        assert_eq!(secs(1), 31);
+        assert_eq!(secs(64 * 1024), 31);
+        assert_eq!(secs(64 * 1024 + 1), 32);
+        assert_eq!(secs(10 * 1024 * 1024), 30 + 160);
+    }
+
+    #[test]
+    fn control_steps_run_on_a_fixed_budget_and_writes_on_a_sized_one() {
         let src = tempfile::tempdir().unwrap();
         std::fs::create_dir(src.path().join("pkg")).unwrap();
         std::fs::write(src.path().join("pkg/a.txt"), b"a").unwrap();
@@ -2768,7 +2780,7 @@ Host !secret prod
         let expected = [
             ("mkstage", control),
             ("create_dir", control),
-            ("write_bytes", None),
+            ("write_bytes", Some(write_timeout(1))),
             ("publish", control),
             ("delete", control),
         ];
@@ -2986,6 +2998,12 @@ Host !secret prod
     }
 
     #[test]
+    fn the_paste_toast_knows_the_publish_lost_message() {
+        let toast = include_str!("../../../src/modules/explorer/lib/clipboardPaste.ts");
+        assert!(toast.contains(&format!("\"{PUBLISH_LOST}\"")));
+    }
+
+    #[test]
     fn a_helper_killed_while_publishing_leaves_the_item_fate_unknown() {
         const KILLED: &str = "remote helper exited with status 137";
         let src = tempfile::tempdir().unwrap();
@@ -3094,6 +3112,34 @@ Host !secret prod
             )]
         );
         assert!(!requests.iter().any(creates_staging));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_in_an_uploaded_folder_may_lead_outside_the_workspace() {
+        let ws = tempfile::tempdir().unwrap();
+        let opt = tempfile::tempdir().unwrap();
+        std::fs::write(opt.path().join("python3.12"), b"#!").unwrap();
+        let bin = ws.path().join("proj/.venv/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::os::unix::fs::symlink(opt.path().join("python3.12"), bin.join("python")).unwrap();
+        let reg = crate::modules::workspace::WorkspaceRegistry::default();
+        reg.authorize(ws.path()).unwrap();
+
+        let mut plan = Vec::new();
+        plan_upload(
+            &ws.path().join("proj"),
+            String::new(),
+            0,
+            false,
+            &mut plan,
+            &reg,
+        )
+        .expect("a link out of the workspace is no refusal");
+        assert!(plan.iter().any(|step| matches!(
+            step,
+            Upload::File { rel, .. } if rel == "/.venv/bin/python"
+        )));
     }
 
     #[test]

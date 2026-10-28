@@ -11,7 +11,6 @@ export function dirname(path: string): string {
   return path.slice(0, i);
 }
 
-// The folder a row stands for when something lands on it: paste, drop or move.
 export function targetDirFor<Root extends string | null>(
   row: string | null | undefined,
   isDir: (path: string) => boolean | undefined,

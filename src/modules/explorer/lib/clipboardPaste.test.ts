@@ -150,6 +150,25 @@ describe("reportCopyFailures", () => {
     });
   });
 
+  it("says which item may already be in place when the connection dropped during its publish", () => {
+    const lost = "ssh: Connection timed out.";
+    reportCopyFailures({
+      created: [],
+      failed: [
+        {
+          source: "/x/a.txt",
+          message:
+            "connection lost while publishing; the item may already be in place",
+        },
+        { source: "/x/b.txt", message: lost },
+      ],
+      aborted: lost,
+    });
+    expect(toast.error).toHaveBeenCalledWith("Could not copy 2 items", {
+      description: "ssh: Connection timed out. a.txt may already be in place.",
+    });
+  });
+
   it("counts clipboard items that no longer resolve as failed copies", () => {
     reportCopyFailures({ created: ["/ws/a"], failed: [] }, 1);
     expect(toast.error).toHaveBeenLastCalledWith("Could not copy 1 item", {

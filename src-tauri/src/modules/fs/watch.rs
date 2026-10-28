@@ -90,7 +90,6 @@ fn is_skipped(path: &Path) -> bool {
         .is_some_and(|n| SKIP_DIRS.contains(&n))
 }
 
-/// The nearest watched folder at or above a path.
 type WatchedAncestor<'a> = dyn Fn(&Path) -> Option<PathBuf> + 'a;
 
 fn has_staging_segment(path: &Path) -> bool {

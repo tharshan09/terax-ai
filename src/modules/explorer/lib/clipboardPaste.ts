@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
+import { basename } from "@/lib/utils";
 import {
   isTerminalPasteChord,
   type TerminalKeyEvent,
@@ -74,15 +75,24 @@ function missingItems(unresolved: number): string {
     : `${unresolved} copied items no longer exist`;
 }
 
+// Mirrors ssh.rs PUBLISH_LOST: that item's fate is unknown, not failed.
+const PUBLISH_LOST =
+  "connection lost while publishing; the item may already be in place";
+
 // A lost connection explains every failure after it, so it beats the first one.
 export function reportCopyFailures(result: CopyResult, unresolved = 0): void {
   const count = result.failed.length + unresolved;
   if (count === 0) return;
   const first = result.failed[0];
+  const reason =
+    result.aborted ??
+    (first ? `${first.source}: ${first.message}` : missingItems(unresolved));
+  const lost = result.failed.find((f) => f.message === PUBLISH_LOST);
   toast.error(`Could not copy ${count} ${count === 1 ? "item" : "items"}`, {
     description:
-      result.aborted ??
-      (first ? `${first.source}: ${first.message}` : missingItems(unresolved)),
+      lost && result.aborted
+        ? `${reason.replace(/\.$/, "")}. ${basename(lost.source)} may already be in place.`
+        : reason,
   });
 }
 
@@ -91,8 +101,7 @@ function cancelled(): string[] {
   return [];
 }
 
-// Copies the clipboard's files into `destDir` and selects the first new row;
-// nothing touches the tree once `scope` is no longer current.
+// Nothing touches the tree once `scope` is no longer current.
 export async function pasteClipboardFiles(
   destDir: string,
   {

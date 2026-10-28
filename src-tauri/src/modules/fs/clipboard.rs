@@ -1,13 +1,12 @@
-/// The clipboard's files. A file URL that no longer leads to a file (its
-/// original was deleted) is counted, so the paste can report it as failed.
+/// A file URL that no longer leads to a file (its original was deleted) is
+/// counted, so the paste can report it as failed.
 #[derive(Debug, Default, PartialEq, serde::Serialize)]
 pub struct ClipboardFiles {
     pub paths: Vec<String>,
     pub unresolved: usize,
 }
 
-/// File and folder paths the OS clipboard holds (Finder copy). Only file URLs
-/// are read, never text or images, and only on an explicit paste.
+/// Only file URLs are read, never text or images, and only on an explicit paste.
 #[tauri::command]
 pub async fn fs_clipboard_paths(app: tauri::AppHandle) -> Result<ClipboardFiles, String> {
     #[cfg(target_os = "macos")]
@@ -43,7 +42,6 @@ async fn receive_paths(
     }
 }
 
-/// The local files among the pasteboard items; any other URL is skipped.
 /// Finder writes file-reference URLs (`file:///.file/id=…`).
 #[cfg(target_os = "macos")]
 fn read_files(pasteboard: &objc2_app_kit::NSPasteboard) -> ClipboardFiles {
@@ -70,7 +68,6 @@ fn read_files(pasteboard: &objc2_app_kit::NSPasteboard) -> ClipboardFiles {
 #[cfg(target_os = "macos")]
 enum LocalFile {
     Path(String),
-    /// A file URL that leads to no file, such as a reference to a deleted one.
     Unresolved,
     NotAFile,
 }
@@ -204,7 +201,6 @@ mod tests {
         let _: () = unsafe { objc2::msg_send![&*pasteboard, releaseGlobally] };
     }
 
-    /// Items that hold no local file: other schemes, a remote host, no path, text.
     fn not_files() -> Vec<Retained<NSPasteboardItem>> {
         let mut items: Vec<_> = [
             "https://example.com/a.txt",

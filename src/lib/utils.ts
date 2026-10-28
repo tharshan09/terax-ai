@@ -23,7 +23,6 @@ export function basename(path: string): string {
   return parts.length ? parts[parts.length - 1] : path
 }
 
-/** Parent of a native OS path (`/` or `\`), e.g. the editor's watched folders. */
 export function parentDir(path: string): string {
   const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"))
   if (i < 0) return path
