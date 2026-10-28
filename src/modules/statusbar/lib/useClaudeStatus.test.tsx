@@ -19,10 +19,11 @@ import { useClaudeStatus } from "./useClaudeStatus";
 const POLL_MS = 2000;
 
 function setHidden(hidden: boolean) {
-  Object.defineProperty(document, "hidden", {
+  Object.defineProperty(document, "visibilityState", {
     configurable: true,
-    get: () => hidden,
+    get: () => (hidden ? "hidden" : "visible"),
   });
+  document.dispatchEvent(new Event("visibilitychange"));
 }
 
 // Native microtask chains (await invoke -> catch/finally -> setState) settle
@@ -98,7 +99,7 @@ describe("useClaudeStatus poll guards (W2a)", () => {
     expect(invokeMock).toHaveBeenCalledTimes(2);
   });
 
-  it("skips the tick without invoking while the document is hidden", async () => {
+  it("skips the tick without invoking while the window is hidden", async () => {
     invokeMock.mockResolvedValue(null);
     await act(async () => {
       render(<Harness capture={() => {}} />);

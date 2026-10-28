@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
+import { subscribeWindowHidden } from "@/lib/windowVisibility";
 import type { Tab } from "@/modules/tabs";
 import { isSerializableTab, serializeTabs } from "./serialize";
 import { saveState } from "./store";
@@ -85,15 +86,14 @@ export function useSpacePersistence({
 
   useEffect(() => {
     if (!enabled) return;
-    const onHidden = () => {
-      if (document.visibilityState === "hidden") flush(latest.current);
-    };
     const onLeave = () => flush(latest.current);
-    document.addEventListener("visibilitychange", onHidden);
+    const unsubscribeHidden = subscribeWindowHidden((hidden) => {
+      if (hidden) flush(latest.current);
+    });
     window.addEventListener("blur", onLeave);
     window.addEventListener("beforeunload", onLeave);
     return () => {
-      document.removeEventListener("visibilitychange", onHidden);
+      unsubscribeHidden();
       window.removeEventListener("blur", onLeave);
       window.removeEventListener("beforeunload", onLeave);
       flush(latest.current);
