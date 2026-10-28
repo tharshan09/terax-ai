@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type CopyResult,
+  type ExplorerScope,
   isPasteShortcut,
   pasteClipboardFiles,
   pasteExclusively,
@@ -191,9 +192,8 @@ function options(
   workspace: WorkspaceEnv = { kind: "ssh", host: "litha-claude" },
 ) {
   return {
-    workspace,
-    rootPath: "/ws",
-    isCurrent: vi.fn(() => true),
+    scope: { rootPath: "/ws", workspace },
+    isCurrent: vi.fn((_scope: ExplorerScope) => true),
     isExpanded: vi.fn((_dir: string) => false),
     refresh: vi.fn((_path: string) => Promise.resolve()),
     expand: vi.fn((_path: string) => Promise.resolve()),
@@ -398,6 +398,20 @@ describe("pasteClipboardFiles", () => {
     expect(toast.message).not.toHaveBeenCalled();
     expect(invoke).toHaveBeenCalledTimes(1);
     expect(opts.refresh).not.toHaveBeenCalled();
+  });
+
+  it("neither reads the clipboard nor touches the tree when its scope is already stale", async () => {
+    const opts = options();
+    opts.isCurrent.mockReturnValue(false);
+    expect(await pasteClipboardFiles("/ws/docs", opts)).toEqual([]);
+    expect(opts.isCurrent).toHaveBeenCalledWith(opts.scope);
+    expect(invoke).not.toHaveBeenCalled();
+    expect(opts.refresh).not.toHaveBeenCalled();
+    expect(opts.expand).not.toHaveBeenCalled();
+    expect(opts.select).not.toHaveBeenCalled();
+    expect(opts.onCopySettled).not.toHaveBeenCalled();
+    expect(toast.message).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
   });
 
   it("cancels before copying when the root changed during the clipboard read", async () => {

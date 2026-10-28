@@ -378,9 +378,8 @@ fn place(
     }
 }
 
-// Filesystems without a no-replace rename (exFAT, SMB): claim the name
-// exclusively first, then rename over our own empty placeholder. Only the
-// claim can find the name taken; whatever the swap reports fails the item.
+// exFAT and SMB lack a no-replace rename: an exclusive create claims the name,
+// so the rename only ever replaces our own empty placeholder.
 fn place_reserved(
     staged: &Path,
     target: &Path,
@@ -657,9 +656,8 @@ fn copy_symlink(_src: &Path, _dst: &Path) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
-/// Finder naming: ` copy`, then ` copy n`; only the last extension is kept
-/// apart, folders and extensionless names (dotfiles too) get a plain suffix.
-/// A name that already ends in ` copy` or ` copy n` continues its count.
+/// Finder naming: ` copy`, ` copy n` before a file's last extension (folders and
+/// dotfiles take it at the end); a name already ending in ` copy n` counts on.
 fn copy_name(name: &OsStr, n: usize, is_dir: bool) -> OsString {
     let path = Path::new(name);
     let (stem, ext) = match (is_dir, path.file_stem(), path.extension()) {

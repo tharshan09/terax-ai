@@ -53,10 +53,15 @@ export type CopyResult = {
 // `unresolved` counts file URLs whose file is gone (deleted since the copy).
 type ClipboardFiles = { paths: string[]; unresolved: number };
 
+// The root and workspace an explorer action started under, current by identity.
+export type ExplorerScope = {
+  readonly rootPath: string;
+  readonly workspace: WorkspaceEnv;
+};
+
 type PasteOptions = {
-  workspace: WorkspaceEnv;
-  rootPath: string;
-  isCurrent: () => boolean;
+  scope: ExplorerScope;
+  isCurrent: (scope: ExplorerScope) => boolean;
   isExpanded: (dir: string) => boolean;
   // Both settle once the folder's re-read shows in the tree.
   refresh: (dir: string) => Promise<void>;
@@ -87,15 +92,13 @@ export function reportCopyFailures(result: CopyResult, unresolved = 0): void {
   });
 }
 
-// Copies the files on the OS clipboard into `destDir`, re-reads it and selects
-// the first new row. Returns the created paths, or nothing once the explorer
-// has moved to another root or workspace.
+// Copies the clipboard's files into `destDir` and selects the first new row;
+// nothing touches the tree once `scope` is no longer current.
 export async function pasteClipboardFiles(
   destDir: string,
   {
-    workspace,
-    rootPath,
-    isCurrent,
+    scope,
+    isCurrent: isCurrentScope,
     isExpanded,
     refresh,
     expand,
@@ -104,8 +107,10 @@ export async function pasteClipboardFiles(
     onCopySettled,
   }: PasteOptions,
 ): Promise<string[]> {
+  const isCurrent = () => isCurrentScope(scope);
+  if (!isCurrent()) return [];
   // A collapsed folder is read when it opens, so it gets no extra re-read.
-  const isOpen = () => destDir === rootPath || isExpanded(destDir);
+  const isOpen = () => destDir === scope.rootPath || isExpanded(destDir);
   let copyStarted = false;
   try {
     const { paths: sources, unresolved } =
@@ -123,7 +128,7 @@ export async function pasteClipboardFiles(
       result = await invoke<CopyResult>("fs_copy", {
         sources,
         destDir,
-        workspace,
+        workspace: scope.workspace,
         renameOnConflict: true,
       });
     } finally {

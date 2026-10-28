@@ -1446,7 +1446,7 @@ fn copy_with(
     let mut taken = TakenNames {
         host,
         dir: dest_dir,
-        names: None,
+        listing: Listing::NotYet,
     };
     let mut result = CopyResult::default();
     let failure = |source: &String, message: &str| CopyFailure {
@@ -1495,48 +1495,64 @@ fn copy_with(
     Ok(result)
 }
 
+const LISTING_ATTEMPTS: usize = 2;
+/// Each publish run costs a round trip, so without a listing an item stops early.
+const UNLISTED_NAME_TRIES: usize = 32;
+const NO_LISTING: &str = "could not list the destination to find a free name";
+
+enum Listing {
+    NotYet,
+    Listed(std::collections::HashSet<String>),
+    Failed,
+}
+
 /// Names known to be in `dir`, only to skip doomed publish runs. The folder is
-/// listed once, on the first clash; the no-replace publish is the real check.
+/// listed on the first clash, retried once; the no-replace publish is the real check.
 struct TakenNames<'a> {
     host: &'a str,
     dir: &'a str,
-    names: Option<std::collections::HashSet<String>>,
+    listing: Listing,
 }
 
 impl TakenNames<'_> {
     fn contains(&self, name: &str) -> bool {
-        self.names
-            .as_ref()
-            .is_some_and(|names| names.contains(name))
+        matches!(&self.listing, Listing::Listed(names) if names.contains(name))
+    }
+
+    fn unlisted(&self) -> bool {
+        matches!(self.listing, Listing::Failed)
     }
 
     fn published(&mut self, name: String) {
-        if let Some(names) = &mut self.names {
+        if let Listing::Listed(names) = &mut self.listing {
             names.insert(name);
         }
     }
 
     fn clashed(&mut self, run: &mut RemoteRun, name: String) {
-        let (host, dir) = (self.host, self.dir);
-        self.names
-            .get_or_insert_with(|| listed_names(run, host, dir))
-            .insert(name);
+        if matches!(self.listing, Listing::NotYet) {
+            self.listing = list_names(run, self.host, self.dir);
+        }
+        if let Listing::Listed(names) = &mut self.listing {
+            names.insert(name);
+        }
     }
 }
 
-// Without a listing every candidate is tried.
-fn listed_names(
-    run: &mut RemoteRun,
-    host: &str,
-    dest_dir: &str,
-) -> std::collections::HashSet<String> {
-    match read_dir_with(run, dest_dir, true) {
-        Ok(entries) => entries.into_iter().map(|entry| entry.name).collect(),
-        Err(error) => {
-            log::warn!("ssh copy: could not list {host}:{dest_dir}, trying every name: {error}");
-            std::collections::HashSet::new()
+fn list_names(run: &mut RemoteRun, host: &str, dest_dir: &str) -> Listing {
+    for attempt in 1..=LISTING_ATTEMPTS {
+        match read_dir_with(run, dest_dir, true) {
+            Ok(entries) => {
+                return Listing::Listed(entries.into_iter().map(|entry| entry.name).collect())
+            }
+            Err(error) => {
+                log::warn!(
+                    "ssh copy: could not list {host}:{dest_dir} (attempt {attempt}): {error}"
+                )
+            }
         }
     }
+    Listing::Failed
 }
 
 // The remote landing gets no deny-list check, like a remote editor save.
@@ -1601,10 +1617,17 @@ fn publish_staged(
 ) -> Result<String, ItemError> {
     use crate::modules::fs::copy;
     let staged = format!("{staging}/{}", copy::STAGED_ITEM);
+    let mut unlisted_tries = 0;
     for candidate in copy::copy_candidates(std::ffi::OsStr::new(name), is_dir) {
         let candidate = candidate.to_string_lossy().into_owned();
         if taken.contains(&candidate) {
             continue;
+        }
+        if taken.unlisted() {
+            if unlisted_tries == UNLISTED_NAME_TRIES {
+                return Err(RemoteError::Failed(NO_LISTING.to_string()).into());
+            }
+            unlisted_tries += 1;
         }
         let request = serde_json::json!({
             "op": "publish", "from": staged, "to": format!("{dest}/{candidate}"),
@@ -2371,7 +2394,7 @@ Host !secret prod
     }
 
     #[test]
-    fn copy_tries_every_name_when_the_listing_fails() {
+    fn copy_lists_twice_before_trying_names_without_a_listing() {
         let src = tempfile::tempdir().unwrap();
         let sources = local_sources(src.path(), &["a.txt"]);
         let listings: [fn() -> RemoteReply; 3] = [
@@ -2400,9 +2423,77 @@ Host !secret prod
             assert_eq!(targets, ["/remote/a.txt", "/remote/a copy.txt"]);
             assert_eq!(
                 ops(&requests, &["read_dir", "publish"]),
-                ["publish", "read_dir", "publish"]
+                ["publish", "read_dir", "read_dir", "publish"]
             );
         }
+    }
+
+    #[test]
+    fn a_listing_that_works_on_the_retry_is_used() {
+        let src = tempfile::tempdir().unwrap();
+        let sources = local_sources(src.path(), &["a.txt"]);
+        let mut listings = 0;
+        let (result, requests) = stub_copy(&sources, |request| {
+            if request["op"] == "read_dir" {
+                listings += 1;
+                if listings == 1 {
+                    return Err(RemoteError::Failed(
+                        "Resource temporarily unavailable".into(),
+                    ));
+                }
+                return listing(&["a.txt", "a copy.txt"]);
+            }
+            refuse(&["/remote/a.txt"], request).unwrap_or_else(|| healthy(request))
+        });
+        assert_eq!(result.unwrap().created, ["/remote/a copy 2.txt"]);
+        assert_eq!(
+            publish_targets(&requests),
+            ["/remote/a.txt", "/remote/a copy 2.txt"]
+        );
+        assert_eq!(
+            ops(&requests, &["read_dir", "publish"]),
+            ["publish", "read_dir", "read_dir", "publish"]
+        );
+    }
+
+    #[test]
+    fn without_a_listing_an_item_gives_up_after_a_few_names() {
+        let src = tempfile::tempdir().unwrap();
+        let sources = local_sources(src.path(), &["a.txt", "b.txt"]);
+        let (result, requests) = stub_copy(&sources, |request| {
+            if request["op"] == "read_dir" {
+                return Err(RemoteError::Failed("Permission denied".into()));
+            }
+            if request["op"] == "publish" {
+                let target = request["to"].as_str().unwrap();
+                return Err(RemoteError::Failed(format!("already exists: {target}")));
+            }
+            healthy(request)
+        });
+        let result = result.unwrap();
+        assert!(result.created.is_empty());
+        assert_eq!(
+            failures(&result),
+            [
+                (sources[0].clone(), NO_LISTING.to_string()),
+                (sources[1].clone(), NO_LISTING.to_string()),
+            ]
+        );
+        assert_eq!(
+            requests.iter().filter(|r| r["op"] == "read_dir").count(),
+            LISTING_ATTEMPTS
+        );
+        let targets = publish_targets(&requests);
+        let first_item = 1 + UNLISTED_NAME_TRIES;
+        assert_eq!(targets.len(), first_item + UNLISTED_NAME_TRIES);
+        assert_eq!(targets[0], "/remote/a.txt");
+        assert_eq!(targets[first_item - 1], "/remote/a copy 32.txt");
+        assert_eq!(targets[first_item], "/remote/b.txt");
+        assert_eq!(
+            targets.last().unwrap().as_str(),
+            Some("/remote/b copy 31.txt")
+        );
+        assert_eq!(requests.iter().filter(|r| r["op"] == "delete").count(), 2);
     }
 
     fn listing(names: &[&str]) -> RemoteReply {

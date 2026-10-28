@@ -43,8 +43,8 @@ async fn receive_paths(
     }
 }
 
-/// Every pasteboard item carrying a file URL, as an absolute path or counted
-/// as unresolved. Finder writes file-reference URLs (`file:///.file/id=…`).
+/// The local files among the pasteboard items; any other URL is skipped.
+/// Finder writes file-reference URLs (`file:///.file/id=…`).
 #[cfg(target_os = "macos")]
 fn read_files(pasteboard: &objc2_app_kit::NSPasteboard) -> ClipboardFiles {
     use objc2_app_kit::NSPasteboardTypeFileURL;
@@ -58,21 +58,42 @@ fn read_files(pasteboard: &objc2_app_kit::NSPasteboard) -> ClipboardFiles {
         let Some(raw) = item.stringForType(file_type) else {
             continue;
         };
-        match file_path(&raw) {
-            Some(path) => files.paths.push(super::to_canon(path)),
-            None => files.unresolved += 1,
+        match local_file(&raw) {
+            LocalFile::Path(path) => files.paths.push(super::to_canon(path)),
+            LocalFile::Unresolved => files.unresolved += 1,
+            LocalFile::NotAFile => {}
         }
     }
     files
 }
 
 #[cfg(target_os = "macos")]
-fn file_path(raw: &objc2_foundation::NSString) -> Option<String> {
-    let path = objc2_foundation::NSURL::URLWithString(raw)?
-        .filePathURL()?
-        .path()?
-        .to_string();
-    (!path.is_empty()).then_some(path)
+enum LocalFile {
+    Path(String),
+    /// A file URL that leads to no file, such as a reference to a deleted one.
+    Unresolved,
+    NotAFile,
+}
+
+#[cfg(target_os = "macos")]
+fn local_file(raw: &objc2_foundation::NSString) -> LocalFile {
+    let Some(url) = objc2_foundation::NSURL::URLWithString(raw) else {
+        return LocalFile::NotAFile;
+    };
+    let host = url.host().map(|host| host.to_string());
+    let local = host.is_none_or(|host| host.is_empty() || host.eq_ignore_ascii_case("localhost"));
+    if !url.isFileURL() || !local {
+        return LocalFile::NotAFile;
+    }
+    let path = url
+        .filePathURL()
+        .and_then(|path_url| path_url.path())
+        .map(|path| path.to_string());
+    match path {
+        Some(path) if path.starts_with('/') => LocalFile::Path(path),
+        _ if url.isFileReferenceURL() => LocalFile::Unresolved,
+        _ => LocalFile::NotAFile,
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -143,17 +164,7 @@ mod tests {
         std::fs::write(&deleted, b"x").unwrap();
         items.push(reference_to(&deleted));
         std::fs::remove_file(&deleted).unwrap();
-        let web = NSPasteboardItem::new();
-        let not_a_file = NSString::from_str("https://example.com/a.txt");
-        assert!(web.setString_forType(&not_a_file, unsafe { NSPasteboardTypeFileURL }));
-        items.push(web);
-        let text = NSPasteboardItem::new();
-        assert!(
-            text.setString_forType(&NSString::from_str("hello"), unsafe {
-                NSPasteboardTypeString
-            })
-        );
-        items.push(text);
+        items.extend(not_files());
 
         let pasteboard = NSPasteboard::pasteboardWithUniqueName();
         write(&pasteboard, &items);
@@ -167,7 +178,7 @@ mod tests {
             unresolved,
         } = read_files(&pasteboard);
         assert_eq!(got.len(), expected.len(), "{got:?}");
-        assert_eq!(unresolved, 2, "the deleted file and the web URL");
+        assert_eq!(unresolved, 1, "only the deleted file");
         // fileURLWithPath spells the folder decomposed (NFD), so that item is
         // compared by file identity; every other item must match exactly.
         use std::os::unix::fs::MetadataExt;
@@ -184,7 +195,39 @@ mod tests {
 
         pasteboard.clearContents();
         assert_eq!(read_files(&pasteboard), ClipboardFiles::default());
+        write(&pasteboard, &not_files());
+        assert_eq!(
+            read_files(&pasteboard),
+            ClipboardFiles::default(),
+            "no file and nothing unresolved reads as an empty clipboard"
+        );
         let _: () = unsafe { objc2::msg_send![&*pasteboard, releaseGlobally] };
+    }
+
+    /// Items that hold no local file: other schemes, a remote host, no path, text.
+    fn not_files() -> Vec<Retained<NSPasteboardItem>> {
+        let mut items: Vec<_> = [
+            "https://example.com/a.txt",
+            "file://fileserver/share/a.txt",
+            "file:",
+            "not a url",
+        ]
+        .iter()
+        .map(|raw| {
+            let item = NSPasteboardItem::new();
+            let raw = NSString::from_str(raw);
+            assert!(item.setString_forType(&raw, unsafe { NSPasteboardTypeFileURL }));
+            item
+        })
+        .collect();
+        let text = NSPasteboardItem::new();
+        assert!(
+            text.setString_forType(&NSString::from_str("hello"), unsafe {
+                NSPasteboardTypeString
+            })
+        );
+        items.push(text);
+        items
     }
 
     #[test]

@@ -39,6 +39,7 @@ import {
   revealInFinder,
 } from "./lib/contextActions";
 import {
+  type ExplorerScope,
   pasteClipboardFiles,
   pasteExclusively,
   pasteKeyAction,
@@ -54,7 +55,7 @@ import type { GitStatusCode } from "./lib/gitStatusUtils";
 import { useGlobalShortcuts } from "@/modules/shortcuts";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { GitStatusSnapshot } from "@/modules/ai/lib/native";
-import { useWorkspaceEnvStore, type WorkspaceEnv } from "@/modules/workspace";
+import { useWorkspaceEnvStore } from "@/modules/workspace";
 
 export type FileExplorerHandle = {
   focus: () => void;
@@ -100,8 +101,6 @@ type Row =
 
 const ROW_HEIGHT = 24;
 const OVERSCAN = 8;
-
-type PasteScope = { rootPath: string | null; workspace: WorkspaceEnv };
 
 function buildRows(
   rootPath: string,
@@ -212,13 +211,21 @@ export const FileExplorer = memo(
     const scrollRef = useRef<HTMLDivElement>(null);
     const workspace = useWorkspaceEnvStore((s) => s.env);
     const pasteBusyRef = useRef(false);
-    const pasteScopeRef = useRef<PasteScope>({ rootPath, workspace });
+    const scope = useMemo<ExplorerScope | null>(
+      () => (rootPath ? { rootPath, workspace } : null),
+      [rootPath, workspace],
+    );
+    const scopeRef = useRef<ExplorerScope | null>(null);
     useLayoutEffect(() => {
-      pasteScopeRef.current = { rootPath, workspace };
+      scopeRef.current = scope;
       return () => {
-        pasteScopeRef.current = { rootPath: null, workspace };
+        scopeRef.current = null;
       };
-    }, [rootPath, workspace]);
+    }, [scope]);
+    const isCurrent = useCallback(
+      (token: ExplorerScope) => scopeRef.current === token,
+      [],
+    );
 
     // biome-ignore lint/correctness/useExhaustiveDependencies: `tree` is intentionally omitted (its identity changes every render); the listed fields are the only inputs buildRows actually reads.
     const { rows, entryIndexByPath } = useMemo(() => {
@@ -255,6 +262,8 @@ export const FileExplorer = memo(
       name: string;
       isDir: boolean;
     } | null>(null);
+    // The scope the menu opened in; a later root change voids its actions.
+    const [menuScope, setMenuScope] = useState<ExplorerScope | null>(null);
     const [deleteConfirm, setDeleteConfirm] = useState(false);
     // Bumped on every right-click so the menu content remounts and the popper
     // re-anchors to the new cursor (floating-ui won't reposition on an anchor
@@ -282,7 +291,8 @@ export const FileExplorer = memo(
     });
 
     const fileDrop = useExplorerFileDrop({
-      rootPath,
+      scope,
+      isCurrent,
       isDir: isDirAt,
       onCopied: tree.refresh,
     });
@@ -320,14 +330,11 @@ export const FileExplorer = memo(
     );
 
     const pasteInto = useCallback(
-      async (destDir: string) => {
-        if (!rootPath) return;
+      async (destDir: string, token: ExplorerScope) => {
         await pasteExclusively(pasteBusyRef, async (release) => {
-          const scope = pasteScopeRef.current;
           await pasteClipboardFiles(destDir, {
-            workspace,
-            rootPath,
-            isCurrent: () => pasteScopeRef.current === scope,
+            scope: token,
+            isCurrent,
             isExpanded: tree.isExpanded,
             refresh: tree.refresh,
             expand: tree.expand,
@@ -341,8 +348,7 @@ export const FileExplorer = memo(
         });
       },
       [
-        rootPath,
-        workspace,
+        isCurrent,
         tree.refresh,
         tree.expand,
         tree.isExpanded,
@@ -430,8 +436,11 @@ export const FileExplorer = memo(
       const pasteKey = pasteKeyAction(e, IS_MAC);
       if (pasteKey) {
         e.preventDefault();
-        if (pasteKey === "paste") {
-          void pasteInto(targetDirFor(selectedPath, isDirAt, rootPath));
+        if (pasteKey === "paste" && scope) {
+          void pasteInto(
+            targetDirFor(selectedPath, isDirAt, scope.rootPath),
+            scope,
+          );
         }
         return;
       }
@@ -642,6 +651,7 @@ export const FileExplorer = memo(
                       ? { path: row.path, name: row.name, isDir: row.isDir }
                       : null,
                   );
+                  setMenuScope(scope);
                   setDeleteConfirm(false);
                   setMenuNonce((n) => n + 1);
                 }}
@@ -779,7 +789,7 @@ export const FileExplorer = memo(
                   >
                     New Folder
                   </ContextMenuItem>
-                  {IS_MAC && (
+                  {IS_MAC && menuScope && (
                     <ContextMenuItem
                       className={COMPACT_ITEM}
                       onSelect={() =>
@@ -787,8 +797,9 @@ export const FileExplorer = memo(
                           targetDirFor(
                             menuTarget.path,
                             () => menuTarget.isDir,
-                            rootPath,
+                            menuScope.rootPath,
                           ),
+                          menuScope,
                         )
                       }
                     >
@@ -865,10 +876,12 @@ export const FileExplorer = memo(
                   >
                     New Folder
                   </ContextMenuItem>
-                  {IS_MAC && (
+                  {IS_MAC && menuScope && (
                     <ContextMenuItem
                       className={COMPACT_ITEM}
-                      onSelect={() => void pasteInto(rootPath)}
+                      onSelect={() =>
+                        void pasteInto(menuScope.rootPath, menuScope)
+                      }
                     >
                       Paste
                       <ContextMenuShortcut>⌘V</ContextMenuShortcut>
