@@ -226,8 +226,10 @@ describe("useSourceControl context switches", () => {
     expect(result.current.lastRemoteError).toBeNull();
   });
 
-  it("keeps a running remote action through a clear and drops its stale refresh", async () => {
-    native.gitPanelSnapshot.mockResolvedValue(tracked);
+  it("keeps a running remote action through a clear and never writes the old repo back", async () => {
+    native.gitPanelSnapshot.mockImplementation(async (cwd: string) =>
+      cwd === "/repo/app" ? tracked : { repo: null, status: null },
+    );
     let finishPush = () => {};
     native.gitPush.mockImplementation(
       () =>
@@ -251,12 +253,78 @@ describe("useSourceControl context switches", () => {
     expect(result.current.hasRepo).toBe(false);
     expect(result.current.busyAction).toBe("push");
 
-    const runs = gitStatusRuns();
     await act(async () => finishPush());
     await settle();
-    expect(gitStatusRuns()).toBe(runs);
+    expect(native.gitStatus).not.toHaveBeenCalled();
+    expect(native.gitPanelSnapshot).toHaveBeenLastCalledWith("/other");
     expect(result.current.status).toBeNull();
     expect(result.current.busyAction).toBeNull();
+  });
+
+  it("lands the status after a push when the context moved within the repo", async () => {
+    native.gitPanelSnapshot.mockResolvedValue({
+      ...tracked,
+      status: { ...trackedStatus, ahead: 3 },
+    });
+    native.gitStatus.mockResolvedValue({ ...trackedStatus, ahead: 0 });
+    let finishPush = () => {};
+    native.gitPush.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finishPush = resolve;
+        }),
+    );
+    const { result, rerender } = renderHook(
+      ({ path }) => useSourceControl(path),
+      { initialProps: { path: "/repo/app" } },
+    );
+    await settle();
+    expect(result.current.ahead).toBe(3);
+    act(() => {
+      void result.current.runRemoteAction("push");
+    });
+    await settle();
+
+    await act(async () => rerender({ path: "/repo/lib" }));
+    await settle();
+    expect(native.gitStatus).not.toHaveBeenCalled();
+
+    await act(async () => finishPush());
+    await settle();
+    expect(native.gitStatus).toHaveBeenCalledWith("/repo");
+    expect(result.current.ahead).toBe(0);
+  });
+
+  it("does not count a dropped refresh as fresh", async () => {
+    native.gitPanelSnapshot.mockResolvedValue(tracked);
+    native.gitStatus.mockResolvedValue(trackedStatus);
+    let landStale = () => {};
+    native.gitStatus.mockImplementationOnce(
+      () =>
+        new Promise<GitStatusSnapshot>((resolve) => {
+          landStale = () => resolve(trackedStatus);
+        }),
+    );
+    const { result, rerender } = renderHook(
+      ({ path, live }) => useSourceControl(path, true, { live }),
+      { initialProps: { path: "/repo/app", live: true } },
+    );
+    await settle();
+    await settle(5000);
+    act(() => {
+      void result.current.refresh();
+    });
+    await settle();
+    expect(native.gitStatus).toHaveBeenCalledTimes(1);
+
+    await act(async () => rerender({ path: "/repo/lib", live: false }));
+    await settle();
+    await act(async () => landStale());
+    await settle();
+
+    await act(async () => rerender({ path: "/repo/lib", live: true }));
+    await settle(1000);
+    expect(native.gitStatus).toHaveBeenCalledTimes(2);
   });
 });
 

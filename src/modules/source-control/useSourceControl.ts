@@ -298,6 +298,13 @@ export function useSourceControl(
         setState((s) => (s.isLoading ? { ...s, isLoading: false } : s));
         return false;
       };
+      // Only a result that lands counts as fresh for the reuse and focus gates.
+      const land = (
+        update: (s: SourceControlSummaryState) => SourceControlSummaryState,
+      ) => {
+        lastRefreshAtRef.current = Date.now();
+        setState(update);
+      };
 
       if (!contextPath) {
         setState({
@@ -341,7 +348,7 @@ export function useSourceControl(
             const snapshot = await native.gitPanelSnapshot(contextPath);
             if (!isCurrent()) return;
             if (!snapshot.repo) {
-              setState((current) => ({
+              land((current) => ({
                 ...current,
                 repo: null,
                 status: null,
@@ -358,7 +365,7 @@ export function useSourceControl(
           const snapshot = await native.gitPanelSnapshot(contextPath);
           if (!isCurrent()) return;
           if (!snapshot.repo) {
-            setState((current) => ({
+            land((current) => ({
               ...current,
               repo: null,
               status: null,
@@ -373,7 +380,7 @@ export function useSourceControl(
         }
 
         if (!repo) {
-          setState((current) => ({
+          land((current) => ({
             ...current,
             repo: null,
             status: null,
@@ -407,7 +414,7 @@ export function useSourceControl(
           if (!isCurrent()) return;
         }
 
-        setState((current) => ({
+        land((current) => ({
           ...current,
           repo,
           status,
@@ -418,7 +425,7 @@ export function useSourceControl(
         }));
       } catch (error) {
         if (!isCurrent()) return;
-        setState((current) => ({
+        land((current) => ({
           ...current,
           repo: null,
           hasRepo: false,
@@ -426,8 +433,6 @@ export function useSourceControl(
           isLoading: false,
           localError: normalizeError(error),
         }));
-      } finally {
-        lastRefreshAtRef.current = Date.now();
       }
     },
     [contextKey, contextPath],
@@ -451,6 +456,18 @@ export function useSourceControl(
       return run;
     },
     [contextKey, doRefresh],
+  );
+
+  // Follow-ups to a push or commit refresh whatever context is current when
+  // they finish, not the one captured before the action started.
+  const refreshRef = useRef(refresh);
+  useLayoutEffect(() => {
+    refreshRef.current = refresh;
+  }, [refresh]);
+  const refreshCurrent = useCallback(
+    (options?: { remote?: SourceControlRefreshMode }) =>
+      refreshRef.current(options),
+    [],
   );
 
   const runRemoteAction = useCallback(
@@ -484,18 +501,18 @@ export function useSourceControl(
           await native.gitPush(repo.repoRoot);
         }
         setState((current) => ({ ...current, lastRemoteError: null }));
-        await refresh({ remote: "never" });
+        await refreshCurrent({ remote: "never" });
         return { ok: true, action };
       } catch (error) {
         const message = normalizeError(error);
         setState((current) => ({ ...current, lastRemoteError: message }));
-        await refresh({ remote: "never" }).catch(() => {});
+        await refreshCurrent({ remote: "never" }).catch(() => {});
         return { ok: false, action, error: message };
       } finally {
         setState((current) => ({ ...current, busyAction: null }));
       }
     },
-    [refresh],
+    [refreshCurrent],
   );
 
   useEffect(() => {
@@ -595,9 +612,9 @@ export function useSourceControl(
       busyAction: state.busyAction,
       lastRemoteError: state.lastRemoteError,
       applyStatus,
-      refresh,
+      refresh: refreshCurrent,
       runRemoteAction,
     }),
-    [state, applyStatus, refresh, runRemoteAction],
+    [state, applyStatus, refreshCurrent, runRemoteAction],
   );
 }
