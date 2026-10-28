@@ -45,7 +45,7 @@ import {
   pasteKeyAction,
 } from "@/modules/explorer/lib/clipboardPaste";
 import { dirname, targetDirFor } from "@/modules/explorer/lib/paths";
-import { fileIconUrl, folderIconUrl } from "./lib/iconResolver";
+import { FileIcon, FolderIcon } from "./FileIcon";
 import { COMPACT_CONTENT, COMPACT_ITEM } from "./lib/menuItemClass";
 import { useExplorerDnd } from "./lib/useExplorerDnd";
 import { useExplorerFileDrop } from "./lib/useExplorerFileDrop";
@@ -605,9 +605,8 @@ export const FileExplorer = memo(
             className="flex flex-1 items-center truncate text-xs font-medium text-foreground/80"
             title={rootPath}
           >
-            <img
-              src={folderIconUrl(basename(rootPath), false)}
-              alt=""
+            <FolderIcon
+              name={basename(rootPath)}
               height={15}
               width={15}
               className="mx-1.5"
@@ -707,15 +706,17 @@ export const FileExplorer = memo(
                     style={{ paddingLeft: 6 }}
                   >
                     <span className="size-3.5 shrink-0" />
-                    <img
-                      src={
-                        pendingAtRoot.kind === "dir"
-                          ? folderIconUrl("", false)
-                          : fileIconUrl("untitled")
-                      }
-                      alt=""
-                      className="size-4 shrink-0 opacity-70"
-                    />
+                    {pendingAtRoot.kind === "dir" ? (
+                      <FolderIcon
+                        name=""
+                        className="size-4 shrink-0 opacity-70"
+                      />
+                    ) : (
+                      <FileIcon
+                        name="untitled"
+                        className="size-4 shrink-0 opacity-70"
+                      />
+                    )}
                     <InlineInput
                       initial=""
                       placeholder={

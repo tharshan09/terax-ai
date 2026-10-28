@@ -28,7 +28,7 @@ import {
   EXPOSED_LANGUAGES,
 } from "@/modules/editor/lib/languageDefinitions";
 import { resolveDisplayName } from "@/modules/editor/lib/languageResolver";
-import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
+import { FileIcon } from "@/modules/explorer/FileIcon";
 import {
   Cancel01Icon,
   Clock01Icon,
@@ -491,10 +491,9 @@ export function TabBar({
                             }}
                             className="flex items-center gap-2 px-2.5 py-1.5 text-xs rounded-lg cursor-default focus:bg-accent focus:text-accent-foreground"
                           >
-                            <img
-                              src={fileIconUrl(t.title)}
+                            <FileIcon
+                              name={t.title}
                               className="size-3.5 shrink-0 object-contain"
-                              alt=""
                             />
                             <div className="flex flex-1 flex-col">
                               <span>Auto Detect</span>
@@ -535,10 +534,9 @@ export function TabBar({
                                 }
                                 className="flex items-center gap-2 px-2.5 py-1.5 text-xs rounded-lg cursor-default focus:bg-accent focus:text-accent-foreground"
                               >
-                                <img
-                                  src={fileIconUrl(`dummy.${lang.ext}`)}
+                                <FileIcon
+                                  name={`dummy.${lang.ext}`}
                                   className="size-3.5 shrink-0 object-contain"
-                                  alt=""
                                 />
                                 <span className="flex-1">{lang.name}</span>
                                 {isSelected && (
@@ -785,23 +783,16 @@ function DropIndicator() {
 
 export function TabIcon({ tab }: { tab: Tab }) {
   if (tab.kind === "editor" || tab.kind === "markdown" || tab.kind === "html") {
-    const url =
-      tab.kind === "editor" && tab.overrideLanguage
-        ? fileIconUrl(`dummy.${tab.overrideLanguage}`)
-        : fileIconUrl(tab.title);
-    return url ? (
-      <img
-        src={url}
-        alt=""
+    return (
+      <FileIcon
+        name={
+          tab.kind === "editor" && tab.overrideLanguage
+            ? `dummy.${tab.overrideLanguage}`
+            : tab.title
+        }
         className="size-3.5 shrink-0 object-contain"
-        onError={(e) => {
-          const img = e.currentTarget;
-          if (img.dataset.fallback) return;
-          img.dataset.fallback = "1";
-          img.src = fileIconUrl("dummy.txt");
-        }}
       />
-    ) : null;
+    );
   }
   if (tab.kind === "preview") {
     return (
