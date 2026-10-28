@@ -77,16 +77,16 @@ function serve(handlers: Handlers = {}) {
 function rowsInView(): () => void {
   const original = Object.getOwnPropertyDescriptor(
     HTMLElement.prototype,
-    "offsetHeight",
+    "clientHeight",
   );
-  Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+  Object.defineProperty(HTMLElement.prototype, "clientHeight", {
     configurable: true,
     get: () => 600,
   });
   return () => {
     if (original)
-      Object.defineProperty(HTMLElement.prototype, "offsetHeight", original);
-    else Reflect.deleteProperty(HTMLElement.prototype, "offsetHeight");
+      Object.defineProperty(HTMLElement.prototype, "clientHeight", original);
+    else Reflect.deleteProperty(HTMLElement.prototype, "clientHeight");
   };
 }
 
