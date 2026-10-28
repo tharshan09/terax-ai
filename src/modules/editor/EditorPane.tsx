@@ -42,6 +42,7 @@ import {
   extOf,
   isMediaPath,
 } from "./lib/binaryPreview";
+import { MediaPreview } from "./MediaPreview";
 
 initVimGlobals();
 
@@ -73,6 +74,8 @@ type Props = {
   onDirtyChange?: (dirty: boolean) => void;
   onSaved?: () => void;
   onClose?: () => void;
+  /** False while the tab is in the background. */
+  visible?: boolean;
 };
 
 function formatBytes(n: number): string {
@@ -83,8 +86,15 @@ function formatBytes(n: number): string {
 
 export const EditorPane = forwardRef<EditorPaneHandle, Props>(
   function EditorPane(props, ref) {
-    const { path, workspace, overrideLanguage, onDirtyChange, onSaved, onClose } =
-      props;
+    const {
+      path,
+      workspace,
+      overrideLanguage,
+      onDirtyChange,
+      onSaved,
+      onClose,
+      visible = true,
+    } = props;
 
     const { doc, onChange, save, reload } = useDocument({
       path,
@@ -446,23 +456,8 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
                 alt={path.split('/').pop()}
               />
             )}
-            {mode === "video" && (
-              // biome-ignore lint/a11y/useMediaCaption: local media preview opens arbitrary files with no caption track
-              <video
-                controls
-                preload="metadata"
-                className="max-w-full max-h-full"
-                src={assetUrl}
-              />
-            )}
-            {mode === "audio" && (
-              // biome-ignore lint/a11y/useMediaCaption: local media preview opens arbitrary files with no caption track
-              <audio
-                controls
-                preload="metadata"
-                className="w-full max-w-md"
-                src={assetUrl}
-              />
+            {(mode === "video" || mode === "audio") && (
+              <MediaPreview kind={mode} src={assetUrl} tabVisible={visible} />
             )}
             {mode === "pdf" && (
               <iframe

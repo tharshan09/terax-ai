@@ -1,3 +1,4 @@
+import { isWindowHidden } from "@/lib/windowVisibility";
 import { ptyIdForLeaf } from "@/modules/terminal/lib/useTerminalSession";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import { invoke } from "@tauri-apps/api/core";
@@ -52,7 +53,7 @@ export function useClaudeStatus(
     let inFlight = false;
 
     const poll = async () => {
-      if (cancelled || inFlight || document.hidden) return;
+      if (cancelled || inFlight || isWindowHidden()) return;
       inFlight = true;
       try {
         const ptyId = ptyIdForLeaf(activeLeafId);
