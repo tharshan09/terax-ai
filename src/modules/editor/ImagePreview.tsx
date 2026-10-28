@@ -5,6 +5,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 type Props = {
   path: string;
   remote: WorkspaceEnv | null;
+  size?: number;
   /** Past the read cap: a remote image is refused without a round-trip. */
   tooLarge?: boolean;
 };
@@ -24,8 +25,13 @@ function Unavailable({ reason }: { reason: string }) {
   );
 }
 
-export function ImagePreview({ path, remote, tooLarge = false }: Props) {
-  const image = useRemoteImage(path, tooLarge ? null : remote);
+export function ImagePreview({
+  path,
+  remote,
+  size,
+  tooLarge = false,
+}: Props) {
+  const image = useRemoteImage(path, tooLarge ? null : remote, size);
 
   let src: string;
   if (remote === null) {

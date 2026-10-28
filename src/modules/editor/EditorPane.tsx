@@ -449,6 +449,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
               <ImagePreview
                 path={path}
                 remote={overSsh ? readEnv : null}
+                size={doc.size}
                 tooLarge={doc.status === "toolarge"}
               />
             )}

@@ -62,7 +62,7 @@ describe("ImagePreview over SSH", () => {
   it("reads the bytes over the remote helper and shows them from a blob URL", async () => {
     invoke.mockResolvedValue(PNG.buffer);
     const { container } = render(
-      <ImagePreview path="/home/u/photo.jpg" remote={SSH} />,
+      <ImagePreview path="/home/u/photo.jpg" remote={SSH} size={4096} />,
     );
     expect(imgSrc(container)).toBeNull();
     expect(container.textContent).toContain("Loading");
@@ -73,6 +73,7 @@ describe("ImagePreview over SSH", () => {
     expect(invoke).toHaveBeenCalledWith("fs_read_remote_image", {
       path: "/home/u/photo.jpg",
       workspace: SSH,
+      size: 4096,
     });
     expect(convertFileSrc).not.toHaveBeenCalled();
     expect(imgSrc(container)).toBe("blob:terax/1");

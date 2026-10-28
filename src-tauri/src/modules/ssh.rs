@@ -1371,18 +1371,25 @@ pub struct RemoteFileBytes {
 }
 
 /// Refused host-side above `limit`, so an oversized file never crosses the wire.
-pub fn read_bytes(host: &str, path: &str, limit: u64) -> Result<RemoteFileBytes, String> {
+pub fn read_bytes(
+    host: &str,
+    path: &str,
+    limit: u64,
+    expected_size: Option<u64>,
+) -> Result<RemoteFileBytes, String> {
     let data = run_remote_json(
         host,
         &serde_json::json!({ "op": "read_bytes", "path": path, "limit": limit }),
-        Some(read_bytes_timeout(limit)),
+        Some(read_bytes_timeout(limit, expected_size)),
     )?;
     parse_read_bytes(data)
 }
 
-// The reply is as large as an upload of the capped size, so it gets the same budget.
-fn read_bytes_timeout(limit: u64) -> std::time::Duration {
-    write_timeout(usize::try_from(limit).unwrap_or(usize::MAX))
+// Budgeted like an upload of the reply's size: a known size keeps a stuck read
+// of a small icon short, an unknown one budgets for the cap.
+fn read_bytes_timeout(limit: u64, expected_size: Option<u64>) -> std::time::Duration {
+    let size = expected_size.map_or(limit, |size| size.min(limit));
+    write_timeout(usize::try_from(size).unwrap_or(usize::MAX)).max(REMOTE_FS_TIMEOUT)
 }
 
 fn parse_read_bytes(data: serde_json::Value) -> Result<RemoteFileBytes, String> {
@@ -2337,9 +2344,16 @@ Host !secret prod
     }
 
     #[test]
-    fn read_bytes_gets_the_upload_budget_of_the_capped_size() {
-        assert_eq!(read_bytes_timeout(10 * 1024 * 1024).as_secs(), 30 + 214);
-        assert_eq!(read_bytes_timeout(0), write_timeout(0));
+    fn read_bytes_budgets_for_the_known_size_and_falls_back_to_the_cap() {
+        let cap = 10 * 1024 * 1024;
+        let secs = |size: Option<u64>| read_bytes_timeout(cap, size).as_secs();
+        assert_eq!(secs(Some(4096)), 31);
+        assert_eq!(secs(Some(1024 * 1024)), write_timeout(1024 * 1024).as_secs());
+        assert_eq!(secs(None), 30 + 214);
+        assert_eq!(secs(Some(cap * 4)), 30 + 214);
+        for size in [None, Some(0), Some(1), Some(cap)] {
+            assert!(read_bytes_timeout(cap, size) >= REMOTE_FS_TIMEOUT, "{size:?}");
+        }
     }
 
     #[test]

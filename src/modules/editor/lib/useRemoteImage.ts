@@ -13,6 +13,7 @@ const LOADING: RemoteImage = { status: "loading" };
 export function useRemoteImage(
   path: string,
   workspace: WorkspaceEnv | null,
+  size?: number,
 ): RemoteImage {
   const key =
     workspace === null ? null : `${workspaceScopeKey(workspace)}\n${path}`;
@@ -22,6 +23,8 @@ export function useRemoteImage(
   } | null>(null);
   const workspaceRef = useRef(workspace);
   workspaceRef.current = workspace;
+  const sizeRef = useRef(size);
+  sizeRef.current = size;
 
   useEffect(() => {
     if (key === null) return;
@@ -38,6 +41,8 @@ export function useRemoteImage(
     invoke<ArrayBuffer>("fs_read_remote_image", {
       path,
       workspace: workspaceRef.current,
+      // Scales the read timeout; the host still enforces the real size.
+      size: sizeRef.current,
     })
       .then((bytes) => {
         if (cancelled) return;
