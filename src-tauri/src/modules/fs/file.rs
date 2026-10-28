@@ -134,6 +134,46 @@ fn fs_read_file_impl(
     }
 }
 
+/// Raster formats only: SVG is left out because a blob URL lives in the app
+/// origin, where a navigated SVG document could run script.
+const REMOTE_IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "ico"];
+
+fn is_remote_image_path(path: &str) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    name.rsplit_once('.')
+        .is_some_and(|(_, ext)| REMOTE_IMAGE_EXTS.contains(&ext.to_ascii_lowercase().as_str()))
+}
+
+/// Image bytes of a file in an SSH workspace, for the editor's image preview.
+/// The asset protocol only serves local files, so a remote image has to cross
+/// the existing ssh helper; raw bytes avoid a base64 round-trip through JSON.
+#[tauri::command]
+pub async fn fs_read_remote_image(
+    path: String,
+    workspace: Option<WorkspaceEnv>,
+) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || fs_read_remote_image_impl(&path, workspace))
+        .await
+        .map_err(|e| format!("fs_read_remote_image task failed: {e}"))?
+        .map(tauri::ipc::Response::new)
+}
+
+fn fs_read_remote_image_impl(
+    path: &str,
+    workspace: Option<WorkspaceEnv>,
+) -> Result<Vec<u8>, String> {
+    let WorkspaceEnv::Ssh { host } = WorkspaceEnv::from_option(workspace) else {
+        return Err("remote image read needs an SSH workspace".to_string());
+    };
+    if !is_remote_image_path(path) {
+        return Err(format!("not a previewable image: {path}"));
+    }
+    // No trusted override: these bytes land in the webview, so the deny-list
+    // always runs before dispatch.
+    guard::check_read_str(path)?;
+    crate::modules::ssh::read_bytes(&host, path, MAX_READ_BYTES)
+}
+
 /// A genuine PDF begins with these magic bytes.
 const PDF_MAGIC: &[u8] = b"%PDF-";
 
@@ -649,6 +689,51 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"payload");
         // The pre-staged symlink target must not have been written through.
         assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
+    }
+
+    // --- fs_read_remote_image: remote image bytes for the preview ---
+
+    fn ssh_never_connects() -> Option<WorkspaceEnv> {
+        Some(WorkspaceEnv::Ssh {
+            host: "terax-test-never-connects".into(),
+        })
+    }
+
+    #[test]
+    fn remote_image_refuses_local_workspace() {
+        for ws in [None, Some(WorkspaceEnv::Local)] {
+            let err = fs_read_remote_image_impl("/tmp/photo.png", ws).unwrap_err();
+            assert!(err.contains("SSH workspace"), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn remote_image_refuses_non_raster_before_dispatch() {
+        for p in ["/home/u/notes.txt", "/home/u/logo.svg", "/home/u/png", "/home/u/.env"] {
+            let err = fs_read_remote_image_impl(p, ssh_never_connects()).unwrap_err();
+            assert!(err.contains("not a previewable image"), "{p}: {err}");
+        }
+    }
+
+    #[test]
+    fn remote_image_refuses_secret_paths_before_dispatch() {
+        for p in ["~/.ssh/avatar.png", ".aws/diagram.JPG", "/home/u/.env.png"] {
+            let err = fs_read_remote_image_impl(p, ssh_never_connects()).unwrap_err();
+            assert!(
+                err.contains("sensitive-file") || err.contains("protected directory"),
+                "{p}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_image_accepts_raster_extensions_case_insensitively() {
+        for p in ["a.png", "/x/b.JPG", "/x/c.jpeg", "d.gif", "e.WebP", "f.ico"] {
+            assert!(is_remote_image_path(p), "{p}");
+        }
+        for p in ["a.svg", "a.png.txt", "png", "/x.png/readme"] {
+            assert!(!is_remote_image_path(p), "{p}");
+        }
     }
 
     // --- fs_is_pdf: the magic-byte gate for the sandbox-less PDF iframe ---

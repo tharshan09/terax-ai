@@ -396,6 +396,7 @@ pub fn run() {
             fs::tree::fs_read_dir,
             fs::file::fs_read_file,
             fs::file::fs_is_pdf,
+            fs::file::fs_read_remote_image,
             fs::file::fs_check_readable,
             fs::file::fs_write_file,
             fs::file::fs_stat,

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { binaryPreviewMode, extOf, isMediaPath } from "./binaryPreview";
+import {
+  binaryPreviewMode,
+  extOf,
+  isMediaPath,
+  readsImageRemotely,
+  remoteImageMime,
+} from "./binaryPreview";
 
 describe("extOf", () => {
   it("returns the lower-cased extension", () => {
@@ -48,5 +54,28 @@ describe("binaryPreviewMode", () => {
   it("never shows the iframe while pdf verification is still pending", () => {
     // Ready but verification not settled: must not be "pdf".
     expect(binaryPreviewMode("pdf", true, null)).toBe("card");
+  });
+});
+
+describe("readsImageRemotely", () => {
+  it("routes only SSH images past the local asset protocol", () => {
+    const ssh = { kind: "ssh", host: "box" } as const;
+    expect(readsImageRemotely("png", ssh)).toBe(true);
+    expect(readsImageRemotely("svg", ssh)).toBe(true);
+    expect(readsImageRemotely("pdf", ssh)).toBe(false);
+    expect(readsImageRemotely("mp4", ssh)).toBe(false);
+    expect(readsImageRemotely("png", { kind: "local" })).toBe(false);
+    expect(readsImageRemotely("png", { kind: "wsl", distro: "Ubuntu" })).toBe(
+      false,
+    );
+  });
+});
+
+describe("remoteImageMime", () => {
+  it("types raster images and leaves svg and unknown names untyped", () => {
+    expect(remoteImageMime("jpg")).toBe("image/jpeg");
+    expect(remoteImageMime("png")).toBe("image/png");
+    expect(remoteImageMime("svg")).toBeNull();
+    expect(remoteImageMime("constructor")).toBeNull();
   });
 });

@@ -2,6 +2,8 @@
 // pure module so the security-load-bearing decision (when the sandbox-less PDF
 // iframe may render) is unit-testable without mounting CodeMirror.
 
+import type { WorkspaceEnv } from "@/modules/workspace";
+
 export const IMAGE_EXTS = new Set([
   "png",
   "jpg",
@@ -28,6 +30,29 @@ export function extOf(p: string): string {
 
 export function isMediaPath(p: string): boolean {
   return MEDIA_EXTS.has(extOf(p));
+}
+
+// Mirrors REMOTE_IMAGE_EXTS in fs/file.rs. SVG stays out: as a blob URL it
+// would live in the app origin, where a navigated SVG could run script.
+const REMOTE_IMAGE_MIME = new Map<string, string>([
+  ["png", "image/png"],
+  ["jpg", "image/jpeg"],
+  ["jpeg", "image/jpeg"],
+  ["gif", "image/gif"],
+  ["webp", "image/webp"],
+  ["ico", "image/x-icon"],
+]);
+
+export function remoteImageMime(ext: string): string | null {
+  return REMOTE_IMAGE_MIME.get(ext) ?? null;
+}
+
+/**
+ * The asset protocol serves only local files, so an image in an SSH workspace
+ * is read as bytes over the remote helper instead of via `convertFileSrc`.
+ */
+export function readsImageRemotely(ext: string, env: WorkspaceEnv): boolean {
+  return env.kind === "ssh" && IMAGE_EXTS.has(ext);
 }
 
 export type BinaryPreviewMode =

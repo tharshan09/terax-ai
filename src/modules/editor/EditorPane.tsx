@@ -35,13 +35,15 @@ import { type LanguageResult, resolveLanguage } from "./lib/languageResolver";
 import { useEditorThemeExt } from "./lib/useEditorThemeExt";
 import { useDocument } from "./lib/useDocument";
 import { initVimGlobals, vimHandlersExtension } from "./lib/vim";
-import type { WorkspaceEnv } from "@/modules/workspace";
+import { currentWorkspaceEnv, type WorkspaceEnv } from "@/modules/workspace";
 import { inlineCompletion } from "./lib/autocomplete/inlineExtension";
 import {
   binaryPreviewMode,
   extOf,
   isMediaPath,
+  readsImageRemotely,
 } from "./lib/binaryPreview";
+import { ImagePreview } from "@/modules/editor/ImagePreview";
 import { MediaPreview } from "./MediaPreview";
 
 initVimGlobals();
@@ -378,12 +380,15 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
     // inert card instead of being served as text/html in the asset:// origin.
     // null = pending, true/false = verified result.
     const [pdfVerified, setPdfVerified] = useState<boolean | null>(null);
+    // The env useDocument read the file from.
+    const mediaEnv = workspace ?? currentWorkspaceEnv();
     useEffect(() => {
       const showsMedia =
         (doc.status === "binary" || doc.status === "toolarge") &&
         isMediaPath(path);
       if (!showsMedia) return;
-      const isPdf = extOf(path) === "pdf";
+      const ext = extOf(path);
+      const isPdf = ext === "pdf";
       let cancelled = false;
       setMediaReadyPath(null);
       setPdfVerified(null);
@@ -391,9 +396,10 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
       // its real magic bytes. Both must settle before we render, so the iframe
       // never flashes for an unverified pdf. trusted:true mirrors the editor
       // open (the user explicitly opened this file).
-      const authorize = invoke("asset_allow", { path, directory: false }).catch(
-        () => {},
-      );
+      // SSH images skip the local asset scope: their path names a remote file.
+      const authorize = readsImageRemotely(ext, mediaEnv)
+        ? Promise.resolve()
+        : invoke("asset_allow", { path, directory: false }).catch(() => {});
       const verify: Promise<boolean> = isPdf
         ? invoke<boolean>("fs_is_pdf", { path, workspace, trusted: true }).catch(
             () => false,
@@ -407,7 +413,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
       return () => {
         cancelled = true;
       };
-    }, [path, doc.status, workspace]);
+    }, [path, doc.status, workspace, mediaEnv]);
 
     if (doc.status === "loading") {
       return (
@@ -443,16 +449,10 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
         return (
           <div className="flex h-full min-h-0 flex-col items-center justify-center bg-background p-4 overflow-auto">
             {mode === "image" && (
-              <img
-                src={assetUrl}
-                loading="lazy"
-                decoding="async"
-                className="max-w-full max-h-full object-contain rounded-md border border-border shadow-sm"
-                style={{
-                  backgroundImage: 'conic-gradient(#e5e7eb 0.25turn, #f3f4f6 0.25turn 0.5turn, #e5e7eb 0.5turn 0.75turn, #f3f4f6 0.75turn)',
-                  backgroundSize: '20px 20px',
-                }}
-                alt={path.split('/').pop()}
+              <ImagePreview
+                path={path}
+                workspace={mediaEnv}
+                tooLarge={doc.status === "toolarge"}
               />
             )}
             {(mode === "video" || mode === "audio") && (
