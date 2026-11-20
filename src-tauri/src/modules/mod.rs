@@ -13,4 +13,5 @@ pub mod shell;
 pub mod ssh;
 pub mod test_bridge;
 pub mod tmux;
+pub mod variant;
 pub mod workspace;

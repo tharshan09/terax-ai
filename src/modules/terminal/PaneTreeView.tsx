@@ -23,6 +23,7 @@ import {
   type PaneNode,
 } from "./lib/panes";
 import { TerminalPane, type TerminalPaneHandle } from "./TerminalPane";
+import { UploadHint } from "./UploadHint";
 
 type LeafBundle = {
   setRef: (h: TerminalPaneHandle | null) => void;
@@ -120,6 +121,7 @@ export const PaneTreeView = memo(function PaneTreeViewImpl(props: Props) {
           onExit={b.onExit}
         />
         <DropOverlay leafId={node.id} />
+        <UploadHint leafId={node.id} />
         {split && <PaneDropOverlay leafId={node.id} />}
         {split && onPaneDragStart && (
           <button

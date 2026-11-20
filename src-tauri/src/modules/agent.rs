@@ -413,7 +413,9 @@ pub async fn agent_migrate_hooks() -> Vec<String> {
 
 fn migrate_hooks_blocking() -> Vec<String> {
     let mut migrated = Vec::new();
-    if cfg!(windows) {
+    // Runs unasked on every launch; a side-by-side build never rewrites the
+    // shared agent configs on its own.
+    if cfg!(windows) || crate::modules::variant::is_side_by_side() {
         return migrated;
     }
     for spec in AGENTS {

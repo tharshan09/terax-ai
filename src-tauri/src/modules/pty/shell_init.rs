@@ -499,7 +499,11 @@ mod unix {
 
     fn integration_root() -> Result<PathBuf, String> {
         let home = dirs::home_dir().ok_or_else(|| "could not resolve home dir".to_string())?;
-        let root = home.join(".cache").join("terax").join("shell-integration");
+        let name = crate::modules::variant::scoped_name(
+            "shell-integration",
+            crate::modules::variant::suffix(),
+        );
+        let root = home.join(".cache").join("terax").join(name);
         fs::create_dir_all(&root).map_err(|e| format!("create {}: {e}", root.display()))?;
         Ok(root)
     }
@@ -526,7 +530,12 @@ mod unix {
         let home = dirs::home_dir().ok_or_else(|| "could not resolve home dir".to_string())?;
         let dir = home.join(".config").join("fish").join("conf.d");
         fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-        write_if_changed(&dir.join("terax.fish"), FISH_INIT)?;
+        let file = dir.join("terax.fish");
+        // fish loads conf.d into every fish shell, the installed app's included.
+        if crate::modules::variant::is_side_by_side() && file.exists() {
+            return Ok(());
+        }
+        write_if_changed(&file, FISH_INIT)?;
         Ok(())
     }
 

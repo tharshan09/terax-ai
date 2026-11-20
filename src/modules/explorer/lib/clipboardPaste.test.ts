@@ -303,6 +303,8 @@ describe("pasteClipboardFiles", () => {
       workspace: { kind: "ssh", host: "litha-claude" },
       renameOnConflict: true,
     });
+    // Only the terminal upload refuses secrets the user named.
+    expect(invoke.mock.lastCall?.[1]).not.toHaveProperty("refuseSecrets");
     expect(opts.expand).toHaveBeenCalledTimes(1);
     expect(opts.expand).toHaveBeenCalledWith("/ws/docs");
     expect(opts.refresh).not.toHaveBeenCalled();
