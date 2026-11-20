@@ -1,5 +1,6 @@
 import { ensureMonoFontsLoaded } from "@/lib/fonts";
 import { isWindowHidden, subscribeWindowHidden } from "@/lib/windowVisibility";
+import { feedPaneOutput, paneClosed, terminalEnded } from "@/modules/ports";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { invoke } from "@tauri-apps/api/core";
 import type { SearchAddon } from "@xterm/addon-search";
@@ -217,7 +218,8 @@ export function leafCwd(leafId: number): string | null {
   return sessions.get(leafId)?.lastCwd ?? null;
 }
 
-// Source for the upload path only; isSshDisconnect still reads `workspace`.
+// Source for uploads, port detection and link clicks; isSshDisconnect still
+// reads `workspace`.
 export function leafWorkspace(leafId: number): WorkspaceEnv | null {
   return paneWorkspace(sessions.get(leafId));
 }
@@ -476,6 +478,7 @@ configureRendererPool({
   isLeafVisible(leafId) {
     return sessions.get(leafId)?.visibleNow ?? false;
   },
+  leafWorkspace,
   storeSnapshot(leafId, out) {
     const s = sessions.get(leafId);
     if (!s) return;
@@ -555,6 +558,7 @@ function deliverPtyBytes(leafId: number, bytes: Uint8Array): void {
   const slot = getLiveSlotForLeaf(leafId);
   if (slot) slot.term.write(bytes);
   else s.dormantRing.push(bytes);
+  feedPaneOutput(leafId, paneWorkspace(s), bytes);
 }
 
 // Push this leaf's on-screen state to its PTY so the Rust flusher coalesces
@@ -645,6 +649,7 @@ async function openPtyForSession(
     {
       onData: (bytes) => deliverPtyBytes(leafId, bytes),
       onExit: (code) => {
+        terminalEnded(env);
         s.shellExited = true;
         s.pty = null;
         s.pendingInput = "";
@@ -976,6 +981,7 @@ export function disposeSession(leafId: number): void {
   const s = sessions.get(leafId);
   if (!s) return;
   s.disposed = true;
+  paneClosed(leafId);
   cancelHiddenRelease(s);
   disposeLeafSlot(leafId);
   s.hasSlot = false;
