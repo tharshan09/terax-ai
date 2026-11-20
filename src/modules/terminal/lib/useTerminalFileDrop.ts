@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import { useTerminalDropStore } from "./dropStore";
 import { formatDroppedPaths } from "./quoteShellPath";
 import { pasteIntoLeaf } from "./rendererPool";
+import { sshEnvOf, uploadDroppedFiles } from "./uploadStore";
 
 // Tauri reports the drop point in physical pixels on some platforms and logical
 // on others; only scale down when it overflows the logical viewport.
@@ -23,7 +24,8 @@ function leafIdAt(x: number, y: number): number | null {
 
 /** Wires native OS file drops into the terminal pane under the cursor: shows a
  * drop overlay on that pane while dragging, and bracketed-pastes the
- * shell-quoted path(s) on drop. Drops outside any terminal leaf are ignored. */
+ * shell-quoted path(s) on drop; an SSH pane gets them uploaded and pastes the
+ * server paths instead. Drops outside any terminal leaf are ignored. */
 export function useTerminalFileDrop(): void {
   useEffect(() => {
     let disposed = false;
@@ -45,9 +47,10 @@ export function useTerminalFileDrop(): void {
           setTarget(null);
           if (!p.paths.length) return;
           const leafId = leafIdAt(p.position.x, p.position.y);
-          if (leafId !== null) {
-            pasteIntoLeaf(leafId, formatDroppedPaths(p.paths));
-          }
+          if (leafId === null) return;
+          const ssh = sshEnvOf(leafId);
+          if (ssh) uploadDroppedFiles(leafId, ssh, p.paths);
+          else pasteIntoLeaf(leafId, formatDroppedPaths(p.paths));
         }
       })
       .then((fn) => {

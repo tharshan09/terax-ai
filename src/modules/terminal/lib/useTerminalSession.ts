@@ -23,7 +23,7 @@ import {
 } from "./osc-handlers";
 import { openPty, type PtySession } from "./pty-bridge";
 import { visibilityHint } from "./visibilityHint";
-import type { WorkspaceEnv } from "@/modules/workspace";
+import { currentWorkspaceEnv, type WorkspaceEnv } from "@/modules/workspace";
 import "../block/block.css";
 import { ensureAgentActivityListener, isAgentActivePty } from "./agentActivity";
 import { isSshDisconnect } from "./sshReconnect";
@@ -46,12 +46,18 @@ import {
   getSlotForLeaf,
   isLeafAltScreen,
   parkLeafSlot,
+  pasteIntoLeafWhenBound,
   poolSize,
   poolSlotStats,
   refreshLeafSlot,
   releaseSlot,
   setSlotFocused,
+  setTerminalPasteInterceptor,
 } from "./rendererPool";
+import {
+  configureTerminalUploads,
+  interceptTerminalPaste,
+} from "./uploadStore";
 
 // Shared OSC 52 policy: read the clipboard-write mode live from settings so a
 // change applies without re-registering, and surface the rate-limited notice.
@@ -77,6 +83,9 @@ type Session = {
   initialCwd: string | undefined;
   /** Execution env for this leaf's PTY. Locked at session creation. */
   workspace: WorkspaceEnv | undefined;
+  // The env the PTY was actually spawned with; differs from `workspace` when
+  // the tab passed none and the ambient env filled in.
+  spawnEnv: WorkspaceEnv | null;
   /** tmux session to attach on spawn (a tmux tab's first pane only). */
   tmuxSession: string | undefined;
   lastCwd: string | null;
@@ -205,6 +214,13 @@ export function interruptLeaf(leafId: number): void {
 
 export function leafCwd(leafId: number): string | null {
   return sessions.get(leafId)?.lastCwd ?? null;
+}
+
+// The one source for "is this pane SSH": null once the pane is closed.
+export function leafWorkspace(leafId: number): WorkspaceEnv | null {
+  const s = sessions.get(leafId);
+  if (!s || s.disposed) return null;
+  return s.spawnEnv ?? s.workspace ?? null;
 }
 
 /** Apply a cwd discovered out-of-band (the tmux pane-cwd poll) through the same
@@ -471,6 +487,9 @@ configureRendererPool({
   },
 });
 
+configureTerminalUploads({ leafWorkspace, paste: pasteIntoLeafWhenBound });
+setTerminalPasteInterceptor(interceptTerminalPaste);
+
 function ensureSession(
   leafId: number,
   initialCwd?: string,
@@ -487,6 +506,7 @@ function ensureSession(
     spawnEpoch: 0,
     initialCwd,
     workspace,
+    spawnEnv: null,
     tmuxSession,
     lastCwd: null,
     pendingExit: null,
@@ -618,6 +638,8 @@ async function openPtyForSession(
 ): Promise<PtySession> {
   const startCols = s.cols > 0 ? s.cols : 80;
   const startRows = s.rows > 0 ? s.rows : 24;
+  const env = s.workspace ?? currentWorkspaceEnv();
+  s.spawnEnv = env;
   const pty = await openPty(
     startCols,
     startRows,
@@ -660,7 +682,7 @@ async function openPtyForSession(
     },
     cwd,
     s.blocks,
-    s.workspace,
+    env,
     usePreferencesStore.getState().terminalShell || undefined,
     s.tmuxSession,
   );
