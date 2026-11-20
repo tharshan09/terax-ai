@@ -252,6 +252,8 @@ fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
 #[tauri::command]
 pub fn claude_enable_statusline(workspace: Option<WorkspaceEnv>) -> Result<(), String> {
     match WorkspaceEnv::from_option(workspace) {
+        // The app runs this unasked on every SSH connect.
+        WorkspaceEnv::Ssh { .. } if crate::modules::variant::is_side_by_side() => Ok(()),
         WorkspaceEnv::Ssh { host } => enable_ssh(&host),
         _ => enable_local(),
     }
@@ -281,6 +283,7 @@ fn enable_local() -> Result<(), String> {
 #[tauri::command]
 pub fn claude_disable_statusline(workspace: Option<WorkspaceEnv>) -> Result<(), String> {
     match WorkspaceEnv::from_option(workspace) {
+        WorkspaceEnv::Ssh { .. } if crate::modules::variant::is_side_by_side() => Ok(()),
         WorkspaceEnv::Ssh { host } => disable_ssh(&host),
         _ => disable_local(),
     }

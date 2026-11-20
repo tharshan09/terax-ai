@@ -147,6 +147,24 @@ BYOK. Cloud providers via `@ai-sdk/*`: **OpenAI, Anthropic, Google, xAI, Cerebra
   - **Linux**: deb depends `libwebkit2gtk-4.1-0`, `libgtk-3-0`; rpm `webkit2gtk4.1`, `gtk3`; AppImage bundles its media framework.
   - **Windows**: NSIS installer in `currentUser` mode (no admin required), WebView2 via `embedBootstrapper` (offline install).
 
+### Side-by-side test build
+
+`pnpm tauri:build:dev-variant` (macOS) builds `src-tauri/target/release/bundle/macos/Terax Dev.app` from `tauri.conf.json` merged with `src-tauri/tauri.devvariant.conf.json` (productName `Terax Dev`, identifier `app.crynta.terax.dev`). Start it from there, never copy it over `Terax.app`; the installed app keeps running. At startup `modules/variant.rs` derives a short suffix (`dev`) from any identifier other than `app.crynta.terax`; with the production identifier every path and behavior stays exactly as it is.
+
+Kept apart:
+- By identifier (Tauri): settings and the other `tauri-plugin-store` files, window state, logs, WebView storage, notification permission, the autostart LaunchAgent (named after the product name).
+- By suffix: SSH ControlMaster sockets in `~/.terax/ssh-control-dev`, so the variant never rides the installed app's connections and quitting it runs `ssh -O exit` only on its own; shell integration scripts in `~/.cache/terax/shell-integration-dev`.
+- Not done by the variant at all: the launch-time agent hook migration, the automatic install and removal of the Claude statusline wrapper on SSH hosts, saving or removing API keys in the keychain, rewriting an existing `~/.config/fish/conf.d/terax.fish`.
+
+Shared on purpose:
+- Keychain items of service `terax-ai`, read only: the variant uses the installed app's API keys. macOS may ask once to let `Terax Dev` read them; "Always Allow" only adds it to the item's access list.
+- `~/.claude/settings.json`, `~/.codex/hooks.json`, `~/.gemini/settings.json` and the local statusline wrapper in `~/.claude/.terax`: written only when you toggle agent hooks or Claude stats in the variant (same idempotent code as the installed app), and the change then applies to both apps.
+- `~/.ssh/config`, ssh-agent, `known_hosts` and shell history are read as usual.
+- On SSH hosts: `~/.terax/uploads`, tmux sessions and the remote Claude settings. A tmux session attached from both apps is sized for both clients, and killing it in either ends it for both; use separate tmux sessions for tests.
+- The temp dir: `terax-clipboard-*` staging folders, swept by whichever app pastes an image once they are a day old.
+
+Risks: the variant opens its own SSH connections, so hosts that ask for a password, an OTP or a hardware key touch ask again. Both apps show the same icon; tell them apart by name. Windows and WSL paths are not split (the variant is a macOS test build).
+
 ### Known gotchas
 
 - **Syntax highlighting identity**: parsers and editor themes must use the same `@lezer/highlight` instance. The pinned workspace catalog and override in `pnpm-workspace.yaml` keep them aligned; update the catalog version to upgrade all consumers together. Duplicate copies silently hide token styles even when parsing succeeds. Language highlighting tests exercise every editor theme and chat code blocks; `dist-budget.test.ts` also requires one highlighter copy in the built output.

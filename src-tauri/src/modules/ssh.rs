@@ -151,12 +151,31 @@ pub fn control_args() -> Vec<String> {
 #[cfg(unix)]
 fn control_dir() -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
-    let dir = dirs::home_dir()
-        .map(|h| h.join(".terax").join("ssh-control"))
-        .unwrap_or_else(|| std::env::temp_dir().join("terax-ssh-control"));
+    let dir = control_dir_path(
+        dirs::home_dir().as_deref(),
+        &std::env::temp_dir(),
+        crate::modules::variant::suffix(),
+    );
     let _ = std::fs::create_dir_all(&dir);
     let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     dir
+}
+
+/// A side-by-side build gets its own folder: sharing one would let it ride
+/// the installed app's masters and `-O exit` them when it quits.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn control_dir_path(
+    home: Option<&std::path::Path>,
+    temp: &std::path::Path,
+    variant: Option<&str>,
+) -> std::path::PathBuf {
+    use crate::modules::variant::scoped_name;
+    match home {
+        Some(home) => home
+            .join(".terax")
+            .join(scoped_name("ssh-control", variant)),
+        None => temp.join(scoped_name("terax-ssh-control", variant)),
+    }
 }
 
 // Hosts we've opened a multiplexed connection to this session, so we can tear
@@ -2001,6 +2020,51 @@ mod tests {
             !args.iter().any(|a| a.contains("accept-new")),
             "`accept-new` silently trusts unknown hosts (MITM on first connect): {args:?}"
         );
+    }
+
+    #[test]
+    fn the_installed_app_keeps_its_control_dir_and_a_variant_gets_its_own() {
+        use std::path::Path;
+        let home = Some(Path::new("/Users/u"));
+        let temp = Path::new("/tmp");
+        assert_eq!(
+            control_dir_path(home, temp, None),
+            Path::new("/Users/u/.terax/ssh-control")
+        );
+        assert_eq!(
+            control_dir_path(None, temp, None),
+            Path::new("/tmp/terax-ssh-control")
+        );
+        assert_eq!(
+            control_dir_path(home, temp, Some("dev")),
+            Path::new("/Users/u/.terax/ssh-control-dev")
+        );
+        assert_eq!(
+            control_dir_path(None, temp, Some("dev")),
+            Path::new("/tmp/terax-ssh-control-dev")
+        );
+        let production = crate::modules::variant::side_by_side_suffix(
+            crate::modules::variant::PRODUCTION_IDENTIFIER,
+        );
+        assert_eq!(
+            control_dir_path(home, temp, production.as_deref()),
+            Path::new("/Users/u/.terax/ssh-control")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn control_args_point_at_the_installed_apps_folder_by_default() {
+        let expected = format!(
+            "ControlPath={}/%C",
+            control_dir_path(
+                dirs::home_dir().as_deref(),
+                &std::env::temp_dir(),
+                None
+            )
+            .display()
+        );
+        assert!(control_args().contains(&expected), "{expected}");
     }
 
     #[test]

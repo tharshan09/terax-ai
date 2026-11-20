@@ -3,7 +3,8 @@ pub mod modules;
 #[cfg(target_os = "macos")]
 use modules::app_menu;
 use modules::{
-    agent, claude, fs, git, history, net, pty, secrets, shell, ssh, test_bridge, tmux, workspace,
+    agent, claude, fs, git, history, net, pty, secrets, shell, ssh, test_bridge, tmux, variant,
+    workspace,
 };
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -299,6 +300,9 @@ pub fn run() {
         }
     }
 
+    let context = tauri::generate_context!();
+    variant::init(&context.config().identifier);
+
     let cli_dir = parse_launch_dir();
     workspace::init_launch_cwd(cli_dir.as_deref());
 
@@ -481,7 +485,7 @@ pub fn run() {
             history::history_record,
             history::history_list,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application")
         .run(|_app_handle, event| {
             // Tear down lingering SSH ControlMaster sockets when the app exits,
