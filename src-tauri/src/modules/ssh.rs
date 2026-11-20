@@ -996,7 +996,7 @@ fn classify_ssh_error(stderr: &str) -> Option<String> {
 /// wedged remote command is reclaimed after `timeout` instead of blocking the
 /// waiter forever. `None` preserves the historic "wait indefinitely" behavior
 /// for callers that must not risk a mid-operation kill (remote mutations).
-pub(crate) fn wait_child(
+fn wait_child(
     child: &std::sync::Arc<shared_child::SharedChild>,
     timeout: Option<std::time::Duration>,
 ) -> Result<Option<std::process::ExitStatus>, String> {
@@ -1292,9 +1292,10 @@ pub struct RemoteCapture {
 }
 
 /// True if a multiplexed ControlMaster to `host` is live. Talks only to the
-/// local control socket (`ssh -O check`), so it returns instantly and never
-/// opens a fresh connection or prompts. Always false where ControlMaster is
-/// unavailable (non-unix).
+/// local control socket (`ssh -O check`), so it never opens a fresh connection
+/// or prompts; a wedged master counts as not alive after
+/// [`REMOTE_POLL_TIMEOUT`]. Always false where ControlMaster is unavailable
+/// (non-unix).
 pub fn master_alive(host: &str) -> bool {
     master_pid(host).is_some()
 }
@@ -1313,14 +1314,15 @@ pub fn master_pid_at(control: &[String], host: &str) -> Option<u32> {
     }
     #[cfg(unix)]
     {
-        let mut cmd = std::process::Command::new("ssh");
-        cmd.args(control).arg("-O").arg("check").arg(host);
-        crate::modules::proc::hide_console(&mut cmd);
-        match cmd.output() {
-            Ok(out) if out.status.success() => {
-                parse_master_pid(&String::from_utf8_lossy(&out.stderr))
+        let mut args = control.to_vec();
+        args.extend(["-O".to_string(), "check".to_string(), host.to_string()]);
+        match run_control_command(&args, REMOTE_POLL_TIMEOUT) {
+            Ok((Some(0), stderr)) => parse_master_pid(&stderr),
+            Ok(_) => None,
+            Err(e) => {
+                log::warn!("ssh -O check {host}: {e}");
+                None
             }
-            _ => None,
         }
     }
     #[cfg(not(unix))]
@@ -1328,6 +1330,36 @@ pub fn master_pid_at(control: &[String], host: &str) -> Option<u32> {
         let _ = control;
         None
     }
+}
+
+/// `ssh` with `args` that only talk to the local control socket (`-O ...`),
+/// within `timeout`: a stopped or wedged master would otherwise block the
+/// caller for good. Returns the exit code and stderr.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) fn run_control_command(
+    args: &[String],
+    timeout: std::time::Duration,
+) -> Result<(Option<i32>, String), String> {
+    use std::process::{Command, Stdio};
+    let mut cmd = Command::new("ssh");
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    crate::modules::proc::hide_console(&mut cmd);
+    let child = std::sync::Arc::new(
+        shared_child::SharedChild::spawn(&mut cmd).map_err(|e| format!("ssh spawn failed: {e}"))?,
+    );
+    let mut stderr = child.take_stderr().ok_or("no ssh stderr")?;
+    let reader = std::thread::spawn(move || read_capped(&mut stderr, 64 * 1024).0);
+    let status = wait_child(&child, Some(timeout))?.ok_or_else(|| {
+        format!(
+            "ssh -O did not answer within {}s and was killed",
+            timeout.as_secs()
+        )
+    })?;
+    let stderr = reader.join().unwrap_or_default();
+    Ok((status.code(), String::from_utf8_lossy(&stderr).into_owned()))
 }
 
 /// `ssh -O check` answers `Master running (pid=1234)` on stderr.

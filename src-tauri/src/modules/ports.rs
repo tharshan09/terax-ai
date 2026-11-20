@@ -1,19 +1,22 @@
 //! Server ports forwarded to this machine over the host's shared ControlMaster
-//! (`ssh -O forward`), bound to 127.0.0.1 only. Forwards live in memory and die
-//! with the master that holds them. A waiting forward does not count as a client
-//! for ControlPersist, so a holder session keeps the master open while it has one.
+//! (`ssh -O forward`), bound to 127.0.0.1 and [::1] only. Forwards live in memory
+//! and die with the master that holds them. A waiting forward does not count as a
+//! client for ControlPersist, so a holder session keeps the master open while it
+//! has one.
 
 #![cfg_attr(not(unix), allow(dead_code))]
 
 use crate::modules::ssh;
 use std::collections::{BTreeMap, HashMap};
+use std::io::Read;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
-const BIND_ADDRESS: &str = "127.0.0.1";
-const HOLDER_COMMAND: &str = "cat >/dev/null";
+// Prints once the session runs, so a refused or ended session is told apart
+// from one that holds the master.
+const HOLDER_COMMAND: &str = "echo ready; exec cat >/dev/null";
 const MAX_BIND_ATTEMPTS: usize = 16;
 const MUX_TIMEOUT: Duration = ssh::REMOTE_POLL_TIMEOUT;
 const PROBE_TIMEOUT: Duration = Duration::from_millis(300);
@@ -85,26 +88,76 @@ fn no_free_port(from: u16) -> String {
     format!("no free port on this Mac from {from}")
 }
 
-fn forward_spec(local: u16, remote: u16) -> String {
-    format!("{BIND_ADDRESS}:{local}:localhost:{remote}")
+/// WebKit may try `[::1]` first for `localhost`, so a forward binds both;
+/// otherwise a Mac process that binds `[::1]` later would take the address over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Loopback {
+    V4,
+    V6,
+}
+
+const BOTH_LOOPBACKS: &[Loopback] = &[Loopback::V4, Loopback::V6];
+const IPV4_ONLY: &[Loopback] = &[Loopback::V4];
+
+impl Loopback {
+    fn bind_host(self) -> &'static str {
+        match self {
+            Self::V4 => "127.0.0.1",
+            Self::V6 => "[::1]",
+        }
+    }
+
+    fn addr(self, port: u16) -> SocketAddr {
+        match self {
+            Self::V4 => SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+            Self::V6 => SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
+        }
+    }
+}
+
+fn loopbacks(has_ipv6: bool) -> &'static [Loopback] {
+    if has_ipv6 {
+        BOTH_LOOPBACKS
+    } else {
+        IPV4_ONLY
+    }
+}
+
+/// A machine with IPv6 disabled has no `[::1]`; nothing can take it over there.
+fn has_ipv6_loopback() -> bool {
+    std::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).is_ok()
+}
+
+fn forward_spec(family: Loopback, local: u16, remote: u16) -> String {
+    format!("{}:{local}:localhost:{remote}", family.bind_host())
 }
 
 /// `ssh -O forward|cancel` against the control socket; never opens a connection.
-fn mux_args(control: &[String], op: &str, local: u16, remote: u16, host: &str) -> Vec<String> {
+fn mux_args(
+    control: &[String],
+    op: &str,
+    family: Loopback,
+    local: u16,
+    remote: u16,
+    host: &str,
+) -> Vec<String> {
     let mut args = vec!["-o".to_string(), "BatchMode=yes".to_string()];
     args.extend(control.iter().cloned());
     args.extend([
         "-O".to_string(),
         op.to_string(),
         "-L".to_string(),
-        forward_spec(local, remote),
+        forward_spec(family, local, remote),
+        "--".to_string(),
         host.to_string(),
     ]);
     args
 }
 
 /// A session on the master that waits for its stdin to close. ssh keeps the
-/// first value of an option, so `ControlMaster=no` has to precede `control`.
+/// first value of an option, so these have to precede `control`.
+/// `ProxyCommand=false`: without the master's socket ssh would quietly open a
+/// direct connection of its own; this makes that attempt fail on the spot.
 fn holder_args(control: &[String], host: &str) -> Vec<String> {
     let mut args: Vec<String> = [
         "-T",
@@ -114,23 +167,20 @@ fn holder_args(control: &[String], host: &str) -> Vec<String> {
         "ConnectTimeout=10",
         "-o",
         "ControlMaster=no",
+        "-o",
+        "ProxyCommand=false",
     ]
     .map(String::from)
     .into();
     args.extend(control.iter().cloned());
+    args.push("--".to_string());
     args.push(host.to_string());
     args.push(HOLDER_COMMAND.to_string());
     args
 }
 
-/// Free means free on both loopbacks: WebKit may try `[::1]` first for `localhost`.
-fn port_free(port: u16, occupied: impl Fn(SocketAddr) -> bool) -> bool {
-    [
-        SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
-        SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
-    ]
-    .into_iter()
-    .all(|addr| !occupied(addr))
+fn port_free(port: u16, families: &[Loopback], occupied: impl Fn(SocketAddr) -> bool) -> bool {
+    families.iter().all(|family| !occupied(family.addr(port)))
 }
 
 fn next_free_port(from: u16, is_free: &mut impl FnMut(u16) -> bool) -> Option<u16> {
@@ -161,6 +211,25 @@ fn bind_first_free(
         }
     }
     Err(format!("could not bind a port on this Mac from {remote}"))
+}
+
+/// One port on every family or on none: a family that fails takes back the
+/// ones bound before it.
+fn bind_all(
+    port: u16,
+    families: &[Loopback],
+    mut bind: impl FnMut(Loopback, u16) -> Result<(), BindError>,
+    mut unbind: impl FnMut(Loopback, u16),
+) -> Result<(), BindError> {
+    for (i, &family) in families.iter().enumerate() {
+        if let Err(e) = bind(family, port) {
+            for &bound in &families[..i] {
+                unbind(bound, port);
+            }
+            return Err(e);
+        }
+    }
+    Ok(())
 }
 
 fn first_line(stderr: &str) -> &str {
@@ -218,32 +287,14 @@ fn occupied_on_this_machine(addr: SocketAddr) -> bool {
     !bindable || std::net::TcpStream::connect_timeout(&addr, PROBE_TIMEOUT).is_ok()
 }
 
-fn run_ssh(args: &[String]) -> Result<(Option<i32>, String), String> {
-    use std::io::Read;
-    let mut cmd = Command::new("ssh");
-    cmd.args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    crate::modules::proc::hide_console(&mut cmd);
-    let child = std::sync::Arc::new(
-        shared_child::SharedChild::spawn(&mut cmd).map_err(|e| format!("ssh spawn failed: {e}"))?,
-    );
-    let stderr = child.take_stderr().ok_or("no ssh stderr")?;
-    let reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stderr.take(64 * 1024).read_to_end(&mut buf);
-        String::from_utf8_lossy(&buf).into_owned()
-    });
-    let status = ssh::wait_child(&child, Some(MUX_TIMEOUT))?.ok_or_else(|| {
-        format!("ssh -O did not answer within {}s and was killed", MUX_TIMEOUT.as_secs())
-    })?;
-    Ok((status.code(), reader.join().unwrap_or_default()))
+fn holder_error(host: &str, reason: &str) -> String {
+    format!("could not keep the connection to {host} open: {reason}")
 }
 
 struct Forward {
     local_port: u16,
     master_pid: u32,
+    families: &'static [Loopback],
 }
 
 /// Dropping it closes the session's stdin and ends it; a crashed Terax closes
@@ -251,20 +302,61 @@ struct Forward {
 struct Holder {
     child: Child,
     master_pid: u32,
+    // Kept open so a late write from ssh never meets a closed pipe.
+    _pipes: (Option<ChildStdout>, Option<ChildStderr>),
 }
 
 impl Holder {
+    /// Returns once the session runs on the master. A session the server
+    /// refuses (`MaxSessions`) or ends at once is an error, not a holder.
     fn spawn(control: &[String], host: &str, master_pid: u32) -> Result<Self, String> {
         let mut cmd = Command::new("ssh");
         cmd.args(holder_args(control, host))
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         crate::modules::proc::hide_console(&mut cmd);
-        let child = cmd
-            .spawn()
-            .map_err(|e| format!("could not keep the connection to {host} open: {e}"))?;
-        Ok(Self { child, master_pid })
+        let mut child = cmd.spawn().map_err(|e| holder_error(host, &e.to_string()))?;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut stdout = stdout;
+            let started = stdout
+                .as_mut()
+                .is_some_and(|out| matches!(out.read(&mut [0u8; 1]), Ok(1)));
+            let _ = tx.send((started, stdout));
+        });
+        let mut holder = Self {
+            child,
+            master_pid,
+            _pipes: (None, stderr),
+        };
+        match rx.recv_timeout(MUX_TIMEOUT) {
+            Ok((true, stdout)) => {
+                holder._pipes.0 = stdout;
+                Ok(holder)
+            }
+            Ok((false, _)) => {
+                let status = holder.child.wait().ok().and_then(|s| s.code());
+                let mut text = String::new();
+                if let Some(err) = holder._pipes.1.take() {
+                    let _ = err.take(4096).read_to_string(&mut text);
+                }
+                Err(holder_error(
+                    host,
+                    match first_line(&text) {
+                        "" => format!("the session ended at once (exit {status:?})"),
+                        line => line.to_string(),
+                    }
+                    .as_str(),
+                ))
+            }
+            Err(_) => Err(holder_error(
+                host,
+                &format!("the session did not start within {}s", MUX_TIMEOUT.as_secs()),
+            )),
+        }
     }
 
     fn running(&mut self) -> bool {
@@ -293,8 +385,23 @@ impl HostForwards {
                 return Ok(());
             }
         }
+        self.holder = None;
         self.holder = Some(Holder::spawn(control, host, live)?);
         Ok(())
+    }
+
+    /// A holder that ended (server closed the session) is started again while
+    /// the live master carries forwards; one for a gone master is dropped.
+    fn reconcile_holder(&mut self, control: &[String], host: &str, live: Option<u32>) {
+        let needed = live.filter(|&pid| self.forwards.values().any(|f| f.master_pid == pid));
+        match needed {
+            Some(pid) => {
+                if let Err(e) = self.keep_open(control, host, pid) {
+                    log::warn!("ssh_port_list {host}: {e}");
+                }
+            }
+            None => self.holder = None,
+        }
     }
 
     fn release_idle_holder(&mut self) {
@@ -321,16 +428,23 @@ impl HostForwards {
     }
 }
 
-/// Forwards per host for one control dir. Calls are serialized: each is a few
-/// local-socket round trips.
+type HostSlot = Arc<Mutex<HostForwards>>;
+
+/// Forwards per host for one control dir. Calls for one host are serialized;
+/// a wedged master of one host never blocks another. Entries stay once made,
+/// so a call that waited on a host's lock never works on a detached entry.
 pub struct Registry {
     control: Vec<String>,
-    hosts: Mutex<HashMap<String, HostForwards>>,
+    hosts: Mutex<HashMap<String, HostSlot>>,
 }
 
 fn registry() -> &'static Registry {
     static REGISTRY: OnceLock<Registry> = OnceLock::new();
     REGISTRY.get_or_init(|| Registry::new(ssh::control_args()))
+}
+
+fn lock_host(slot: &HostSlot) -> MutexGuard<'_, HostForwards> {
+    slot.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl Registry {
@@ -341,58 +455,107 @@ impl Registry {
         }
     }
 
-    fn lock(&self) -> MutexGuard<'_, HashMap<String, HostForwards>> {
+    fn lock(&self) -> MutexGuard<'_, HashMap<String, HostSlot>> {
         self.hosts.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn slot(&self, host: &str) -> Option<HostSlot> {
+        self.lock().get(host).cloned()
+    }
+
+    fn slot_or_insert(&self, host: &str) -> HostSlot {
+        Arc::clone(self.lock().entry(host.to_string()).or_default())
     }
 
     fn mux(
         &self,
         op: &str,
+        family: Loopback,
         local: u16,
         remote: u16,
         host: &str,
     ) -> Result<(Option<i32>, String), String> {
-        run_ssh(&mux_args(&self.control, op, local, remote, host))
+        ssh::run_control_command(
+            &mux_args(&self.control, op, family, local, remote, host),
+            MUX_TIMEOUT,
+        )
+    }
+
+    fn bind_one(&self, family: Loopback, local: u16, remote: u16, host: &str) -> Result<(), BindError> {
+        match self.mux("forward", family, local, remote, host) {
+            Ok((code, stderr)) => forward_outcome(code, &stderr, host),
+            Err(e) => Err(BindError::Failed(e)),
+        }
+    }
+
+    fn cancel_one(&self, family: Loopback, local: u16, remote: u16, host: &str) -> Result<(), String> {
+        let (code, stderr) = self.mux("cancel", family, local, remote, host)?;
+        cancel_outcome(code, &stderr)
+    }
+
+    /// Cancels every family even when one fails, and reports the first failure.
+    fn cancel_all(&self, families: &[Loopback], local: u16, remote: u16, host: &str) -> Result<(), String> {
+        let mut outcome = Ok(());
+        for &family in families {
+            let cancelled = self.cancel_one(family, local, remote, host);
+            if outcome.is_ok() {
+                outcome = cancelled;
+            }
+        }
+        outcome
     }
 
     pub fn forward(&self, host: &str, remote: u16) -> Result<PortForward, String> {
         validate_request(host, u32::from(remote))?;
-        let mut hosts = self.lock();
+        let slot = self.slot_or_insert(host);
+        let mut entry = lock_host(&slot);
         let live = ssh::master_pid_at(&self.control, host).ok_or_else(|| not_connected(host))?;
-        if let Some(existing) = hosts.get(host).and_then(|entry| entry.forwards.get(&remote)) {
-            if existing.master_pid == live {
-                return Ok(PortForward {
-                    remote_port: remote,
-                    local_port: existing.local_port,
-                    status: ForwardStatus::Active,
-                });
-            }
+        if let Some(local_port) = entry
+            .forwards
+            .get(&remote)
+            .filter(|existing| existing.master_pid == live)
+            .map(|existing| existing.local_port)
+        {
+            // A list that found the master wedged dropped the holder; this heals it.
+            entry.keep_open(&self.control, host, live)?;
+            return Ok(PortForward {
+                remote_port: remote,
+                local_port,
+                status: ForwardStatus::Active,
+            });
         }
         // So that quitting Terax (disconnect_all) ends the master holding the forward.
         ssh::note_connected_host(host);
+        let families = loopbacks(has_ipv6_loopback());
         let local = bind_first_free(
             remote,
-            |port| port_free(port, occupied_on_this_machine),
-            |port| match self.mux("forward", port, remote, host) {
-                Ok((code, stderr)) => forward_outcome(code, &stderr, host),
-                Err(e) => Err(BindError::Failed(e)),
+            |port| port_free(port, families, occupied_on_this_machine),
+            |port| {
+                bind_all(
+                    port,
+                    families,
+                    |family, port| self.bind_one(family, port, remote, host),
+                    |family, port| {
+                        let _ = self.cancel_one(family, port, remote, host);
+                    },
+                )
             },
         )?;
-        let entry = hosts.entry(host.to_string()).or_default();
-        entry.forwards.insert(
+        let previous = entry.forwards.insert(
             remote,
             Forward {
                 local_port: local,
                 master_pid: live,
+                families,
             },
         );
         if let Err(e) = entry.keep_open(&self.control, host, live) {
-            entry.forwards.remove(&remote);
+            match previous {
+                Some(previous) => entry.forwards.insert(remote, previous),
+                None => entry.forwards.remove(&remote),
+            };
             entry.release_idle_holder();
-            if entry.forwards.is_empty() {
-                hosts.remove(host);
-            }
-            let _ = self.mux("cancel", local, remote, host);
+            let _ = self.cancel_all(families, local, remote, host);
             return Err(e);
         }
         Ok(PortForward {
@@ -404,35 +567,33 @@ impl Registry {
 
     pub fn stop(&self, host: &str, remote: u16) -> Result<(), String> {
         validate_request(host, u32::from(remote))?;
-        let mut hosts = self.lock();
-        let Some(entry) = hosts.get_mut(host) else {
+        let Some(slot) = self.slot(host) else {
             return Ok(());
         };
+        let mut entry = lock_host(&slot);
         let Some(forward) = entry.forwards.get(&remote) else {
             return Ok(());
         };
         if ssh::master_pid_at(&self.control, host) == Some(forward.master_pid) {
-            let (code, stderr) = self.mux("cancel", forward.local_port, remote, host)?;
-            cancel_outcome(code, &stderr)?;
+            self.cancel_all(forward.families, forward.local_port, remote, host)?;
         }
         entry.forwards.remove(&remote);
         entry.release_idle_holder();
-        if entry.forwards.is_empty() {
-            hosts.remove(host);
-        }
         Ok(())
     }
 
     pub fn list(&self, host: &str) -> Result<Vec<PortForward>, String> {
         ssh::validate_ssh_host(host)?;
-        let mut hosts = self.lock();
-        let Some(entry) = hosts.get_mut(host) else {
+        let Some(slot) = self.slot(host) else {
             return Ok(Vec::new());
         };
-        let live = ssh::master_pid_at(&self.control, host);
-        if entry.holder.as_ref().is_some_and(|h| Some(h.master_pid) != live) {
+        let mut entry = lock_host(&slot);
+        if entry.forwards.is_empty() {
             entry.holder = None;
+            return Ok(Vec::new());
         }
+        let live = ssh::master_pid_at(&self.control, host);
+        entry.reconcile_holder(&self.control, host, live);
         Ok(entry.view(live))
     }
 }
@@ -479,14 +640,22 @@ mod tests {
     }
 
     #[test]
-    fn a_port_counts_as_free_only_when_free_on_both_loopbacks() {
+    fn a_port_counts_as_free_only_when_free_on_every_loopback_it_binds() {
         let v4 = SocketAddr::from((Ipv4Addr::LOCALHOST, 3000));
         let v6 = SocketAddr::from((Ipv6Addr::LOCALHOST, 3000));
         let taken = |set: Vec<SocketAddr>| move |addr: SocketAddr| set.contains(&addr);
-        assert!(port_free(3000, taken(vec![])));
-        assert!(!port_free(3000, taken(vec![v4])));
-        assert!(!port_free(3000, taken(vec![v6])));
-        assert!(port_free(3001, taken(vec![v4, v6])));
+        assert!(port_free(3000, BOTH_LOOPBACKS, taken(vec![])));
+        assert!(!port_free(3000, BOTH_LOOPBACKS, taken(vec![v4])));
+        assert!(!port_free(3000, BOTH_LOOPBACKS, taken(vec![v6])));
+        assert!(port_free(3001, BOTH_LOOPBACKS, taken(vec![v4, v6])));
+        assert!(port_free(3000, IPV4_ONLY, taken(vec![v6])));
+        assert!(!port_free(3000, IPV4_ONLY, taken(vec![v4])));
+    }
+
+    #[test]
+    fn without_an_ipv6_loopback_only_ipv4_is_bound() {
+        assert_eq!(loopbacks(true), [Loopback::V4, Loopback::V6]);
+        assert_eq!(loopbacks(false), [Loopback::V4]);
     }
 
     fn choose(remote: u16, taken: &[u16], bind_fails: &[u16]) -> Result<u16, String> {
@@ -547,26 +716,73 @@ mod tests {
     }
 
     #[test]
-    fn forwards_bind_loopback_explicitly_and_target_server_localhost() {
-        let args = mux_args(&control(), "forward", 18081, 18080, "devbox");
-        let tail = &args[args.len() - 5..];
-        assert_eq!(
-            tail,
-            ["-O", "forward", "-L", "127.0.0.1:18081:localhost:18080", "devbox"]
+    fn a_failed_ipv6_bind_takes_back_ipv4_and_moves_to_the_next_port() {
+        let bound = std::cell::RefCell::new(Vec::<(Loopback, u16)>::new());
+        let result = bind_first_free(
+            3000,
+            |_| true,
+            |port| {
+                bind_all(
+                    port,
+                    BOTH_LOOPBACKS,
+                    |family, port| {
+                        if family == Loopback::V6 && port == 3000 {
+                            return Err(BindError::InUse);
+                        }
+                        bound.borrow_mut().push((family, port));
+                        Ok(())
+                    },
+                    |family, port| bound.borrow_mut().retain(|&b| b != (family, port)),
+                )
+            },
         );
-        assert_eq!(&args[..2], ["-o", "BatchMode=yes"]);
-        assert!(args.contains(&"ControlPath=/c/%C".to_string()));
-        let cancel = mux_args(&control(), "cancel", 18081, 18080, "devbox");
-        assert_eq!(cancel[cancel.len() - 4], "cancel");
+        assert_eq!(result, Ok(3001));
+        assert_eq!(
+            bound.into_inner(),
+            [(Loopback::V4, 3001), (Loopback::V6, 3001)]
+        );
     }
 
     #[test]
-    fn the_holder_never_prompts_and_never_becomes_a_master() {
+    fn an_ipv4_only_bind_never_touches_ipv6() {
+        let mut families = Vec::new();
+        let result = bind_all(
+            3000,
+            IPV4_ONLY,
+            |family, _| {
+                families.push(family);
+                Ok(())
+            },
+            |_, _| panic!("nothing to take back"),
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(families, [Loopback::V4]);
+    }
+
+    #[test]
+    fn forwards_bind_both_loopbacks_explicitly_and_target_server_localhost() {
+        let args = mux_args(&control(), "forward", Loopback::V4, 18081, 18080, "devbox");
+        let tail = &args[args.len() - 6..];
+        assert_eq!(
+            tail,
+            ["-O", "forward", "-L", "127.0.0.1:18081:localhost:18080", "--", "devbox"]
+        );
+        assert_eq!(&args[..2], ["-o", "BatchMode=yes"]);
+        assert!(args.contains(&"ControlPath=/c/%C".to_string()));
+        let v6 = mux_args(&control(), "forward", Loopback::V6, 18081, 18080, "devbox");
+        assert_eq!(v6[v6.len() - 3], "[::1]:18081:localhost:18080");
+        let cancel = mux_args(&control(), "cancel", Loopback::V4, 18081, 18080, "devbox");
+        assert_eq!(cancel[cancel.len() - 5], "cancel");
+    }
+
+    #[test]
+    fn the_holder_never_prompts_never_becomes_a_master_and_never_connects_itself() {
         let args = holder_args(&control(), "devbox");
         let pos = |needle: &str| args.iter().position(|a| a == needle).unwrap();
         assert!(pos("BatchMode=yes") < pos("ControlPath=/c/%C"));
         assert!(pos("ControlMaster=no") < pos("ControlMaster=auto"));
-        assert_eq!(&args[args.len() - 2..], ["devbox", HOLDER_COMMAND]);
+        assert!(pos("ProxyCommand=false") < pos("ControlPath=/c/%C"));
+        assert_eq!(&args[args.len() - 3..], ["--", "devbox", HOLDER_COMMAND]);
         assert_eq!(args[0], "-T");
     }
 
@@ -620,6 +836,7 @@ mod tests {
                 Forward {
                     local_port: local,
                     master_pid: pid,
+                    families: BOTH_LOOPBACKS,
                 },
             );
         }
@@ -640,23 +857,36 @@ mod tests {
         assert_eq!(registry.list("devbox"), Ok(Vec::new()));
         assert_eq!(registry.stop("devbox", 18080), Ok(()));
         assert!(registry.lock().is_empty());
+        assert_eq!(
+            registry.forward("devbox", 18080),
+            Err("not connected to devbox".to_string())
+        );
+        assert_eq!(registry.list("devbox"), Ok(Vec::new()));
     }
 }
 
 /// Real runs against an sshd; ignored in the normal suite. Start with
 /// `TERAX_E2E_HOST=<ssh alias> cargo test --lib ports::e2e -- --ignored --test-threads=1 --nocapture`
 /// (key auth without prompts, python3 on the server, server ports 18080/18090 and
-/// local ports 18080 to 18082 free).
+/// local ports 18080 to 18082 free). More aliases for single tests:
+/// `TERAX_E2E_HOST_B` (same server under another HostName, so its own master),
+/// `TERAX_E2E_HOST_ONE_SESSION` (an sshd with `MaxSessions 1`), and
+/// `TERAX_E2E_SSHD_LOG` (the server's sshd log, readable by the test user;
+/// default `/var/log/sshd.log`).
 #[cfg(all(test, unix))]
 mod e2e {
     use super::*;
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::net::TcpStream;
     use std::time::Instant;
 
+    fn env_alias(name: &str) -> String {
+        std::env::var(name)
+            .unwrap_or_else(|_| panic!("{name} names an ssh alias, see the module comment"))
+    }
+
     fn host() -> String {
-        std::env::var("TERAX_E2E_HOST")
-            .expect("TERAX_E2E_HOST names an ssh alias with a reachable sshd")
+        env_alias("TERAX_E2E_HOST")
     }
 
     fn wait_until(budget: Duration, mut done: impl FnMut() -> bool) -> bool {
@@ -680,7 +910,10 @@ mod e2e {
 
     impl Connection {
         fn open(control: &[String], persist: Option<&str>, remote: &str) -> Self {
-            let host = host();
+            Self::open_to(&host(), control, persist, remote)
+        }
+
+        fn open_to(host: &str, control: &[String], persist: Option<&str>, remote: &str) -> Self {
             let mut cmd = Command::new("ssh");
             cmd.arg("-tt");
             if let Some(persist) = persist {
@@ -688,7 +921,7 @@ mod e2e {
             }
             let terminal = cmd
                 .args(control)
-                .arg(&host)
+                .arg(host)
                 .arg(remote)
                 .env("TERM", "xterm")
                 .stdin(Stdio::null())
@@ -698,13 +931,13 @@ mod e2e {
                 .expect("spawn ssh -tt");
             assert!(
                 wait_until(Duration::from_secs(10), || {
-                    ssh::master_pid_at(control, &host).is_some()
+                    ssh::master_pid_at(control, host).is_some()
                 }),
                 "master to {host} did not come up"
             );
             Self {
                 control: control.to_vec(),
-                host,
+                host: host.to_string(),
                 terminal,
             }
         }
@@ -730,8 +963,15 @@ mod e2e {
         }
     }
 
-    /// `python3 -m http.server` on the server's loopback, over its own connection
-    /// (no ControlPath), so it never counts as a client of the master under test.
+    /// A shell command on the server over its own connection (no ControlPath),
+    /// so it never counts as a client of a master under test.
+    fn on_server(script: &str) -> Command {
+        let mut cmd = Command::new("ssh");
+        cmd.args(["-o", "BatchMode=yes", "-o", "ControlPath=none", &host(), script]);
+        cmd
+    }
+
+    /// `python3 -m http.server` on the server's loopback.
     struct ServerPage(Child);
 
     impl ServerPage {
@@ -753,8 +993,7 @@ mod e2e {
             );
             assert!(
                 wait_until(Duration::from_secs(10), || {
-                    Command::new("ssh")
-                        .args(["-o", "BatchMode=yes", "-o", "ControlPath=none", &host, &probe])
+                    on_server(&probe)
                         .stderr(Stdio::null())
                         .status()
                         .is_ok_and(|s| s.success())
@@ -772,8 +1011,7 @@ mod e2e {
         }
     }
 
-    fn get(port: u16) -> Result<String, String> {
-        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    fn get(addr: SocketAddr) -> Result<String, String> {
         let mut stream =
             TcpStream::connect_timeout(&addr, Duration::from_secs(2)).map_err(|e| e.to_string())?;
         stream
@@ -792,6 +1030,22 @@ mod e2e {
             .to_string())
     }
 
+    fn v4(port: u16) -> SocketAddr {
+        Loopback::V4.addr(port)
+    }
+
+    fn v6(port: u16) -> SocketAddr {
+        Loopback::V6.addr(port)
+    }
+
+    fn page_at(addr: SocketAddr) -> String {
+        get(addr).unwrap_or_else(|e| format!("error: {e}"))
+    }
+
+    fn page(port: u16) -> String {
+        page_at(v4(port))
+    }
+
     fn refuses(addr: SocketAddr) -> bool {
         matches!(
             TcpStream::connect_timeout(&addr, Duration::from_secs(1)),
@@ -799,8 +1053,8 @@ mod e2e {
         )
     }
 
-    fn page(port: u16) -> String {
-        get(port).unwrap_or_else(|e| format!("error: {e}"))
+    fn bind_error(addr: SocketAddr) -> Option<std::io::ErrorKind> {
+        std::net::TcpListener::bind(addr).err().map(|e| e.kind())
     }
 
     /// The address this machine uses toward the server: a non-loopback one.
@@ -820,15 +1074,23 @@ mod e2e {
         socket.local_addr().expect("local addr").ip()
     }
 
+    fn holder_pid(registry: &Registry, host: &str) -> Option<u32> {
+        let slot = registry.slot(host)?;
+        let mut entry = lock_host(&slot);
+        let holder = entry.holder.as_mut()?;
+        holder.running().then(|| holder.child.id())
+    }
+
     #[test]
     #[ignore = "needs an sshd, see the module comment"]
-    fn e2e_forward_loads_the_page_on_loopback_only() {
+    fn e2e_forward_loads_the_page_on_both_loopbacks_only() {
         let control = ssh::control_args();
         let conn = Connection::open(&control, None, "sleep 600");
         let _page = ServerPage::start(18080);
         let registry = Registry::new(control.clone());
+        let ipv6 = has_ipv6_loopback();
         let first = registry.forward(&conn.host, 18080);
-        println!("E2E forward 18080 -> {first:?}");
+        println!("E2E IPv6 loopback here: {ipv6}; forward 18080 -> {first:?}");
         println!("E2E GET 127.0.0.1:18080 -> {:?}", page(18080));
         let again = registry.forward(&conn.host, 18080);
         println!("E2E forward 18080 again -> {again:?}");
@@ -839,10 +1101,8 @@ mod e2e {
             .unwrap_or_default()
             .to_string();
         let outward = outward_address(&conn.host);
-        let v6 = SocketAddr::from((Ipv6Addr::LOCALHOST, 18080));
         let lan = SocketAddr::new(outward, 18080);
-        println!("E2E ssh -G: {gateway}");
-        println!("E2E {lan} refuses: {}; {v6} refuses: {}", refuses(lan), refuses(v6));
+        println!("E2E ssh -G: {gateway}; {lan} refuses: {}", refuses(lan));
         assert_eq!(
             first,
             Ok(PortForward {
@@ -856,6 +1116,18 @@ mod e2e {
         assert!(!outward.is_loopback());
         assert!(refuses(lan));
         assert_eq!(registry.list(&conn.host).unwrap().len(), 1);
+        if ipv6 {
+            let late_v6 = bind_error(v6(18080));
+            println!(
+                "E2E GET [::1]:18080 -> {:?}; a later listener on [::1]:18080 -> {late_v6:?}",
+                page_at(v6(18080))
+            );
+            assert_eq!(page_at(v6(18080)), "server page 18080");
+            assert_eq!(late_v6, Some(std::io::ErrorKind::AddrInUse));
+        } else {
+            println!("E2E no IPv6 loopback: the forward binds 127.0.0.1 only");
+        }
+        assert_eq!(bind_error(v4(18080)), Some(std::io::ErrorKind::AddrInUse));
     }
 
     #[test]
@@ -864,13 +1136,13 @@ mod e2e {
         let control = ssh::control_args();
         let conn = Connection::open(&control, None, "sleep 600");
         let _page = ServerPage::start(18080);
-        let foreign = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 18080)).unwrap();
+        let foreign = std::net::TcpListener::bind(v4(18080)).unwrap();
         foreign.set_nonblocking(true).unwrap();
         let registry = Registry::new(control.clone());
         let result = registry.forward(&conn.host, 18080);
         println!("E2E 127.0.0.1:18080 taken by a foreign listener; forward -> {result:?}");
         println!("E2E GET 127.0.0.1:18081 -> {:?}", page(18081));
-        let _probe = TcpStream::connect((Ipv4Addr::LOCALHOST, 18080)).unwrap();
+        let _probe = TcpStream::connect(v4(18080)).unwrap();
         std::thread::sleep(Duration::from_millis(100));
         let foreign_alive = foreign.accept().is_ok();
         println!("E2E foreign listener still accepts on 18080: {foreign_alive}");
@@ -880,11 +1152,15 @@ mod e2e {
         registry.stop(&conn.host, 18080).unwrap();
         drop(foreign);
 
-        match std::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 18080)) {
+        match std::net::TcpListener::bind(v6(18080)) {
             Ok(only_v6) => {
                 let result = registry.forward(&conn.host, 18080);
-                println!("E2E [::1]:18080 taken (127.0.0.1:18080 free); forward -> {result:?}");
+                println!(
+                    "E2E [::1]:18080 taken (127.0.0.1:18080 free); forward -> {result:?}; GET [::1]:18081 -> {:?}",
+                    page_at(v6(18081))
+                );
                 assert_eq!(result.map(|f| f.local_port), Ok(18081));
+                assert_eq!(page_at(v6(18081)), "server page 18080");
                 drop(only_v6);
             }
             Err(e) => println!("E2E no IPv6 loopback here ({e}); [::1] case skipped"),
@@ -905,11 +1181,13 @@ mod e2e {
         println!("E2E list -> {before:?}");
         let stopped = registry.stop(&conn.host, 18080);
         let after = registry.list(&conn.host).unwrap();
-        let v4 = SocketAddr::from((Ipv4Addr::LOCALHOST, 18080));
         println!(
-            "E2E stop 18080 -> {stopped:?}; list -> {after:?}; 127.0.0.1:18080 refuses: {}",
-            refuses(v4)
+            "E2E stop 18080 -> {stopped:?}; list -> {after:?}; 127.0.0.1:18080 refuses: {}; [::1]:18080 refuses: {}",
+            refuses(v4(18080)),
+            refuses(v6(18080))
         );
+        let rebind = (bind_error(v4(18080)), bind_error(v6(18080)));
+        println!("E2E bind after stop (127.0.0.1, [::1]) -> errors {rebind:?}");
         let unknown = registry.stop(&conn.host, 12345);
         println!("E2E stop 12345 (never forwarded) -> {unknown:?}");
         println!("E2E GET 127.0.0.1:18090 -> {:?}", page(18090));
@@ -917,7 +1195,12 @@ mod e2e {
         assert_eq!(ports, [18080, 18090]);
         assert_eq!(stopped, Ok(()));
         assert_eq!(after.iter().map(|f| f.remote_port).collect::<Vec<_>>(), [18090]);
-        assert!(refuses(v4));
+        assert!(refuses(v4(18080)));
+        assert_eq!(rebind.0, None);
+        if has_ipv6_loopback() {
+            assert!(refuses(v6(18080)));
+            assert_eq!(rebind.1, None);
+        }
         assert_eq!(unknown, Ok(()));
         assert_eq!(page(18090), "server page 18090");
     }
@@ -1016,24 +1299,27 @@ mod e2e {
         println!("E2E forward -> {:?}", registry.forward(&host, 18080));
         let _ = conn.terminal.wait();
         println!("E2E terminal ended; master {:?}; GET -> {:?}", conn.pid(), page(18080));
+        let holder = holder_pid(&registry, &host);
         ssh::disconnect_all();
         let gone = wait_until(Duration::from_secs(5), || {
             ssh::master_pid_at(&control, &host).is_none()
         });
-        let v4 = SocketAddr::from((Ipv4Addr::LOCALHOST, 18080));
         let holder_ended = wait_until(Duration::from_secs(5), || {
-            let mut hosts = registry.lock();
-            let entry = hosts.get_mut(&host).unwrap();
-            !entry.holder.as_mut().unwrap().running()
+            holder_pid(&registry, &host).is_none()
         });
         let fresh = Registry::new(control.clone()).list(&host);
         println!(
-            "E2E after disconnect_all: master gone {gone}; holder ended {holder_ended}; 127.0.0.1:18080 refuses {}; fresh registry lists {fresh:?}",
-            refuses(v4)
+            "E2E after disconnect_all: master gone {gone}; holder {holder:?} ended {holder_ended}; 127.0.0.1:18080 refuses {}; [::1]:18080 refuses {}; fresh registry lists {fresh:?}",
+            refuses(v4(18080)),
+            refuses(v6(18080))
         );
+        assert!(holder.is_some());
         assert!(gone);
         assert!(holder_ended);
-        assert!(refuses(v4));
+        assert!(refuses(v4(18080)));
+        if has_ipv6_loopback() {
+            assert!(refuses(v6(18080)));
+        }
         assert_eq!(fresh, Ok(Vec::new()));
     }
 
@@ -1062,18 +1348,157 @@ mod e2e {
         let fb = reg_b.forward(&host, 18080);
         println!("E2E installed -> {fa:?}; variant -> {fb:?}");
         reg_a.stop(&host, 18080).unwrap();
-        let v4 = SocketAddr::from((Ipv4Addr::LOCALHOST, 18080));
         println!(
             "E2E installed stopped: 18080 refuses {}; variant GET 18081 -> {:?}; variant list -> {:?}",
-            refuses(v4),
+            refuses(v4(18080)),
             page(18081),
             reg_b.list(&host)
         );
         assert_eq!(fa.map(|f| f.local_port), Ok(18080));
         assert_eq!(fb.map(|f| f.local_port), Ok(18081));
-        assert!(refuses(v4));
+        assert!(refuses(v4(18080)));
         assert_eq!(page(18081), "server page 18080");
         drop(b);
         drop(a);
+    }
+
+    fn sshd_logins() -> usize {
+        let log =
+            std::env::var("TERAX_E2E_SSHD_LOG").unwrap_or_else(|_| "/var/log/sshd.log".into());
+        let out = on_server(&format!("grep -c 'Accepted publickey' {log}"))
+            .output()
+            .expect("count sshd logins");
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("sshd log {log} not readable: {out:?}"))
+    }
+
+    #[test]
+    #[ignore = "needs an sshd, see the module comment"]
+    fn e2e_the_holder_never_opens_a_connection_of_its_own() {
+        let control = ssh::control_args();
+        let host = host();
+        let _ = Command::new("ssh")
+            .args(&control)
+            .args(["-O", "exit", &host])
+            .stderr(Stdio::null())
+            .status();
+        assert!(wait_until(Duration::from_secs(5), || {
+            ssh::master_pid_at(&control, &host).is_none()
+        }));
+        let before = sshd_logins();
+        let started = Instant::now();
+        let result = Holder::spawn(&control, &host, 1).map(|_| ());
+        let took = started.elapsed();
+        let after = sshd_logins();
+        println!(
+            "E2E no master: holder -> {result:?} in {took:?}; sshd logins {before} -> {after} (the second count is one login itself)"
+        );
+        assert!(result.is_err());
+        assert_eq!(after, before + 1);
+        assert_eq!(ssh::master_pid_at(&control, &host), None);
+    }
+
+    #[test]
+    #[ignore = "needs an sshd, see the module comment"]
+    fn e2e_a_refused_holder_session_fails_the_forward() {
+        let host = env_alias("TERAX_E2E_HOST_ONE_SESSION");
+        let control = ssh::control_args();
+        let conn = Connection::open_to(&host, &control, None, "sleep 600");
+        let _page = ServerPage::start(18080);
+        let registry = Registry::new(control.clone());
+        let result = registry.forward(&host, 18080);
+        let list = registry.list(&host);
+        println!(
+            "E2E MaxSessions 1, one terminal on master {:?}: forward -> {result:?}; list -> {list:?}; 127.0.0.1:18080 refuses {}; [::1]:18080 refuses {}",
+            conn.pid(),
+            refuses(v4(18080)),
+            refuses(v6(18080))
+        );
+        let err = result.unwrap_err();
+        assert!(err.starts_with(&format!("could not keep the connection to {host} open: ")));
+        assert_eq!(list, Ok(Vec::new()));
+        assert!(refuses(v4(18080)));
+        if has_ipv6_loopback() {
+            assert!(refuses(v6(18080)));
+        }
+        assert_eq!(holder_pid(&registry, &host), None);
+    }
+
+    #[test]
+    #[ignore = "needs an sshd, see the module comment"]
+    fn e2e_list_restarts_a_holder_that_ended() {
+        let control = ssh::control_args();
+        let conn = Connection::open(&control, None, "sleep 600");
+        let _page = ServerPage::start(18080);
+        let registry = Registry::new(control.clone());
+        registry.forward(&conn.host, 18080).unwrap();
+        let first = holder_pid(&registry, &conn.host);
+        {
+            let slot = registry.slot(&conn.host).unwrap();
+            let mut entry = lock_host(&slot);
+            let holder = entry.holder.as_mut().unwrap();
+            let _ = holder.child.kill();
+            let _ = holder.child.wait();
+        }
+        let ended = holder_pid(&registry, &conn.host);
+        let list = registry.list(&conn.host);
+        let second = holder_pid(&registry, &conn.host);
+        println!(
+            "E2E holder {first:?} killed (running: {ended:?}); list -> {list:?}; holder now {second:?}; GET -> {:?}",
+            page(18080)
+        );
+        assert!(first.is_some());
+        assert_eq!(ended, None);
+        assert_eq!(list.map(|l| l[0].status), Ok(ForwardStatus::Active));
+        assert!(second.is_some() && second != first);
+        assert_eq!(page(18080), "server page 18080");
+    }
+
+    #[test]
+    #[ignore = "needs an sshd, see the module comment"]
+    fn e2e_a_wedged_master_blocks_only_its_own_host() {
+        let control = ssh::control_args();
+        let other = env_alias("TERAX_E2E_HOST_B");
+        let a = Connection::open(&control, None, "sleep 600");
+        let b = Connection::open_to(&other, &control, None, "sleep 600");
+        let _p = ServerPage::start(18080);
+        let _q = ServerPage::start(18090);
+        let registry = Arc::new(Registry::new(control.clone()));
+        registry.forward(&a.host, 18080).unwrap();
+        registry.forward(&other, 18090).unwrap();
+        let wedged = a.pid().expect("master pid");
+        assert!(b.pid().is_some_and(|pid| pid != wedged));
+        let signal = |sig: &str| {
+            Command::new("kill")
+                .args([sig, &wedged.to_string()])
+                .status()
+                .expect("kill");
+        };
+        signal("-STOP");
+        let started = Instant::now();
+        let slow = {
+            let registry = Arc::clone(&registry);
+            let host = a.host.clone();
+            std::thread::spawn(move || {
+                let list = registry.list(&host);
+                (list, started.elapsed())
+            })
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        let quick_start = Instant::now();
+        let quick = registry.list(&other);
+        let quick_took = quick_start.elapsed();
+        let (slow_list, slow_took) = slow.join().unwrap();
+        signal("-CONT");
+        println!(
+            "E2E master {wedged} stopped: list({}) -> {slow_list:?} after {slow_took:?}; list({other}) -> {quick:?} after {quick_took:?}",
+            a.host
+        );
+        assert!(quick_took < Duration::from_secs(3));
+        assert_eq!(quick.map(|l| l[0].status), Ok(ForwardStatus::Active));
+        assert!(slow_took < MUX_TIMEOUT + Duration::from_secs(3));
+        assert_eq!(slow_list.map(|l| l[0].status), Ok(ForwardStatus::Disconnected));
     }
 }
