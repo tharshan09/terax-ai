@@ -301,9 +301,11 @@ mod image_tests {
         let registry = crate::modules::workspace::WorkspaceRegistry::default();
         let checked = crate::modules::fs::copy::check_source(path, &registry);
         let guard = crate::modules::fs::guard::check_read_str(&first);
+        let strict = crate::modules::fs::copy::secret_source(path);
         cleanup();
         assert!(checked.is_ok(), "the copy guard refused {first}");
         assert!(guard.is_ok(), "the secret deny-list refused {first}");
+        assert_eq!(strict, Ok(()), "the terminal upload refused {first}");
     }
 
     #[test]

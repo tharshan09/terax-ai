@@ -94,6 +94,7 @@ describe("uploadDroppedFiles", () => {
       destDir: DIR,
       workspace: DEVBOX,
       renameOnConflict: true,
+      refuseSecrets: true,
     });
     copied.resolve({
       created: [`${DIR}/shot copy.png`, `${DIR}/b.pdf`],
@@ -175,6 +176,47 @@ describe("uploadDroppedFiles", () => {
       "Upload failed: b.png: Permission denied",
       { description: "Not uploaded: b.png" },
     );
+  });
+
+  it("always asks fs_copy to refuse secret paths, for drops and clipboard images", async () => {
+    panes.set(14, DEVBOX);
+    invoke.mockImplementation(
+      async (cmd: string, args: Record<string, unknown>) => {
+        if (cmd === "fs_clipboard_image") return `/tmp/terax/${args.name}`;
+        if (cmd === "fs_stat") return { size: 1, kind: "file", mtime: 0 };
+        if (cmd === "ssh_prepare_upload_dir") return DIR;
+        if (cmd === "fs_copy") return { created: [], failed: [] };
+        throw new Error(`unexpected ${cmd}`);
+      },
+    );
+    await uploadDroppedFiles(14, DEVBOX, ["/Users/me/a.png"]);
+    await uploadClipboardImage(14, DEVBOX);
+    await uploadDroppedFiles(14, DEVBOX, ["/Users/me/.env", "/Users/me/b"]);
+    await vi.waitFor(() => expect(calls("fs_copy")).toHaveLength(3));
+    for (const [, args] of calls("fs_copy"))
+      expect(args).toMatchObject({ refuseSecrets: true });
+  });
+
+  it("names a refused secret file in the toast and pastes only the rest", async () => {
+    panes.set(15, DEVBOX);
+    const reason =
+      'secret paths are never uploaded; ".env" matches a sensitive-file pattern';
+    serve(
+      {
+        "/Users/me/.env": { size: 1, kind: "file" },
+        "/Users/me/a.png": { size: 1, kind: "file" },
+      },
+      () => ({
+        created: [`${DIR}/a.png`],
+        failed: [{ source: "/Users/me/.env", message: reason }],
+      }),
+    );
+    await uploadDroppedFiles(15, DEVBOX, ["/Users/me/.env", "/Users/me/a.png"]);
+    await vi.waitFor(() => expect(pending(15)).toBe(0));
+    expect(paste.mock.calls).toEqual([[15, `${DIR}/a.png `]]);
+    expect(toast.error).toHaveBeenCalledWith(`Upload failed: .env: ${reason}`, {
+      description: "Not uploaded: .env",
+    });
   });
 
   it("reports a failing upload folder and pastes nothing", async () => {
@@ -299,6 +341,7 @@ describe("uploadClipboardImage", () => {
       destDir: DIR,
       workspace: DEVBOX,
       renameOnConflict: true,
+      refuseSecrets: true,
     });
     expect(paste).toHaveBeenCalledWith(
       30,

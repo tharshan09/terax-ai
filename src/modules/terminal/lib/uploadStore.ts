@@ -84,6 +84,7 @@ async function transfer(
       destDir,
       workspace: task.env,
       renameOnConflict: true,
+      refuseSecrets: true,
     });
     return uploadOutcome(result, destDir, paneOpen(leafId));
   } catch (err) {

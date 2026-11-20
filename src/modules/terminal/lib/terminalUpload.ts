@@ -143,6 +143,17 @@ export type UploadOutcome = {
 
 const NOTHING: UploadOutcome = { paste: null, toast: null };
 
+const CONNECTION_LOST = "connection to the server was lost";
+const OUT_OF_MEMORY =
+  "the server ran out of memory (large files need about four times their size in free memory)";
+
+// The backend texts stay as they are for other callers; the toast says what they mean.
+export function uploadFailureText(message: string): string {
+  if (message === "ssh command failed") return CONNECTION_LOST;
+  if (/exited with status 137\b/.test(message)) return OUT_OF_MEMORY;
+  return message;
+}
+
 function failureToast(result: CopyResult): UploadToast | null {
   const reason = copyFailureReason(result, basename);
   if (reason === null) return null;
@@ -163,12 +174,16 @@ export function uploadOutcome(
   if (!paneOpen) return NOTHING;
   const stray = result.created.filter((p) => !isInUploadDir(p, uploadDir));
   const failed = [
-    ...result.failed,
+    ...result.failed.map((f) => ({
+      ...f,
+      message: uploadFailureText(f.message),
+    })),
     ...stray.map((source) => ({ source, message: OUTSIDE_UPLOAD_DIR })),
   ];
+  const aborted = result.aborted && uploadFailureText(result.aborted);
   return {
     paste: uploadPasteText(result.created, uploadDir),
-    toast: failureToast({ ...result, failed }),
+    toast: failureToast({ ...result, failed, aborted }),
   };
 }
 
@@ -177,5 +192,8 @@ export function uploadErrorOutcome(
   paneOpen: boolean,
 ): UploadOutcome {
   if (!paneOpen) return NOTHING;
-  return { paste: null, toast: { title: `Upload failed: ${String(error)}` } };
+  return {
+    paste: null,
+    toast: { title: `Upload failed: ${uploadFailureText(String(error))}` },
+  };
 }

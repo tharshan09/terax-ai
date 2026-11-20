@@ -14,6 +14,7 @@ import {
   selectUploads,
   UPLOAD_LIMIT_BYTES,
   uploadErrorOutcome,
+  uploadFailureText,
   uploadHint,
   uploadOutcome,
   uploadPasteText,
@@ -260,10 +261,92 @@ describe("uploadOutcome", () => {
     });
   });
 
+  it("names a refused secret file with its reason and pastes nothing for it", () => {
+    const reason =
+      'secret paths are never uploaded; ".env" matches a sensitive-file pattern';
+    expect(
+      uploadOutcome(
+        {
+          created: ["/home/u/.terax/uploads/a.png"],
+          failed: [{ source: "/Users/me/app/.env", message: reason }],
+        },
+        DIR,
+        true,
+      ),
+    ).toEqual({
+      paste: "/home/u/.terax/uploads/a.png ",
+      toast: {
+        title: `Upload failed: .env: ${reason}`,
+        description: "Not uploaded: .env",
+      },
+    });
+  });
+
+  it("says what a lost connection or a killed helper means", () => {
+    const lost = uploadOutcome(
+      {
+        created: [],
+        failed: [{ source: "/Users/me/b.png", message: "ssh command failed" }],
+        aborted: "ssh command failed",
+      },
+      DIR,
+      true,
+    );
+    expect(lost.toast?.title).toBe(
+      "Upload failed: connection to the server was lost",
+    );
+    const killed = uploadOutcome(
+      {
+        created: [],
+        failed: [
+          {
+            source: "/Users/me/big.mov",
+            message: "remote helper exited with status 137",
+          },
+        ],
+      },
+      DIR,
+      true,
+    );
+    expect(killed.toast?.title).toBe(
+      "Upload failed: big.mov: the server ran out of memory (large files need about four times their size in free memory)",
+    );
+    expect(uploadErrorOutcome("ssh command failed", true).toast?.title).toBe(
+      "Upload failed: connection to the server was lost",
+    );
+  });
+
   it("reports a failed upload as a whole with its reason", () => {
     expect(uploadErrorOutcome("Permission denied", true)).toEqual({
       paste: null,
       toast: { title: "Upload failed: Permission denied" },
     });
+  });
+});
+
+describe("uploadFailureText", () => {
+  it("translates a lost connection and an out-of-memory kill", () => {
+    expect(uploadFailureText("ssh command failed")).toBe(
+      "connection to the server was lost",
+    );
+    const oom =
+      "the server ran out of memory (large files need about four times their size in free memory)";
+    expect(uploadFailureText("remote helper exited with status 137")).toBe(oom);
+    expect(
+      uploadFailureText(
+        "remote helper exited with status 137 (stderr: Killed)",
+      ),
+    ).toBe(oom);
+  });
+
+  it("passes every other message through unchanged", () => {
+    for (const message of [
+      "ssh: Connection refused",
+      "ssh command failed (stderr: x)",
+      "remote helper exited with status 143",
+      "Permission denied",
+      "",
+    ])
+      expect(uploadFailureText(message)).toBe(message);
   });
 });
