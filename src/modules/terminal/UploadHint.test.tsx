@@ -1,17 +1,12 @@
 // @vitest-environment jsdom
 import { cleanup, render } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   EMPTY_UPLOAD_QUEUES,
   enqueueUpload,
 } from "@/modules/terminal/lib/terminalUpload";
 import { useTerminalUploadStore } from "@/modules/terminal/lib/uploadStore";
-
-vi.mock("@/modules/settings/preferences", () => ({
-  usePreferencesStore: () => undefined,
-}));
-
-import { UploadHint } from "@/modules/terminal/PaneTreeView";
+import { UploadHint } from "@/modules/terminal/UploadHint";
 
 afterEach(() => {
   cleanup();

@@ -3,7 +3,6 @@ import {
   ResizablePanel,
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
-import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { WorkspaceEnv } from "@/modules/workspace";
@@ -16,8 +15,6 @@ import type { SearchAddon } from "@xterm/addon-search";
 import { Fragment, memo, type PointerEvent as ReactPointerEvent } from "react";
 import { useTerminalDropStore } from "./lib/dropStore";
 import { usePaneDndStore } from "./lib/paneDndStore";
-import { pendingUploadCount, uploadHint } from "./lib/terminalUpload";
-import { useTerminalUploadStore } from "./lib/uploadStore";
 import { CENTER_INSET } from "./lib/useTerminalPaneDnd";
 import {
   type DropEdge,
@@ -26,6 +23,7 @@ import {
   type PaneNode,
 } from "./lib/panes";
 import { TerminalPane, type TerminalPaneHandle } from "./TerminalPane";
+import { UploadHint } from "./UploadHint";
 
 type LeafBundle = {
   setRef: (h: TerminalPaneHandle | null) => void;
@@ -229,24 +227,6 @@ function DropOverlay({ leafId }: { leafId: number }) {
   return (
     <div className="pointer-events-none absolute inset-2 grid place-items-center rounded-lg border border-primary/45 bg-background/70 text-xs font-medium text-foreground shadow-lg backdrop-blur-sm">
       Drop file path here
-    </div>
-  );
-}
-
-export function UploadHint({ leafId }: { leafId: number }) {
-  const pending = useTerminalUploadStore((s) =>
-    pendingUploadCount(s.queues, leafId),
-  );
-  const text = uploadHint(pending);
-  if (text === null) return null;
-  return (
-    <div
-      data-testid="terminal-upload-hint"
-      role="status"
-      className="pointer-events-none absolute right-2 bottom-2 z-20 flex select-none items-center gap-1.5 rounded-md border border-border/50 bg-background/80 px-2 py-1 text-[11px] font-medium text-muted-foreground shadow-sm backdrop-blur-sm"
-    >
-      <Spinner role="presentation" aria-hidden className="size-3" />
-      {text}
     </div>
   );
 }
