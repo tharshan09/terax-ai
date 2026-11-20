@@ -1,6 +1,6 @@
 import { ensureMonoFontsLoaded } from "@/lib/fonts";
 import { isWindowHidden, subscribeWindowHidden } from "@/lib/windowVisibility";
-import { feedPaneOutput, paneClosed, terminalEnded } from "@/modules/ports";
+import { paneClosed } from "@/modules/ports";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { invoke } from "@tauri-apps/api/core";
 import type { SearchAddon } from "@xterm/addon-search";
@@ -23,6 +23,7 @@ import {
   registerPromptTracker,
 } from "./osc-handlers";
 import { paneWorkspace, spawnEnvFor } from "./paneEnv";
+import { paneExited, routePaneBytes } from "./paneOutput";
 import { openPty, type PtySession } from "./pty-bridge";
 import { visibilityHint } from "./visibilityHint";
 import { currentWorkspaceEnv, type WorkspaceEnv } from "@/modules/workspace";
@@ -555,10 +556,8 @@ function deliverPtyBytes(leafId: number, bytes: Uint8Array): void {
   if (!s) return;
   // Retained slots keep parsing live (render paused); the ring is only for
   // leaves whose buffer was stolen or never bound.
-  const slot = getLiveSlotForLeaf(leafId);
-  if (slot) slot.term.write(bytes);
-  else s.dormantRing.push(bytes);
-  feedPaneOutput(leafId, paneWorkspace(s), bytes);
+  const grid = getLiveSlotForLeaf(leafId)?.term ?? null;
+  routePaneBytes(leafId, paneWorkspace(s), grid, s.dormantRing, bytes);
 }
 
 // Push this leaf's on-screen state to its PTY so the Rust flusher coalesces
@@ -649,7 +648,7 @@ async function openPtyForSession(
     {
       onData: (bytes) => deliverPtyBytes(leafId, bytes),
       onExit: (code) => {
-        terminalEnded(env);
+        paneExited(env);
         s.shellExited = true;
         s.pty = null;
         s.pendingInput = "";

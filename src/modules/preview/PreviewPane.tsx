@@ -184,8 +184,8 @@ function EmptyState() {
             <>
               Type a URL above, or open the <span className={CHIP}>Ports</span>{" "}
               dropdown to jump straight to your running dev server. Public sites
-              often block embedding — open them in your browser via the link
-              icon if you see a blank page.
+              often block embedding. If you see a blank page, open it in your
+              browser via the link icon.
             </>
           )}
         </p>

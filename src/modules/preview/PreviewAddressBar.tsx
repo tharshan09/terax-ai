@@ -247,7 +247,8 @@ export const PreviewAddressBar = forwardRef<PreviewAddressBarHandle, Props>(
   },
 );
 
-// UI-10 in an SSH workspace: the server's active forwards instead of presets.
+// In an SSH workspace the presets would probe this Mac, not the server: list
+// the server's active forwards instead.
 function ForwardedPortsContent({
   scope,
   onPick,
@@ -300,7 +301,7 @@ async function probeUrl(url: string): Promise<boolean> {
   }
 }
 
-function normalizeUrl(raw: string): string | null {
+export function normalizeUrl(raw: string): string | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
   if (/^https?:\/\//i.test(trimmed)) return trimmed;
