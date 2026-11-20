@@ -107,10 +107,15 @@ fn stage_clipboard_image(png: &[u8], name: &str) -> Result<String, String> {
     use std::io::Write;
     check_image_name(name)?;
     let failed = |e: std::io::Error| format!("could not stage the clipboard image: {e}");
-    let dir = tempfile::Builder::new()
-        .prefix("terax-clipboard-")
-        .tempdir()
-        .map_err(failed)?;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("terax-clipboard-");
+    // tempfile creates folders 0777 & !umask unless told otherwise.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let dir = builder.tempdir().map_err(failed)?;
     // Canonical, so the copy guard sees no link on the way (macOS /var).
     let path = std::fs::canonicalize(dir.path()).map_err(failed)?.join(name);
     let mut file = std::fs::File::create_new(&path).map_err(failed)?;
