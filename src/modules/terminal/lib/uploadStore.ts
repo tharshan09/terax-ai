@@ -41,10 +41,10 @@ export const useTerminalUploadStore = create<UploadState>(() => ({
   queues: EMPTY_UPLOAD_QUEUES,
 }));
 
-// `files` sizes the hint; `sources` settles to the local paths to send.
-type UploadRequest = { files: string[]; sources: Promise<string[]> };
+// `files` sizes the hint; `sources` are the local paths to send.
+type UploadRequest = { files: string[]; sources: string[] };
 
-type UploadTask = { env: SshEnv; sources: Promise<string[]> };
+type UploadTask = { env: SshEnv; sources: string[] };
 
 const NOTHING: UploadOutcome = { paste: null, toast: null };
 
@@ -74,19 +74,18 @@ async function transfer(
   task: UploadTask,
 ): Promise<UploadOutcome> {
   try {
-    const sources = await task.sources;
-    if (sources.length === 0 || !paneOpen(leafId)) return NOTHING;
+    if (!paneOpen(leafId)) return NOTHING;
     const destDir = await invoke<string>("ssh_prepare_upload_dir", {
       host: task.env.host,
     });
     if (!paneOpen(leafId)) return NOTHING;
     const result = await invoke<CopyResult>("fs_copy", {
-      sources,
+      sources: task.sources,
       destDir,
       workspace: task.env,
       renameOnConflict: true,
     });
-    return uploadOutcome(result, paneOpen(leafId));
+    return uploadOutcome(result, destDir, paneOpen(leafId));
   } catch (err) {
     return uploadErrorOutcome(err, paneOpen(leafId));
   }
@@ -151,19 +150,30 @@ function queueInOrder(
   return turn;
 }
 
+// Joins the queue only once an image is staged, so an empty clipboard never
+// shows the hint.
+async function prepareClipboardImage(
+  leafId: number,
+  name: string,
+): Promise<UploadRequest | null> {
+  let staged: string | null;
+  try {
+    staged = await invoke<string | null>("fs_clipboard_image", { name });
+  } catch (err) {
+    deliver(leafId, uploadErrorOutcome(err, paneOpen(leafId)));
+    return null;
+  }
+  if (staged === null) return null;
+  return { files: [name], sources: [staged] };
+}
+
 export function uploadClipboardImage(
   leafId: number,
   env: SshEnv,
   now: Date = new Date(),
 ): Promise<void> {
   const name = clipboardImageName(now);
-  const sources = invoke<string | null>("fs_clipboard_image", { name }).then(
-    (path) => (path === null ? [] : [path]),
-  );
-  // Awaited later by the queue; this only keeps an early failure from
-  // surfacing as an unhandled rejection meanwhile.
-  sources.catch(() => {});
-  return queueInOrder(leafId, env, Promise.resolve({ files: [name], sources }));
+  return queueInOrder(leafId, env, prepareClipboardImage(leafId, name));
 }
 
 type StatResult = { size: number; kind: "file" | "dir" | "symlink" };
@@ -190,7 +200,7 @@ async function prepareDrop(
   const { upload, notices } = selectUploads(items);
   for (const notice of notices) toast.error(notice);
   if (upload.length === 0) return null;
-  return { files: upload, sources: Promise.resolve(upload) };
+  return { files: upload, sources: upload };
 }
 
 export function uploadDroppedFiles(

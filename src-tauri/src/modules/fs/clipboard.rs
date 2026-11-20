@@ -34,6 +34,11 @@ pub async fn fs_clipboard_image(name: String) -> Result<Option<String>, String> 
     {
         check_image_name(&name)?;
         let read = tauri::async_runtime::spawn_blocking(move || {
+            sweep_staged_images(
+                &std::env::temp_dir(),
+                std::time::SystemTime::now(),
+                STAGED_IMAGE_MAX_AGE,
+            );
             let png = objc2::rc::autoreleasepool(|_| {
                 read_png(&objc2_app_kit::NSPasteboard::generalPasteboard())
             });
@@ -63,25 +68,65 @@ async fn receive_read<T, E>(
     }
 }
 
-/// Screenshots carry PNG; apps that only offer TIFF are converted.
+#[derive(Debug, PartialEq)]
+enum ImageFlavor {
+    Png,
+    Tiff,
+}
+
+/// Screenshots carry PNG; apps that only offer TIFF are converted. A Finder
+/// file copy also carries the file icon as an image, so file URLs mean no image.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn image_flavor(holds_file_urls: bool, has_png: bool, has_tiff: bool) -> Option<ImageFlavor> {
+    if holds_file_urls {
+        None
+    } else if has_png {
+        Some(ImageFlavor::Png)
+    } else if has_tiff {
+        Some(ImageFlavor::Tiff)
+    } else {
+        None
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn read_png(pasteboard: &objc2_app_kit::NSPasteboard) -> Option<Vec<u8>> {
     use objc2_app_kit::{
         NSBitmapImageFileType, NSBitmapImageRep, NSPasteboardTypePNG, NSPasteboardTypeTIFF,
     };
-    if let Some(png) = pasteboard.dataForType(unsafe { NSPasteboardTypePNG }) {
-        return Some(png.to_vec());
+    let holds_files = holds_file_urls(pasteboard);
+    let png = if holds_files {
+        None
+    } else {
+        pasteboard.dataForType(unsafe { NSPasteboardTypePNG })
+    };
+    let tiff = if holds_files || png.is_some() {
+        None
+    } else {
+        pasteboard.dataForType(unsafe { NSPasteboardTypeTIFF })
+    };
+    match image_flavor(holds_files, png.is_some(), tiff.is_some())? {
+        ImageFlavor::Png => png.map(|png| png.to_vec()),
+        ImageFlavor::Tiff => {
+            let image = NSBitmapImageRep::imageRepWithData(&tiff?)?;
+            let properties = objc2_foundation::NSDictionary::<
+                objc2_foundation::NSString,
+                objc2::runtime::AnyObject,
+            >::new();
+            let png = unsafe {
+                image.representationUsingType_properties(NSBitmapImageFileType::PNG, &properties)
+            }?;
+            Some(png.to_vec())
+        }
     }
-    let tiff = pasteboard.dataForType(unsafe { NSPasteboardTypeTIFF })?;
-    let image = NSBitmapImageRep::imageRepWithData(&tiff)?;
-    let properties = objc2_foundation::NSDictionary::<
-        objc2_foundation::NSString,
-        objc2::runtime::AnyObject,
-    >::new();
-    let png = unsafe {
-        image.representationUsingType_properties(NSBitmapImageFileType::PNG, &properties)
-    }?;
-    Some(png.to_vec())
+}
+
+#[cfg(target_os = "macos")]
+fn holds_file_urls(pasteboard: &objc2_app_kit::NSPasteboard) -> bool {
+    let file_type = unsafe { objc2_app_kit::NSPasteboardTypeFileURL };
+    pasteboard
+        .pasteboardItems()
+        .is_some_and(|items| items.iter().any(|item| item.stringForType(file_type).is_some()))
 }
 
 const MAX_IMAGE_NAME_BYTES: usize = 255;
@@ -108,7 +153,7 @@ fn stage_clipboard_image(png: &[u8], name: &str) -> Result<String, String> {
     check_image_name(name)?;
     let failed = |e: std::io::Error| format!("could not stage the clipboard image: {e}");
     let mut builder = tempfile::Builder::new();
-    builder.prefix("terax-clipboard-");
+    builder.prefix(STAGED_IMAGE_PREFIX);
     // tempfile creates folders 0777 & !umask unless told otherwise.
     #[cfg(unix)]
     {
@@ -125,6 +170,46 @@ fn stage_clipboard_image(png: &[u8], name: &str) -> Result<String, String> {
     // Kept only once the file is whole; the copy reads it after this returns.
     let _ = dir.keep();
     Ok(super::to_canon(path))
+}
+
+const STAGED_IMAGE_PREFIX: &str = "terax-clipboard-";
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const STAGED_IMAGE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Staged copies are only read by the upload right after staging, so a day
+/// old one is left over. Only real folders of ours directly in `temp`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn sweep_staged_images(
+    temp: &std::path::Path,
+    now: std::time::SystemTime,
+    max_age: std::time::Duration,
+) {
+    let Ok(entries) = std::fs::read_dir(temp) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let ours = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(STAGED_IMAGE_PREFIX));
+        if !ours {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let stale = meta.is_dir()
+            && meta
+                .modified()
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age > max_age);
+        if stale {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
 }
 
 /// Finder writes file-reference URLs (`file:///.file/id=…`).
@@ -239,6 +324,77 @@ mod image_tests {
         }
         assert!(check_image_name(&format!("{}.png", "a".repeat(251))).is_ok());
         assert!(check_image_name(&format!("{}.png", "a".repeat(252))).is_err());
+    }
+
+    const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+    // Opening a folder as a file to stamp its mtime is POSIX-only.
+    #[cfg(unix)]
+    fn age(path: &std::path::Path, by: std::time::Duration) {
+        let past = std::time::SystemTime::now() - by;
+        std::fs::File::open(path).unwrap().set_modified(past).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_sweep_removes_only_day_old_terax_clipboard_folders() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let old = root.join("terax-clipboard-old");
+        let fresh = root.join("terax-clipboard-fresh");
+        let foreign = root.join("other-clipboard-old");
+        let file = root.join("terax-clipboard-file.png");
+        for dir in [&old, &fresh, &foreign] {
+            std::fs::create_dir(dir).unwrap();
+            std::fs::write(dir.join(NAME), b"x").unwrap();
+        }
+        std::fs::write(&file, b"x").unwrap();
+        for stale in [&old, &foreign, &file] {
+            age(stale, 2 * DAY);
+        }
+
+        sweep_staged_images(root, std::time::SystemTime::now(), DAY);
+
+        assert!(!old.exists(), "a day-old staging folder is removed");
+        assert!(fresh.join(NAME).exists(), "a fresh staging folder stays");
+        assert!(foreign.join(NAME).exists(), "another prefix stays");
+        assert!(file.exists(), "only folders are swept");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_sweep_never_follows_a_linked_staging_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let target = elsewhere.path().join("terax-clipboard-target");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join(NAME), b"keep").unwrap();
+        age(&target, 2 * DAY);
+        let link = temp.path().join("terax-clipboard-link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let later = std::time::SystemTime::now() + 30 * DAY;
+        sweep_staged_images(temp.path(), later, DAY);
+
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(target.join(NAME)).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn the_sweep_ignores_a_missing_temp_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing");
+        sweep_staged_images(&missing, std::time::SystemTime::now(), DAY);
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn file_urls_on_the_clipboard_mean_no_image() {
+        assert_eq!(image_flavor(true, true, true), None);
+        assert_eq!(image_flavor(true, false, false), None);
+        assert_eq!(image_flavor(false, true, true), Some(ImageFlavor::Png));
+        assert_eq!(image_flavor(false, false, true), Some(ImageFlavor::Tiff));
+        assert_eq!(image_flavor(false, false, false), None);
     }
 
     #[cfg(not(target_os = "macos"))]

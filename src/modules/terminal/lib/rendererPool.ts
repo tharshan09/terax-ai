@@ -18,6 +18,7 @@ import {
   terminalLineNavigationSequence,
   terminalWordNavigationSequence,
 } from "./keymap";
+import { createPasteBacklog, type PasteSlot } from "./pasteBacklog";
 import { pendingPtyResize } from "./rendererResize";
 import { findPathLinks } from "./terminalPathLinks";
 import { activateUnicode11 } from "./unicodeWidth";
@@ -193,30 +194,23 @@ export function pasteIntoLeaf(leafId: number, text: string): boolean {
   return true;
 }
 
-const pendingPastes = new Map<number, string>();
+const pasteBacklog = createPasteBacklog(
+  (leafId) => Boolean(adapter?.resolveLeaf(leafId)),
+);
 
-function queuePaste(leafId: number, text: string): void {
-  pendingPastes.set(leafId, (pendingPastes.get(leafId) ?? "") + text);
-}
-
-// The empty write settles after any replayed snapshot and ring bytes have
-// parsed, so the paste sees the app's current bracketed-paste mode.
-function flushPendingPaste(slot: Slot, leafId: number): void {
-  const text = pendingPastes.get(leafId);
-  if (text === undefined) return;
-  pendingPastes.delete(leafId);
-  slot.term.write("", () => {
-    if (slot.currentLeafId === leafId) slot.term.paste(text);
-    else if (adapter?.resolveLeaf(leafId)) queuePaste(leafId, text);
-  });
+function pasteSlot(slot: Slot): PasteSlot {
+  return {
+    boundLeafId: () => slot.currentLeafId,
+    afterPendingWrites: (run) => slot.term.write("", run),
+    paste: (text) => slot.term.paste(text),
+  };
 }
 
 // Like pasteIntoLeaf, but a pane without a slot gets the text once it binds
 // one again instead of losing it.
 export function pasteIntoLeafWhenBound(leafId: number, text: string): void {
-  queuePaste(leafId, text);
   const slot = slots.find((s) => s.currentLeafId === leafId);
-  if (slot) flushPendingPaste(slot, leafId);
+  pasteBacklog.add(leafId, text, slot ? pasteSlot(slot) : null);
 }
 
 function getRecycler(): HTMLDivElement {
@@ -693,7 +687,7 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
   }
 
   p.onSearchReady(slot.searchAddon);
-  flushPendingPaste(slot, p.leafId);
+  pasteBacklog.flush(p.leafId, pasteSlot(slot));
 }
 
 function scheduleUnhide(slot: Slot, stale: boolean): void {
@@ -1206,7 +1200,7 @@ export function refreshLeafSlot(leafId: number): void {
 }
 
 export function disposeLeafSlot(leafId: number): void {
-  pendingPastes.delete(leafId);
+  pasteBacklog.drop(leafId);
   const slot = slots.find(
     (s) => s.currentLeafId === leafId || s.retainedLeafId === leafId,
   );

@@ -3,7 +3,6 @@ import { basename } from "@/lib/utils";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import { formatDroppedPaths } from "./quoteShellPath";
 
-export const UPLOAD_DIR = "~/.terax/uploads";
 export const UPLOAD_LIMIT_BYTES = 104_857_600;
 export const FOLDER_NOTICE =
   "Folders can't be uploaded to a terminal. Use the explorer.";
@@ -54,10 +53,24 @@ export function selectUploads(items: DroppedItem[]): UploadSelection {
   return { upload, notices };
 }
 
+// A direct child of the folder ssh_prepare_upload_dir confirmed; anything
+// else is not ours to paste.
+function isInUploadDir(serverPath: string, uploadDir: string): boolean {
+  const prefix = `${uploadDir}/`;
+  if (!uploadDir.startsWith("/") || !serverPath.startsWith(prefix))
+    return false;
+  const name = serverPath.slice(prefix.length);
+  return name !== "" && name !== "." && name !== ".." && !name.includes("/");
+}
+
 // The server is POSIX whatever the client OS; null when nothing landed.
-export function uploadPasteText(serverPaths: string[]): string | null {
-  if (serverPaths.length === 0) return null;
-  return formatDroppedPaths(serverPaths, "posix");
+export function uploadPasteText(
+  serverPaths: string[],
+  uploadDir: string,
+): string | null {
+  const inside = serverPaths.filter((p) => isInUploadDir(p, uploadDir));
+  if (inside.length === 0) return null;
+  return formatDroppedPaths(inside, "posix");
 }
 
 export type UploadJob = { id: number; files: string[] };
@@ -139,15 +152,23 @@ function failureToast(result: CopyResult): UploadToast | null {
   return { title, description: `Not uploaded: ${names}` };
 }
 
+const OUTSIDE_UPLOAD_DIR = "landed outside the upload folder";
+
 // A pane closed meanwhile gets neither a paste nor a toast.
 export function uploadOutcome(
   result: CopyResult,
+  uploadDir: string,
   paneOpen: boolean,
 ): UploadOutcome {
   if (!paneOpen) return NOTHING;
+  const stray = result.created.filter((p) => !isInUploadDir(p, uploadDir));
+  const failed = [
+    ...result.failed,
+    ...stray.map((source) => ({ source, message: OUTSIDE_UPLOAD_DIR })),
+  ];
   return {
-    paste: uploadPasteText(result.created),
-    toast: failureToast(result),
+    paste: uploadPasteText(result.created, uploadDir),
+    toast: failureToast({ ...result, failed }),
   };
 }
 

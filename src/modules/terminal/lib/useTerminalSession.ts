@@ -21,6 +21,7 @@ import {
   registerOsc52ClipboardHandler,
   registerPromptTracker,
 } from "./osc-handlers";
+import { paneWorkspace, spawnEnvFor } from "./paneEnv";
 import { openPty, type PtySession } from "./pty-bridge";
 import { visibilityHint } from "./visibilityHint";
 import { currentWorkspaceEnv, type WorkspaceEnv } from "@/modules/workspace";
@@ -216,11 +217,9 @@ export function leafCwd(leafId: number): string | null {
   return sessions.get(leafId)?.lastCwd ?? null;
 }
 
-// The one source for "is this pane SSH": null once the pane is closed.
+// Source for the upload path only; isSshDisconnect still reads `workspace`.
 export function leafWorkspace(leafId: number): WorkspaceEnv | null {
-  const s = sessions.get(leafId);
-  if (!s || s.disposed) return null;
-  return s.spawnEnv ?? s.workspace ?? null;
+  return paneWorkspace(sessions.get(leafId));
 }
 
 /** Apply a cwd discovered out-of-band (the tmux pane-cwd poll) through the same
@@ -638,7 +637,7 @@ async function openPtyForSession(
 ): Promise<PtySession> {
   const startCols = s.cols > 0 ? s.cols : 80;
   const startRows = s.rows > 0 ? s.rows : 24;
-  const env = s.workspace ?? currentWorkspaceEnv();
+  const env = spawnEnvFor(s.workspace, currentWorkspaceEnv);
   s.spawnEnv = env;
   const pty = await openPty(
     startCols,

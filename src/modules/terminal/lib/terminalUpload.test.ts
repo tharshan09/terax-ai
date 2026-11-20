@@ -78,26 +78,49 @@ describe("selectUploads", () => {
   });
 });
 
+const DIR = "/home/u/.terax/uploads";
+
 describe("uploadPasteText", () => {
   it("quotes server paths POSIX-style even on a Windows client, as one paste", () => {
     expect(
-      uploadPasteText([
-        "/home/u/.terax/uploads/a.png",
-        "/home/u/.terax/uploads/my shot.png",
-      ]),
+      uploadPasteText(
+        ["/home/u/.terax/uploads/a.png", "/home/u/.terax/uploads/my shot.png"],
+        DIR,
+      ),
     ).toBe(
       "/home/u/.terax/uploads/a.png '/home/u/.terax/uploads/my shot.png' ",
     );
   });
 
   it("quotes a backslash, which a POSIX shell would eat", () => {
-    expect(uploadPasteText(["/home/u/.terax/uploads/a\\b.png"])).toBe(
+    expect(uploadPasteText(["/home/u/.terax/uploads/a\\b.png"], DIR)).toBe(
       "'/home/u/.terax/uploads/a\\b.png' ",
     );
   });
 
   it("pastes nothing when no file landed", () => {
-    expect(uploadPasteText([])).toBeNull();
+    expect(uploadPasteText([], DIR)).toBeNull();
+  });
+
+  it("pastes only direct children of the confirmed upload folder", () => {
+    expect(
+      uploadPasteText(
+        [
+          "/etc/passwd",
+          "/home/u/.terax/uploads",
+          "/home/u/.terax/uploads/",
+          "/home/u/.terax/uploads-evil/a.png",
+          "/home/u/.terax/uploads/../x.png",
+          "/home/u/.terax/uploads/sub/a.png",
+          "/home/u/.terax/uploads/..",
+          "/home/u/.terax/uploads/ok.png",
+        ],
+        DIR,
+      ),
+    ).toBe("/home/u/.terax/uploads/ok.png ");
+    expect(
+      uploadPasteText(["~/.terax/uploads/a.png"], "~/.terax/uploads"),
+    ).toBeNull();
   });
 });
 
@@ -160,7 +183,7 @@ describe("uploadOutcome", () => {
   };
 
   it("pastes only what landed and names every failed file", () => {
-    expect(uploadOutcome(partial, true)).toEqual({
+    expect(uploadOutcome(partial, DIR, true)).toEqual({
       paste: "/home/u/.terax/uploads/a.png ",
       toast: {
         title: "Upload failed: b.png: Permission denied",
@@ -172,6 +195,7 @@ describe("uploadOutcome", () => {
   it("names a lost connection before the first failed file", () => {
     const outcome = uploadOutcome(
       { ...partial, aborted: "connection lost" },
+      DIR,
       true,
     );
     expect(outcome.toast?.title).toBe("Upload failed: connection lost");
@@ -184,6 +208,7 @@ describe("uploadOutcome", () => {
           failed: [{ source: "/Users/me/b.png", message: "x" }],
           aborted: "connection lost",
         },
+        DIR,
         true,
       ),
     ).toEqual({
@@ -199,16 +224,39 @@ describe("uploadOutcome", () => {
     expect(
       uploadOutcome(
         { created: ["/home/u/.terax/uploads/a.png"], failed: [] },
+        DIR,
         true,
       ).toast,
     ).toBeNull();
   });
 
   it("gives a pane closed during the upload neither paste nor toast", () => {
-    expect(uploadOutcome(partial, false)).toEqual({ paste: null, toast: null });
+    expect(uploadOutcome(partial, DIR, false)).toEqual({
+      paste: null,
+      toast: null,
+    });
     expect(uploadErrorOutcome("Permission denied", false)).toEqual({
       paste: null,
       toast: null,
+    });
+  });
+
+  it("treats a created path outside the upload folder as failed", () => {
+    expect(
+      uploadOutcome(
+        {
+          created: ["/home/u/.terax/uploads/a.png", "/home/u/elsewhere/b.png"],
+          failed: [],
+        },
+        DIR,
+        true,
+      ),
+    ).toEqual({
+      paste: "/home/u/.terax/uploads/a.png ",
+      toast: {
+        title: "Upload failed: b.png: landed outside the upload folder",
+        description: "Not uploaded: b.png",
+      },
     });
   });
 

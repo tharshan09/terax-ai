@@ -306,13 +306,87 @@ describe("uploadClipboardImage", () => {
     );
   });
 
-  it("does nothing visible when the clipboard holds no image", async () => {
+  it("shows nothing while the clipboard is read and nothing when it holds no image", async () => {
     panes.set(31, DEVBOX);
-    invoke.mockResolvedValue(null);
-    await uploadClipboardImage(31, DEVBOX);
-    await vi.waitFor(() => expect(pending(31)).toBe(0));
+    const read = deferred<string | null>();
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "fs_clipboard_image") return read.promise;
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const done = uploadClipboardImage(31, DEVBOX);
+    await vi.waitFor(() => expect(calls("fs_clipboard_image")).toHaveLength(1));
+    expect(pending(31)).toBe(0);
+    read.resolve(null);
+    await done;
+    expect(pending(31)).toBe(0);
     expect(calls("fs_copy")).toHaveLength(0);
     expect(paste).not.toHaveBeenCalled();
     expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("reports a failed clipboard read without ever showing the hint", async () => {
+    panes.set(32, DEVBOX);
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "fs_clipboard_image")
+        throw "clipboard read timed out or was cancelled";
+      throw new Error(`unexpected ${cmd}`);
+    });
+    await uploadClipboardImage(32, DEVBOX);
+    expect(pending(32)).toBe(0);
+    expect(paste).not.toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalledWith(
+      "Upload failed: clipboard read timed out or was cancelled",
+      { description: undefined },
+    );
+  });
+
+  it("keeps trigger order when a drop answers before an earlier image read", async () => {
+    panes.set(33, DEVBOX);
+    const read = deferred<string | null>();
+    invoke.mockImplementation(
+      async (cmd: string, args: Record<string, unknown>) => {
+        if (cmd === "fs_clipboard_image") return read.promise;
+        if (cmd === "fs_stat") return { size: 1, kind: "file", mtime: 0 };
+        if (cmd === "ssh_prepare_upload_dir") return DIR;
+        if (cmd === "fs_copy")
+          return {
+            created: (args.sources as string[]).map(
+              (s) => `${DIR}/${s.split("/").pop()}`,
+            ),
+            failed: [],
+          };
+        throw new Error(`unexpected ${cmd}`);
+      },
+    );
+    const image = uploadClipboardImage(
+      33,
+      DEVBOX,
+      new Date(2026, 10, 20, 9, 5, 7),
+    );
+    const drop = uploadDroppedFiles(33, DEVBOX, ["/Users/me/b.pdf"]);
+    await vi.waitFor(() => expect(calls("fs_stat")).toHaveLength(1));
+    expect(pending(33)).toBe(0);
+    read.resolve("/tmp/terax/clipboard-20261120-090507.png");
+    await Promise.all([image, drop]);
+    await vi.waitFor(() => expect(pending(33)).toBe(0));
+    expect(paste.mock.calls).toEqual([
+      [33, `${DIR}/clipboard-20261120-090507.png `],
+      [33, `${DIR}/b.pdf `],
+    ]);
+  });
+
+  it("pastes nothing that landed outside the confirmed upload folder", async () => {
+    panes.set(34, DEVBOX);
+    serve({ "/Users/me/a.png": { size: 1, kind: "file" } }, () => ({
+      created: ["/home/u/a.png"],
+      failed: [],
+    }));
+    await uploadDroppedFiles(34, DEVBOX, ["/Users/me/a.png"]);
+    await vi.waitFor(() => expect(pending(34)).toBe(0));
+    expect(paste).not.toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalledWith(
+      "Upload failed: a.png: landed outside the upload folder",
+      { description: "Not uploaded: a.png" },
+    );
   });
 });
