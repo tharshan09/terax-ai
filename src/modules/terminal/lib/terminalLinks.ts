@@ -1,8 +1,10 @@
 import {
   findLoopbackAddresses,
   type LoopbackAddress,
-  parseLoopbackAddress,
+  parseLoopbackLink,
 } from "@/modules/ports/lib/portDetect";
+import { portsAvailable } from "@/modules/ports/lib/portsList";
+import type { WorkspaceEnv } from "@/modules/workspace";
 import { findPathLinks, type PathLink } from "./terminalPathLinks";
 
 // The default of @xterm/addon-web-links, passed to it explicitly so the bare
@@ -51,13 +53,29 @@ export function pathLinksBesideAddresses(
 
 export type LinkTarget = "forward" | "browser";
 
-// FL-8: a loopback address clicked in a forwardable pane is forwarded and
-// previewed; every other link opens in the system browser as it always did.
+// A loopback address clicked in a forwardable pane is the server's, so it is
+// forwarded and previewed; every other link opens in the system browser.
 export function linkClickTarget(
   text: string,
   forwardable: boolean,
 ): LinkTarget {
-  return forwardable && parseLoopbackAddress(text) !== null
+  return forwardable && parseLoopbackLink(text) !== null
     ? "forward"
     : "browser";
+}
+
+export type LinkOpeners = {
+  forward: (env: WorkspaceEnv | null, text: string) => unknown;
+  browser: (text: string) => void;
+};
+
+// The one click path for links in terminal output, for every provider.
+export function activateTerminalLink(
+  text: string,
+  env: WorkspaceEnv | null,
+  open: LinkOpeners,
+): void {
+  if (linkClickTarget(text, portsAvailable(env)) === "forward")
+    void open.forward(env, text);
+  else open.browser(text);
 }

@@ -23,8 +23,9 @@ import {
 import { createPasteBacklog, type PasteSlot } from "./pasteBacklog";
 import { pendingPtyResize } from "./rendererResize";
 import {
+  activateTerminalLink,
   bareLoopbackLinks,
-  linkClickTarget,
+  type LinkOpeners,
   pathLinksBesideAddresses,
   WEB_URL_REGEX,
 } from "./terminalLinks";
@@ -278,12 +279,15 @@ function slotWorkspace(slot: Slot): WorkspaceEnv | null {
   return leafId === null ? null : (adapter?.leafWorkspace(leafId) ?? null);
 }
 
-// The one click path for links in terminal output (Slop #2).
+const LINK_OPENERS: LinkOpeners = {
+  forward: openLoopbackAddress,
+  browser: (text) => {
+    openUrl(text).catch(console.error);
+  },
+};
+
 function activateLink(slot: Slot, text: string): void {
-  const env = slotWorkspace(slot);
-  if (linkClickTarget(text, portsAvailable(env)) === "forward")
-    void openLoopbackAddress(env, text);
-  else openUrl(text).catch(console.error);
+  activateTerminalLink(text, slotWorkspace(slot), LINK_OPENERS);
 }
 
 function createSlot(): Slot {
