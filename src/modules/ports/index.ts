@@ -15,6 +15,8 @@ export {
   type RowAction,
   rowViews,
 } from "./lib/ports";
+export { openPortsList, portsAvailable } from "./lib/portsList";
+export { PortsStatus } from "./PortsStatus";
 export {
   acceptOffer,
   configurePorts,

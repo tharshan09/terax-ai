@@ -4,6 +4,7 @@ import {
   AiOpenButton,
   AiStatusBarControls,
 } from "@/modules/ai/components/AiStatusBarControls";
+import { PortsStatus } from "@/modules/ports";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { SourceControlSummary } from "@/modules/source-control";
 import type { WorkspaceEnv } from "@/modules/workspace";
@@ -86,6 +87,7 @@ export function StatusBar({
         })}
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
+        <PortsStatus />
         {restartSafeSession ? <RestartSafeBadge /> : null}
         <StatusbarConfig />
         <AgentStatusPill onClick={onOpenMini} />
