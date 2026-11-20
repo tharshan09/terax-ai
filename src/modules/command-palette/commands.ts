@@ -12,6 +12,7 @@ import {
   LayoutTwoColumnIcon,
   LayoutTwoRowIcon,
   PaintBoardIcon,
+  Plug01Icon,
   Search01Icon,
   Settings01Icon,
   SidebarLeftIcon,
@@ -43,6 +44,11 @@ export type CommandPaletteActionContext = {
   openNewPrivate: () => void;
   openNewEditor: () => void;
   openNewPreview: () => void;
+  /** SSH workspace of the workspace store; local, WSL and Windows have none. */
+  canForwardPorts: boolean;
+  /** Zen mode hides the status bar the ports list opens from. */
+  statusBarHidden: boolean;
+  openForwardPort: () => void;
   openTmuxSwitcher: () => void;
   openGitGraph: () => void;
   toggleSourceControl: () => void;
@@ -203,6 +209,21 @@ export function createCommandItems(
       shortcutId: "tab.newPreview",
       run: ctx.openNewPreview,
     },
+    ...(ctx.canForwardPorts
+      ? [
+          {
+            id: "ports.forward",
+            title: "Forward Port",
+            group: "Tabs" as const,
+            keywords: ["port", "forward", "ssh", "tunnel", "localhost"],
+            icon: Plug01Icon,
+            disabledReason: ctx.statusBarHidden
+              ? "Status bar hidden"
+              : undefined,
+            run: ctx.openForwardPort,
+          },
+        ]
+      : []),
     {
       id: "tab.close",
       title: "Close tab or pane",

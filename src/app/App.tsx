@@ -45,6 +45,11 @@ import {
   type SearchInlineHandle,
   type SearchTarget,
 } from "@/modules/header";
+import {
+  configurePorts,
+  openPortsList,
+  portsAvailable,
+} from "@/modules/ports";
 import type { PreviewPaneHandle } from "@/modules/preview";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
@@ -890,6 +895,10 @@ export default function App() {
     [newPreviewTab],
   );
 
+  useEffect(() => {
+    configurePorts({ openPreview: (url) => void openPreviewTab(url) });
+  }, [openPreviewTab]);
+
   const splitActivePaneInActiveTab = useCallback(
     (dir: "row" | "col") => {
       const t = tabsRef.current.find((x) => x.id === activeId);
@@ -1389,6 +1398,9 @@ export default function App() {
             openNewPrivate: openNewPrivateTab,
             openNewEditor: () => setNewEditorOpen(true),
             openNewPreview: () => openPreviewTab(""),
+            canForwardPorts: portsAvailable(workspaceEnv),
+            statusBarHidden: zenMode,
+            openForwardPort: openPortsList,
             openTmuxSwitcher: () => {
               const tab = activeTerminalTabRef.current;
               if (tab) setTmuxTarget(tmuxTargetForTab(tab));
@@ -1424,6 +1436,8 @@ export default function App() {
       openNewBlockTab,
       openNewPrivateTab,
       openPreviewTab,
+      workspaceEnv,
+      zenMode,
       openGitGraphFromContext,
       toggleSourceControl,
       handleCloseTabOrPane,
