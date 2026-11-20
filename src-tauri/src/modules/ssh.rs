@@ -996,7 +996,7 @@ fn classify_ssh_error(stderr: &str) -> Option<String> {
 /// wedged remote command is reclaimed after `timeout` instead of blocking the
 /// waiter forever. `None` preserves the historic "wait indefinitely" behavior
 /// for callers that must not risk a mid-operation kill (remote mutations).
-fn wait_child(
+pub(crate) fn wait_child(
     child: &std::sync::Arc<shared_child::SharedChild>,
     timeout: Option<std::time::Duration>,
 ) -> Result<Option<std::process::ExitStatus>, String> {
@@ -1296,23 +1296,45 @@ pub struct RemoteCapture {
 /// opens a fresh connection or prompts. Always false where ControlMaster is
 /// unavailable (non-unix).
 pub fn master_alive(host: &str) -> bool {
+    master_pid(host).is_some()
+}
+
+/// The live master's pid, which tells one connection to `host` from the next
+/// one (port forwards die with the master that holds them). Same probe as
+/// [`master_alive`].
+pub fn master_pid(host: &str) -> Option<u32> {
+    master_pid_at(&control_args(), host)
+}
+
+/// [`master_pid`] for an explicit set of control args (another control dir).
+pub fn master_pid_at(control: &[String], host: &str) -> Option<u32> {
     if validate_ssh_host(host).is_err() {
-        return false;
+        return None;
     }
     #[cfg(unix)]
     {
         let mut cmd = std::process::Command::new("ssh");
-        for arg in control_args() {
-            cmd.arg(arg);
-        }
-        cmd.arg("-O").arg("check").arg(host);
+        cmd.args(control).arg("-O").arg("check").arg(host);
         crate::modules::proc::hide_console(&mut cmd);
-        matches!(cmd.output(), Ok(out) if out.status.success())
+        match cmd.output() {
+            Ok(out) if out.status.success() => {
+                parse_master_pid(&String::from_utf8_lossy(&out.stderr))
+            }
+            _ => None,
+        }
     }
     #[cfg(not(unix))]
     {
-        false
+        let _ = control;
+        None
     }
+}
+
+/// `ssh -O check` answers `Master running (pid=1234)` on stderr.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn parse_master_pid(stderr: &str) -> Option<u32> {
+    let rest = &stderr[stderr.find("(pid=")? + "(pid=".len()..];
+    rest[..rest.find(')')?].parse().ok()
 }
 
 /// Run `command` on `host` over the shared ControlMaster (BatchMode, no stdin),
@@ -2008,6 +2030,14 @@ fn publish_staged(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn master_pid_is_read_from_the_check_answer() {
+        assert_eq!(parse_master_pid("Master running (pid=667)\r\n"), Some(667));
+        assert_eq!(parse_master_pid("Master running (pid=)\r\n"), None);
+        assert_eq!(parse_master_pid("Control socket connect(/x): No such file"), None);
+        assert_eq!(parse_master_pid(""), None);
+    }
 
     #[test]
     fn control_args_prompt_instead_of_trusting_unknown_host_keys() {

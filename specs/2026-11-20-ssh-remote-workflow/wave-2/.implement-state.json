@@ -1,0 +1,16 @@
+{
+  "spec_path": "specs/2026-11-20-ssh-remote-workflow/wave-2",
+  "discovery": "specs/2026-11-20-ssh-remote-workflow/discovery.md",
+  "feature_name": "ssh-remote-workflow",
+  "scope": "Welle 2 only (Discovery slices 2 and 3: port forwarding, ports list, detection, offer, preview)",
+  "status": "in_progress",
+  "current_state": "implementing",
+  "current_slice_id": "slice-01",
+  "retry_count": 0,
+  "completed_slices": [],
+  "slim_spec_written": true,
+  "stack": "TypeScript + Rust (Tauri), pnpm; cargo via local container terax-rust:local",
+  "branch": "ssh-remote-ports",
+  "base_branch": "ssh-remote-workflow (wave 1, PR #93)",
+  "worktree_path": "/home/claude/litha/produkte/terax/terax-ai/.claude/worktrees/ssh-remote-workflow"
+}
