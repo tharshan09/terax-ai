@@ -260,9 +260,9 @@ function PortInput({
     setError(null);
     setWorking(true);
     try {
-      const message = await forwardPortInput(env, value);
-      if (message) setError(message);
-      else setValue("");
+      const result = await forwardPortInput(env, value);
+      if (result.error) setError(result.error);
+      else if (result.forwarded) setValue("");
     } finally {
       setWorking(false);
       inputRef.current?.focus();

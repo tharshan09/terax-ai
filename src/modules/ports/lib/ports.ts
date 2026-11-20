@@ -1,4 +1,4 @@
-import { validPort } from "./portDetect";
+import { type DetectedPort, validPort } from "./portDetect";
 
 export type ForwardStatus = "active" | "disconnected";
 
@@ -37,6 +37,10 @@ export const EMPTY_PORTS: PortsModel = {
 export const PORT_INPUT_ERROR = "Enter a port between 1 and 65535.";
 export const HIGHLIGHT_MS = 2000;
 const LOWEST_OFFERED_PORT = 1024;
+// `ss -tan` and `netstat` list every ephemeral peer as `127.0.0.1:4xxxx`; a dev
+// server up there prints its URL with a scheme.
+const LOWEST_EPHEMERAL_PORT = 32768;
+export const MAX_OFFERS_PER_SERVER = 5;
 
 export type PortInput =
   | { kind: "empty" }
@@ -60,7 +64,7 @@ export function stopFailedText(port: number, reason: unknown): string {
   return `Could not stop port ${port}: ${String(reason)}`;
 }
 
-// Success toast, only when the Mac port differs (BR-14).
+// Success toast, only when the Mac port differs.
 export function movedPortText(forward: PortForward): string | null {
   return forward.localPort === forward.remotePort
     ? null
@@ -116,8 +120,17 @@ export function portPhase(
   return findOffer(model, scope, port) ? "offered" : "unknown";
 }
 
-// BR-11, BR-12: one offer per server and port, none for a port below 1024 or
-// one that is forwarded or being forwarded.
+// Ports below 1024 are system services, not dev servers; ephemeral ones only
+// count when written as a URL.
+export function offerablePort(found: DetectedPort): boolean {
+  return (
+    found.port >= LOWEST_OFFERED_PORT &&
+    (found.port < LOWEST_EPHEMERAL_PORT || found.scheme)
+  );
+}
+
+// One offer per server and port, none for a port that is forwarded or being
+// forwarded.
 export function canOffer(
   model: PortsModel,
   scope: string,
@@ -128,12 +141,58 @@ export function canOffer(
   );
 }
 
+function takenPorts(model: PortsModel, scope: string): Set<number> {
+  const taken = new Set<number>(model.pending[scope]);
+  for (const o of model.offers) if (o.scope === scope) taken.add(o.port);
+  for (const f of forwardsOf(model, scope)) taken.add(f.remotePort);
+  return taken;
+}
+
+// Newest first, the server keeps MAX_OFFERS_PER_SERVER; one being accepted
+// always stays.
+function capOffers(offers: readonly PortOffer[], scope: string): PortOffer[] {
+  const kept: PortOffer[] = [];
+  let own = 0;
+  for (let i = offers.length - 1; i >= 0; i--) {
+    const o = offers[i];
+    if (o.scope === scope) {
+      if (own >= MAX_OFFERS_PER_SERVER && !o.working) continue;
+      own++;
+    }
+    kept.push(o);
+  }
+  return kept.reverse();
+}
+
+// The ports of one chunk in one pass over the model, so a flood of output
+// costs linear time and never more than the capped offers in memory.
+export function addOffers(
+  model: PortsModel,
+  origin: Omit<PortOffer, "working" | "port">,
+  found: readonly DetectedPort[],
+): PortsModel {
+  if (found.length === 0) return model;
+  const taken = takenPorts(model, origin.scope);
+  const added: PortOffer[] = [];
+  for (const f of found) {
+    if (!offerablePort(f) || taken.has(f.port)) continue;
+    taken.add(f.port);
+    added.push({ ...origin, port: f.port, working: false });
+    if (added.length > MAX_OFFERS_PER_SERVER) added.shift();
+  }
+  if (added.length === 0) return model;
+  return {
+    ...model,
+    offers: capOffers([...model.offers, ...added], origin.scope),
+  };
+}
+
 export function addOffer(
   model: PortsModel,
   offer: Omit<PortOffer, "working">,
 ): PortsModel {
-  if (!canOffer(model, offer.scope, offer.port)) return model;
-  return { ...model, offers: [...model.offers, { ...offer, working: false }] };
+  const { port, ...origin } = offer;
+  return addOffers(model, origin, [{ port, scheme: false }]);
 }
 
 export function removeOffer(
@@ -203,7 +262,7 @@ function withForward(
   return { ...model, forwards: { ...model.forwards, [scope]: list } };
 }
 
-// TR-8, TR-12: the row appears or turns active and the offer is gone.
+// The row appears or turns active and the offer is gone.
 export function forwardSucceeded(
   model: PortsModel,
   scope: string,
@@ -217,7 +276,7 @@ export function forwardSucceeded(
   );
 }
 
-// TR-9, EP-11: no new row and no offer; an existing row keeps its state.
+// No new row and no offer; an existing row keeps its state.
 export function forwardFailed(
   model: PortsModel,
   scope: string,
@@ -285,7 +344,7 @@ export type OfferView = {
   working: boolean;
 };
 
-// UI-3: the newest offer of the active server.
+// The status bar shows the newest offer of the active server.
 export function offerView(
   model: PortsModel,
   scope: string | null,
@@ -320,7 +379,7 @@ export type PortRowView = {
   label: string;
   address: string;
   url: string;
-  // BR-14: the Mac port differs and is shown emphasized.
+  // The Mac port was taken, so it differs and is shown emphasized.
   moved: boolean;
   status: ForwardStatus;
   highlighted: boolean;
@@ -359,7 +418,7 @@ export function rowViews(
 
 export type PortsSummary = {
   count: number;
-  // UI-4 `attention`: at least one forward is disconnected.
+  // At least one forward is disconnected and needs a retry.
   attention: boolean;
 };
 

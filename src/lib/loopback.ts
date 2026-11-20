@@ -1,4 +1,4 @@
-// "detect": addresses offered for forwarding from SSH terminal output (BR-10).
+// "detect": addresses offered for forwarding from SSH terminal output.
 // "preview": URLs the preview and open_preview treat as local.
 export type LoopbackVariant = "detect" | "preview";
 

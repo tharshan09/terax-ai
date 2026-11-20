@@ -30,7 +30,7 @@ import { PortsList } from "./PortsList";
 type SshEnv = Extract<WorkspaceEnv, { kind: "ssh" }>;
 
 // The server comes from the workspace store, which keeps the SSH env while a
-// preview tab is active; the active terminal tab would lose it (Slop #6).
+// preview tab is active; the active terminal tab would lose it.
 export function PortsStatus() {
   const env = useWorkspaceEnvStore((s) => s.env);
   if (!portsAvailable(env)) return null;

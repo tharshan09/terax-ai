@@ -131,6 +131,79 @@ describe("detection and offers", () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
+  it("offers a port again in the same pane once its forward stopped", async () => {
+    const s = await fresh();
+    await seed(s, DEVBOX, [active(3000)]);
+    feed(s, 7, DEVBOX, "localhost:3000\r\n");
+    expect(offers(s)).toEqual([]);
+    serve("ssh_port_stop", () => null);
+    await s.stopForward(DEVBOX, 3000);
+    feed(s, 7, DEVBOX, "localhost:3000\r\n");
+    expect(offers(s)).toEqual([[7, 3000]]);
+  });
+
+  it("offers a port to a second pane that printed it while the first pane's offer stood", async () => {
+    const s = await fresh();
+    feed(s, 7, DEVBOX, "localhost:5173\r\n");
+    feed(s, 8, DEVBOX, "localhost:5173\r\n");
+    expect(offers(s)).toEqual([[7, 5173]]);
+    s.dismissOffer(DEVBOX);
+    feed(s, 8, DEVBOX, "localhost:5173\r\n");
+    expect(offers(s)).toEqual([[8, 5173]]);
+  });
+
+  it("keeps a dismissed port away from that pane, even after a forward and stop", async () => {
+    const s = await fresh();
+    serve("ssh_port_forward", (a) => active(a.remotePort as number));
+    serve("ssh_port_stop", () => null);
+    feed(s, 7, DEVBOX, "localhost:5173\r\n");
+    s.dismissOffer(DEVBOX);
+    await s.forwardPortInput(DEVBOX, "5173");
+    await s.stopForward(DEVBOX, 5173);
+    feed(s, 7, DEVBOX, "localhost:5173\r\n");
+    expect(offers(s)).toEqual([]);
+    feed(s, 8, DEVBOX, "localhost:5173\r\n");
+    expect(offers(s)).toEqual([[8, 5173]]);
+  });
+
+  it("remembers a bounded number of dismissals per pane", async () => {
+    const s = await fresh();
+    for (let port = 3000; port < 3065; port++) {
+      feed(s, 7, DEVBOX, `localhost:${port}\r\n`);
+      s.dismissOffer(DEVBOX);
+    }
+    feed(s, 7, DEVBOX, "localhost:3000 localhost:3001\r\n");
+    expect(offers(s)).toEqual([[7, 3000]]);
+  });
+
+  it("stays linear and capped when output lists every port", async () => {
+    const s = await fresh();
+    let text = "";
+    for (let port = 1024; port <= 65535; port++) text += `localhost:${port} `;
+    const bytes = enc.encode(text);
+    const started = performance.now();
+    for (let at = 0; at < bytes.length; at += 65536)
+      s.feedPaneOutput(7, DEVBOX, bytes.subarray(at, at + 65536));
+    const took = performance.now() - started;
+    expect(offers(s)).toEqual([
+      [7, 32763],
+      [7, 32764],
+      [7, 32765],
+      [7, 32766],
+      [7, 32767],
+    ]);
+    // The quadratic build took about 29 s for this input.
+    expect(took).toBeLessThan(5000);
+    feed(s, 7, DEVBOX, "Local: http://localhost:40000/\r\n");
+    expect(offers(s)).toEqual([
+      [7, 32764],
+      [7, 32765],
+      [7, 32766],
+      [7, 32767],
+      [7, 40000],
+    ]);
+  });
+
   it("detects nothing on Windows, where forwards do not exist", async () => {
     platform.IS_WINDOWS = true;
     const s = await fresh();
@@ -220,13 +293,20 @@ describe("forwarding by hand and by address", () => {
     const s = await fresh();
     serve("ssh_port_forward", (a) => active(a.remotePort as number));
     for (const raw of ["abc", "0", "65536", "30.5", "-1"])
-      expect(await s.forwardPortInput(DEVBOX, raw)).toBe(
-        "Enter a port between 1 and 65535.",
-      );
-    expect(await s.forwardPortInput(DEVBOX, "")).toBeNull();
+      expect(await s.forwardPortInput(DEVBOX, raw)).toEqual({
+        error: "Enter a port between 1 and 65535.",
+        forwarded: false,
+      });
+    expect(await s.forwardPortInput(DEVBOX, "")).toEqual({
+      error: null,
+      forwarded: false,
+    });
     expect(invoke).not.toHaveBeenCalled();
 
-    expect(await s.forwardPortInput(DEVBOX, " 3000 ")).toBeNull();
+    expect(await s.forwardPortInput(DEVBOX, " 3000 ")).toEqual({
+      error: null,
+      forwarded: true,
+    });
     expect(calls("ssh_port_forward")).toEqual([
       ["ssh_port_forward", { host: "devbox", remotePort: 3000 }],
     ]);
@@ -240,7 +320,10 @@ describe("forwarding by hand and by address", () => {
     const highlighted = () =>
       rowViews(s.usePortsStore.getState(), SCOPE)[0].highlighted;
 
-    expect(await s.forwardPortInput(DEVBOX, "4000")).toBeNull();
+    expect(await s.forwardPortInput(DEVBOX, "4000")).toEqual({
+      error: null,
+      forwarded: true,
+    });
     expect(highlighted()).toBe(true);
     vi.advanceTimersByTime(1999);
     expect(highlighted()).toBe(true);
@@ -270,6 +353,37 @@ describe("forwarding by hand and by address", () => {
     expect(calls("ssh_port_forward").map(([, a]) => a.remotePort)).toEqual([
       3000, 80, 8443,
     ]);
+  });
+
+  it("reports a failed forward so the field keeps the number", async () => {
+    const s = await fresh();
+    serve("ssh_port_forward", () => {
+      throw "not connected to devbox";
+    });
+    expect(await s.forwardPortInput(DEVBOX, "5173")).toEqual({
+      error: null,
+      forwarded: false,
+    });
+    expect(toast.error).toHaveBeenCalledExactlyOnceWith(
+      "Could not forward port 5173: not connected to devbox",
+    );
+  });
+
+  it("forwards a clicked URL with brackets in its query and keeps them", async () => {
+    const s = await fresh();
+    serve("ssh_port_forward", (a) => active(a.remotePort as number, 3001));
+    expect(
+      await s.openLoopbackAddress(
+        DEVBOX,
+        "http://localhost:3000/items?filter[status]=open",
+      ),
+    ).toBe(true);
+    expect(calls("ssh_port_forward")).toEqual([
+      ["ssh_port_forward", { host: "devbox", remotePort: 3000 }],
+    ]);
+    expect(openPreview).toHaveBeenCalledExactlyOnceWith(
+      "http://localhost:3001/items?filter[status]=open",
+    );
   });
 
   it("does nothing for a local pane or a non-loopback address", async () => {

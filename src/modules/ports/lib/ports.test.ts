@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   addOffer,
+  addOffers,
   canOffer,
   EMPTY_PORTS,
   forwardFailed,
@@ -9,6 +10,7 @@ import {
   forwardStopped,
   forwardSucceeded,
   movedPortText,
+  offerablePort,
   offerView,
   PORT_INPUT_ERROR,
   parsePortInput,
@@ -74,6 +76,39 @@ describe("offers", () => {
     expect(canOffer(m, OTHER, 3000)).toBe(true);
     m = addOffer(m, offer(DEVBOX, 5173));
     expect(addOffer(m, offer(DEVBOX, 5173, 8))).toBe(m);
+  });
+
+  it("offers an ephemeral port only when it was written with a scheme", () => {
+    expect(offerablePort({ port: 32767, scheme: false })).toBe(true);
+    expect(offerablePort({ port: 32768, scheme: false })).toBe(false);
+    expect(offerablePort({ port: 45123, scheme: true })).toBe(true);
+    expect(offerablePort({ port: 1023, scheme: true })).toBe(false);
+  });
+
+  it("keeps the newest five offers per server and the one being accepted", () => {
+    const origin = { scope: DEVBOX, host: "devbox", leafId: 7 };
+    const found = (...ports: number[]) =>
+      ports.map((port) => ({ port, scheme: false }));
+    let m = addOffers(EMPTY_PORTS, origin, found(3000));
+    m = startForwarding(m, DEVBOX, 3000);
+    m = addOffers(m, { ...origin, scope: OTHER, host: "other" }, found(9000));
+    m = addOffers(m, origin, found(4001, 4002, 4003, 4004, 4005, 4006, 4007));
+    expect(m.offers.map((o) => [o.scope, o.port])).toEqual([
+      [DEVBOX, 3000],
+      [OTHER, 9000],
+      [DEVBOX, 4003],
+      [DEVBOX, 4004],
+      [DEVBOX, 4005],
+      [DEVBOX, 4006],
+      [DEVBOX, 4007],
+    ]);
+    m = forwardFailed(m, DEVBOX, 3000);
+    m = addOffers(m, origin, found(4008, 4005));
+    expect(m.offers.map((o) => o.port)).toEqual([
+      9000, 4004, 4005, 4006, 4007, 4008,
+    ]);
+    expect(offerView(m, DEVBOX)?.more).toBe("+4");
+    expect(offerView(m, OTHER)?.more).toBeNull();
   });
 });
 

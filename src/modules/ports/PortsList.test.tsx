@@ -330,4 +330,23 @@ describe("port input (AC-6)", () => {
     expect(screen.getByTestId("ports-input").dataset.status).toBe("idle");
     expect(openPreview).not.toHaveBeenCalled();
   });
+
+  it("keeps the number in the field when the forward fails", async () => {
+    serveForwards([]);
+    forwardAnswer = Promise.reject("not connected to devbox");
+    forwardAnswer.catch(() => {});
+    render(<PortsStatus />);
+    await openList();
+    const field = screen.getByLabelText("Port") as HTMLInputElement;
+    fireEvent.change(field, { target: { value: "5173" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Forward" }));
+    });
+    expect(toast.error).toHaveBeenCalledWith(
+      "Could not forward port 5173: not connected to devbox",
+    );
+    expect(field.value).toBe("5173");
+    expect(screen.getByTestId("ports-input").dataset.status).toBe("idle");
+    expect(screen.queryAllByTestId("ports-row")).toEqual([]);
+  });
 });

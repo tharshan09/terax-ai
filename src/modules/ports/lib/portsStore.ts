@@ -4,13 +4,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { create } from "zustand";
 import {
+  type DetectedPort,
   macUrl,
   macUrlFor,
   PortDetector,
-  parseLoopbackAddress,
+  parseLoopbackLink,
 } from "./portDetect";
 import {
-  addOffer,
+  addOffers,
   clearHighlight,
   dropPaneOffers,
   EMPTY_PORTS,
@@ -45,11 +46,17 @@ export function configurePorts(next: PortsHost): void {
   host = next;
 }
 
-// Memory only (BR-18): nothing here reaches the settings store.
+// Memory only: nothing here reaches the settings store.
 export const usePortsStore = create<PortsModel>(() => EMPTY_PORTS);
 
+// Bounds what a pane remembers; each entry is a click, so this is never hit
+// in normal use.
+const DISMISSED_PER_PANE = 64;
+
 const detectors = new Map<number, PortDetector>();
-const seenByPane = new Map<number, Set<number>>();
+// Ports whose offer this pane showed and the user dismissed: they stay away
+// until the pane closes. Everything else may come back on new output.
+const dismissedByPane = new Map<number, Set<number>>();
 const inflight = new Map<string, Promise<PortForward | null>>();
 const listing = new Map<string, Promise<void>>();
 const generation = new Map<string, number>();
@@ -102,34 +109,43 @@ export function feedPaneOutput(
     detector = new PortDetector();
     detectors.set(leafId, detector);
   }
-  const ports = detector.feed(bytes);
-  if (ports.length > 0) offerPorts(leafId, ssh, ports);
+  const found = detector.feed(bytes);
+  if (found.length > 0) offerPorts(leafId, ssh, found);
 }
 
 function offerPorts(
   leafId: number,
   env: SshEnv,
-  ports: readonly number[],
+  found: readonly DetectedPort[],
 ): void {
-  let seen = seenByPane.get(leafId);
-  if (!seen) {
-    seen = new Set();
-    seenByPane.set(leafId, seen);
-  }
-  const scope = workspaceScopeKey(env);
-  let next = model();
-  for (const port of ports) {
-    if (seen.has(port)) continue;
-    seen.add(port);
-    next = addOffer(next, { scope, host: env.host, leafId, port });
-  }
-  commit(next);
+  const dismissed = dismissedByPane.get(leafId);
+  const fresh = dismissed ? found.filter((f) => !dismissed.has(f.port)) : found;
+  commit(
+    addOffers(
+      model(),
+      { scope: workspaceScopeKey(env), host: env.host, leafId },
+      fresh,
+    ),
+  );
 }
 
-// Pane closed: its offers go, the server's forwards stay (BR-16).
+function rememberDismissed(leafId: number, port: number): void {
+  let dismissed = dismissedByPane.get(leafId);
+  if (!dismissed) {
+    dismissed = new Set();
+    dismissedByPane.set(leafId, dismissed);
+  }
+  dismissed.add(port);
+  if (dismissed.size > DISMISSED_PER_PANE) {
+    const [oldest] = dismissed;
+    dismissed.delete(oldest);
+  }
+}
+
+// Pane closed: its offers go, the server's forwards stay.
 export function paneClosed(leafId: number): void {
   detectors.delete(leafId);
-  seenByPane.delete(leafId);
+  dismissedByPane.delete(leafId);
   commit(dropPaneOffers(model(), leafId));
 }
 
@@ -184,8 +200,8 @@ async function requestForward(
   }
 }
 
-// EP-8: an active forward is reused and its row highlighted; a disconnected
-// one is forwarded again; concurrent requests for one port share a call.
+// An active forward is reused and its row highlighted; a disconnected one is
+// forwarded again; concurrent requests for one port share a call.
 function ensureForward(env: SshEnv, port: number): Promise<PortForward | null> {
   const scope = workspaceScopeKey(env);
   const existing = findForward(model(), scope, port);
@@ -203,7 +219,7 @@ function ensureForward(env: SshEnv, port: number): Promise<PortForward | null> {
   return run;
 }
 
-// UI-3 click (FL-7): forwards the shown offer and opens the Mac address.
+// Clicking the status bar offer forwards it and opens the Mac address.
 export async function acceptOffer(env: WorkspaceEnv | null): Promise<void> {
   const ssh = sshEnv(env);
   const offer = newestOffer(model(), portsScope(ssh));
@@ -215,36 +231,41 @@ export async function acceptOffer(env: WorkspaceEnv | null): Promise<void> {
 export function dismissOffer(env: WorkspaceEnv | null): void {
   const offer = newestOffer(model(), portsScope(env));
   if (!offer || offer.working) return;
+  rememberDismissed(offer.leafId, offer.port);
   commit({ ...model(), offers: model().offers.filter((o) => o !== offer) });
 }
 
-// UI-8 (FL-10): returns the field's error text, or null. Opens nothing.
+// `error` is the field's text; `forwarded` tells the field to clear, so a
+// failed forward keeps the number for another try. Opens nothing.
+export type PortInputResult = { error: string | null; forwarded: boolean };
+
 export async function forwardPortInput(
   env: WorkspaceEnv | null,
   raw: string,
-): Promise<string | null> {
+): Promise<PortInputResult> {
   const ssh = sshEnv(env);
   const input = parsePortInput(raw);
-  if (input.kind === "invalid") return input.message;
-  if (input.kind === "port" && ssh) await ensureForward(ssh, input.port);
-  return null;
+  if (input.kind === "invalid")
+    return { error: input.message, forwarded: false };
+  if (input.kind === "empty" || !ssh) return { error: null, forwarded: false };
+  const forward = await ensureForward(ssh, input.port);
+  return { error: null, forwarded: forward !== null };
 }
 
-// FL-8: a loopback address clicked in this SSH pane, path and query kept.
-// Ports below 1024 are fine here (BR-11).
+// A loopback link clicked in this SSH pane, path and query kept. Any port goes
+// here, below 1024 too: the user asked for it.
 export async function openLoopbackAddress(
   env: WorkspaceEnv | null,
   text: string,
 ): Promise<boolean> {
   const ssh = sshEnv(env);
-  const address = parseLoopbackAddress(text);
+  const address = parseLoopbackLink(text);
   if (!ssh || !address) return false;
   const forward = await ensureForward(ssh, address.port);
   if (forward) host.openPreview(macUrlFor(address, forward.localPort));
   return forward !== null;
 }
 
-// UI-7 "Retry" (TR-12, EP-11).
 export async function retryForward(
   env: WorkspaceEnv | null,
   port: number,
@@ -253,7 +274,6 @@ export async function retryForward(
   if (ssh) await ensureForward(ssh, port);
 }
 
-// UI-7 "Stop" (TR-10, TR-13).
 export async function stopForward(
   env: WorkspaceEnv | null,
   port: number,
@@ -270,7 +290,7 @@ export async function stopForward(
   }
 }
 
-// UI-7 "Open": the Mac address of an active forward in the preview tab.
+// The Mac address of an active forward in the preview tab.
 export function openForwardInPreview(
   env: WorkspaceEnv | null,
   port: number,
