@@ -16,7 +16,7 @@ const { invoke, toast } = vi.hoisted(() => ({
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("sonner", () => ({ toast }));
-vi.mock("@/lib/platform", () => ({ IS_WINDOWS: true }));
+vi.mock("@/lib/platform", () => ({ IS_MAC: false, IS_WINDOWS: true }));
 
 const DIR = "/home/u/.terax/uploads";
 const DEVBOX: SshEnv = { kind: "ssh", host: "devbox" };

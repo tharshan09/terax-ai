@@ -35,7 +35,7 @@ vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("sonner", () => ({
   toast: Object.assign(vi.fn(), { error: vi.fn() }),
 }));
-vi.mock("@/lib/platform", () => ({ IS_WINDOWS: false }));
+vi.mock("@/lib/platform", () => ({ IS_MAC: false, IS_WINDOWS: false }));
 vi.mock("@tauri-apps/plugin-store", () => ({
   LazyStore: class {
     get = vi.fn(async () => undefined);

@@ -38,7 +38,7 @@ globalThis.ResizeObserver ??= class {
 
 const { invoke, platform } = vi.hoisted(() => ({
   invoke: vi.fn(),
-  platform: { IS_WINDOWS: false },
+  platform: { IS_MAC: false, IS_WINDOWS: false },
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));

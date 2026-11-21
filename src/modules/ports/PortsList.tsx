@@ -5,8 +5,9 @@ import { Separator } from "@/components/ui/separator";
 import { Spinner } from "@/components/ui/spinner";
 import { writeSystemClipboard } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
-import type { WorkspaceEnv } from "@/modules/workspace";
+import { type WorkspaceEnv, workspaceScopeKey } from "@/modules/workspace";
 import {
+  ChromeIcon,
   Copy01Icon,
   Globe02Icon,
   LinkSquare02Icon,
@@ -17,12 +18,23 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { type FormEvent, type RefObject, useId, useRef, useState } from "react";
 import { toast } from "sonner";
-import { parsePortInput, type PortRowView, type RowAction } from "./lib/ports";
+import { BrowserDialogs } from "./BrowserDialogs";
+import { MAC_HOST } from "./lib/portDetect";
+import {
+  chromeKey,
+  parsePortInput,
+  type PortRowView,
+  type RowAction,
+} from "./lib/ports";
+import { browserViewAvailable } from "./lib/portsList";
 import {
   forwardPortInput,
+  openBrowserGuide,
   openForwardInPreview,
   retryForward,
   stopForward,
+  useBrowserViewStore,
+  viewBrowser,
 } from "./lib/portsStore";
 
 type SshEnv = Extract<WorkspaceEnv, { kind: "ssh" }>;
@@ -42,6 +54,8 @@ type Props = {
 export function PortsList({ env, rows }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const openedAt = useRef(0);
+  const scope = workspaceScopeKey(env);
+  const browser = browserViewAvailable();
 
   return (
     <PopoverContent
@@ -51,7 +65,10 @@ export function PortsList({ env, rows }: Props) {
       side="top"
       align="end"
       sideOffset={8}
-      className="w-80 gap-0 overflow-hidden p-0"
+      className={cn(
+        "gap-0 overflow-hidden p-0",
+        browser ? "w-[22rem]" : "w-80",
+      )}
       onOpenAutoFocus={(e) => {
         e.preventDefault();
         openedAt.current = performance.now();
@@ -83,18 +100,44 @@ export function PortsList({ env, rows }: Props) {
       ) : (
         <ul className="flex max-h-64 list-none flex-col overflow-y-auto p-1">
           {rows.map((row) => (
-            <PortRow key={row.remotePort} env={env} row={row} />
+            <PortRow key={row.remotePort} env={env} scope={scope} row={row} />
           ))}
         </ul>
       )}
       <Separator />
       <PortInput env={env} inputRef={inputRef} />
+      {browser ? (
+        <>
+          <div className="flex justify-end px-3 pb-2">
+            <button
+              type="button"
+              data-testid="browser-setup-link"
+              onClick={() => openBrowserGuide(env)}
+              className="rounded-sm text-[11px] text-muted-foreground underline-offset-3 outline-none hover:text-foreground hover:underline focus-visible:ring-2 focus-visible:ring-ring/40"
+            >
+              Set up browser view
+            </button>
+          </div>
+          <BrowserDialogs scope={scope} />
+        </>
+      ) : null}
     </PopoverContent>
   );
 }
 
-function PortRow({ env, row }: { env: SshEnv; row: PortRowView }) {
+function PortRow({
+  env,
+  scope,
+  row,
+}: {
+  env: SshEnv;
+  scope: string;
+  row: PortRowView;
+}) {
   const [stopping, setStopping] = useState(false);
+  const opening = useBrowserViewStore(
+    (s) => s.opening === chromeKey(scope, row.remotePort),
+  );
   const busy = row.working || stopping;
   const disconnected = row.status === "disconnected";
 
@@ -120,6 +163,7 @@ function PortRow({ env, row }: { env: SshEnv; row: PortRowView }) {
         () => toast.error("Could not copy the address"),
       );
     },
+    viewBrowser: () => void viewBrowser(env, row.remotePort),
     retry: () => void retryForward(env, row.remotePort),
     stop: () => void stop(),
   };
@@ -128,6 +172,7 @@ function PortRow({ env, row }: { env: SshEnv; row: PortRowView }) {
     <li
       data-testid="ports-row"
       data-status={row.status}
+      data-chrome={row.chrome ?? undefined}
       data-highlighted={row.highlighted ? "true" : undefined}
       aria-label={disconnected ? `${row.remotePort} disconnected` : row.label}
       className={cn(
@@ -145,28 +190,17 @@ function PortRow({ env, row }: { env: SshEnv; row: PortRowView }) {
           </span>
         </span>
       ) : (
-        <span
-          data-testid="ports-row-label"
-          className="min-w-0 flex-1 truncate font-mono tabular-nums"
-        >
-          {row.remotePort}
-          <span className="text-muted-foreground">{" -> "}</span>
-          <span className="text-muted-foreground">localhost:</span>
-          <span
-            data-moved={row.moved ? "true" : undefined}
-            title={
-              row.moved
-                ? `Port ${row.remotePort} was taken on this Mac`
-                : undefined
-            }
-            className={cn(
-              row.moved
-                ? "font-semibold text-amber-600 dark:text-amber-400"
-                : "text-muted-foreground",
-            )}
-          >
-            {row.localPort}
-          </span>
+        <span className="flex min-w-0 flex-1 items-center gap-1.5">
+          <PortLabel row={row} />
+          {row.chromeMark ? (
+            <span
+              data-testid="ports-row-chrome"
+              title="A Chrome with remote debugging answers on this port"
+              className="shrink-0 rounded-sm bg-muted px-1 text-[10px] leading-4 text-muted-foreground"
+            >
+              Chrome
+            </span>
+          ) : null}
         </span>
       )}
       <fieldset
@@ -178,16 +212,43 @@ function PortRow({ env, row }: { env: SshEnv; row: PortRowView }) {
           <RowButton
             key={action}
             action={action}
-            disabled={busy}
+            disabled={busy || row.unavailable.includes(action)}
             working={
               (action === "retry" && row.working) ||
-              (action === "stop" && stopping)
+              (action === "stop" && stopping) ||
+              (action === "viewBrowser" && opening)
             }
             onClick={run[action]}
           />
         ))}
       </fieldset>
     </li>
+  );
+}
+
+function PortLabel({ row }: { row: PortRowView }) {
+  return (
+    <span
+      data-testid="ports-row-label"
+      className="min-w-0 truncate font-mono tabular-nums"
+    >
+      {row.remotePort}
+      <span className="text-muted-foreground">{" -> "}</span>
+      <span className="text-muted-foreground">{MAC_HOST}:</span>
+      <span
+        data-moved={row.moved ? "true" : undefined}
+        title={
+          row.moved ? `Port ${row.remotePort} was taken on this Mac` : undefined
+        }
+        className={cn(
+          row.moved
+            ? "font-semibold text-amber-600 dark:text-amber-400"
+            : "text-muted-foreground",
+        )}
+      >
+        {row.localPort}
+      </span>
+    </span>
   );
 }
 
@@ -198,6 +259,7 @@ const ACTION_LOOK: Record<
   open: { label: "Open", icon: Globe02Icon },
   openInBrowser: { label: "Open in browser", icon: LinkSquare02Icon },
   copy: { label: "Copy", icon: Copy01Icon },
+  viewBrowser: { label: "View browser", icon: ChromeIcon },
   retry: { label: "Retry", icon: RefreshIcon },
   stop: { label: "Stop", icon: StopCircleIcon, danger: true },
 };
