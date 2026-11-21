@@ -271,6 +271,7 @@ const KEY_EDITOR_AUTO_SAVE = "editorAutoSave";
 const KEY_EDITOR_AUTO_SAVE_DELAY = "editorAutoSaveDelay";
 const KEY_STATUSBAR_LAYOUT = "statusbarLayout";
 const KEY_STATUSBAR_SHOW_AI = "statusbarShowAi";
+const KEY_BROWSER_NOTICE_CONFIRMED = "browserNoticeConfirmed";
 
 export const TERMINAL_FONT_SIZE_DEFAULT = 14;
 export const TERMINAL_FONT_SIZE_MIN = 8;
@@ -914,6 +915,25 @@ export async function resetStatusbarLayout(): Promise<void> {
 
 export async function setStatusbarShowAi(value: boolean): Promise<void> {
   await writePref(KEY_STATUSBAR_SHOW_AI, value);
+}
+
+// Servers (workspaceScopeKey) whose remote browser notice was confirmed. Kept
+// here and not in localStorage, so it survives a restart and stays per app.
+async function browserNoticeScopes(): Promise<string[]> {
+  const stored = await store.get<unknown>(KEY_BROWSER_NOTICE_CONFIRMED);
+  return Array.isArray(stored)
+    ? stored.filter((s): s is string => typeof s === "string")
+    : [];
+}
+
+export async function browserNoticeConfirmed(scope: string): Promise<boolean> {
+  return (await browserNoticeScopes()).includes(scope);
+}
+
+export async function confirmBrowserNotice(scope: string): Promise<void> {
+  const scopes = await browserNoticeScopes();
+  if (scopes.includes(scope)) return;
+  await writePref(KEY_BROWSER_NOTICE_CONFIRMED, [...scopes, scope]);
 }
 
 export type PrefKey = keyof Preferences;

@@ -10,7 +10,8 @@ use url::{Host, Url};
 
 mod clients;
 mod ip;
-use clients::{client_for, Profile};
+use clients::client_for;
+pub(crate) use clients::Profile;
 use ip::{ip_kind, IpKind};
 
 const HEADER_BLOCKLIST: &[&str] = &[
@@ -237,7 +238,7 @@ fn redirect_policy(allow_private: bool) -> reqwest::redirect::Policy {
     })
 }
 
-async fn guarded_client(
+pub(crate) async fn guarded_client(
     url: &str,
     profile: Profile,
     allow_private: bool,

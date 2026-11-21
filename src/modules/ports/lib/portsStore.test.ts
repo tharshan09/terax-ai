@@ -13,7 +13,7 @@ const { invoke, toast, storeWrites, platform } = vi.hoisted(() => ({
   invoke: vi.fn(),
   toast: Object.assign(vi.fn(), { error: vi.fn() }),
   storeWrites: vi.fn(),
-  platform: { IS_WINDOWS: false },
+  platform: { IS_MAC: false, IS_WINDOWS: false },
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("sonner", () => ({ toast }));

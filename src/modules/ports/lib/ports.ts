@@ -1,4 +1,10 @@
-import { type DetectedPort, validPort } from "./portDetect";
+import {
+  type DetectedPort,
+  macAddress,
+  macOrigin,
+  macUrl,
+  validPort,
+} from "./portDetect";
 
 export type ForwardStatus = "active" | "disconnected";
 
@@ -9,6 +15,23 @@ export type PortForward = {
   status: ForwardStatus;
 };
 
+// Shape of `ports::chrome::BrowserView` (serde camelCase).
+export type BrowserViewStatus =
+  | "opened"
+  | "chrome_missing"
+  | "origin_refused"
+  | "no_page"
+  | "unreachable"
+  | "forward_gone"
+  | "open_failed";
+
+export type BrowserView = {
+  status: BrowserViewStatus;
+  remotePort: number;
+  localPort: number;
+  reason: string | null;
+};
+
 export type PortOffer = {
   scope: string;
   host: string;
@@ -17,9 +40,24 @@ export type PortOffer = {
   working: boolean;
 };
 
+// Whether a Chrome answers behind a forward. It belongs to one Mac port: a
+// forward that moved or ended takes it along.
+export type ChromeProbe = "probing" | "chrome" | "none" | "failed";
+
+export type ChromeEntry = {
+  scope: string;
+  remotePort: number;
+  localPort: number;
+  probe: ChromeProbe;
+  run: number;
+};
+
 export type PortsModel = {
   // Per workspaceScopeKey, ascending by remotePort.
   forwards: Readonly<Record<string, readonly PortForward[]>>;
+  // Per chromeKey(scope, remotePort); the forwards are replaced on every
+  // refresh, so the result lives beside them.
+  chrome: Readonly<Record<string, ChromeEntry>>;
   // Oldest first.
   offers: readonly PortOffer[];
   // Ports with a forward request in flight, per scope.
@@ -29,6 +67,7 @@ export type PortsModel = {
 
 export const EMPTY_PORTS: PortsModel = {
   forwards: {},
+  chrome: {},
   offers: [],
   pending: {},
   highlighted: null,
@@ -68,7 +107,7 @@ export function stopFailedText(port: number, reason: unknown): string {
 export function movedPortText(forward: PortForward): string | null {
   return forward.localPort === forward.remotePort
     ? null
-    : `Port ${forward.remotePort} is available at localhost:${forward.localPort}`;
+    : `Port ${forward.remotePort} is available at ${macAddress(forward.localPort)}`;
 }
 
 export type PortPhase =
@@ -270,7 +309,7 @@ export function forwardSucceeded(
 ): PortsModel {
   const done = endForwarding(model, scope, forward.remotePort);
   return removeOffer(
-    withForward(done, scope, forward),
+    withForward(dropChrome(done, scope, forward.remotePort), scope, forward),
     scope,
     forward.remotePort,
   );
@@ -292,7 +331,7 @@ export function forwardStopped(
 ): PortsModel {
   const list = forwardsOf(model, scope);
   const next = list.filter((f) => f.remotePort !== port);
-  if (next.length === list.length) return model;
+  if (next.length === list.length) return dropChrome(model, scope, port);
   const forwards = { ...model.forwards };
   if (next.length === 0) delete forwards[scope];
   else forwards[scope] = next;
@@ -300,7 +339,7 @@ export function forwardStopped(
     model.highlighted?.scope === scope && model.highlighted.port === port
       ? null
       : model.highlighted;
-  return { ...model, forwards, highlighted };
+  return dropChrome({ ...model, forwards, highlighted }, scope, port);
 }
 
 export function forwardsListed(
@@ -314,7 +353,98 @@ export function forwardsListed(
   const offers = model.offers.filter(
     (o) => o.scope !== scope || !list.some((f) => f.remotePort === o.port),
   );
-  return { ...model, forwards, offers };
+  return keepListedChrome({ ...model, forwards, offers }, scope, list);
+}
+
+export function chromeKey(scope: string, remotePort: number): string {
+  return `${scope}\n${remotePort}`;
+}
+
+function dropChrome(
+  model: PortsModel,
+  scope: string,
+  remotePort: number,
+): PortsModel {
+  const key = chromeKey(scope, remotePort);
+  if (!(key in model.chrome)) return model;
+  const chrome = { ...model.chrome };
+  delete chrome[key];
+  return { ...model, chrome };
+}
+
+function keepListedChrome(
+  model: PortsModel,
+  scope: string,
+  list: readonly PortForward[],
+): PortsModel {
+  let chrome: Record<string, ChromeEntry> | null = null;
+  for (const [key, entry] of Object.entries(model.chrome)) {
+    if (entry.scope !== scope) continue;
+    const listed = list.some(
+      (f) =>
+        f.remotePort === entry.remotePort && f.localPort === entry.localPort,
+    );
+    if (listed) continue;
+    chrome ??= { ...model.chrome };
+    delete chrome[key];
+  }
+  return chrome ? { ...model, chrome } : model;
+}
+
+// Null until asked, and for an entry left over from another Mac port.
+export function chromeOf(
+  model: PortsModel,
+  scope: string,
+  forward: PortForward,
+): ChromeProbe | null {
+  const entry = model.chrome[chromeKey(scope, forward.remotePort)];
+  return entry?.localPort === forward.localPort ? entry.probe : null;
+}
+
+// At most once per forward; only a failed ask is repeated.
+export function needsChromeProbe(
+  model: PortsModel,
+  scope: string,
+  forward: PortForward,
+): boolean {
+  if (forward.status !== "active") return false;
+  const probe = chromeOf(model, scope, forward);
+  return probe === null || probe === "failed";
+}
+
+export function chromeProbeStarted(
+  model: PortsModel,
+  scope: string,
+  forward: PortForward,
+  run: number,
+): PortsModel {
+  return {
+    ...model,
+    chrome: {
+      ...model.chrome,
+      [chromeKey(scope, forward.remotePort)]: {
+        scope,
+        remotePort: forward.remotePort,
+        localPort: forward.localPort,
+        probe: "probing",
+        run,
+      },
+    },
+  };
+}
+
+// An answer for a forward that ended or was asked again meanwhile is dropped.
+export function chromeProbeEnded(
+  model: PortsModel,
+  scope: string,
+  remotePort: number,
+  run: number,
+  probe: Exclude<ChromeProbe, "probing">,
+): PortsModel {
+  const key = chromeKey(scope, remotePort);
+  const entry = model.chrome[key];
+  if (entry?.run !== run) return model;
+  return { ...model, chrome: { ...model.chrome, [key]: { ...entry, probe } } };
 }
 
 export function highlight(
@@ -371,7 +501,13 @@ export function newestOffer(
   return null;
 }
 
-export type RowAction = "open" | "openInBrowser" | "copy" | "retry" | "stop";
+export type RowAction =
+  | "open"
+  | "openInBrowser"
+  | "copy"
+  | "viewBrowser"
+  | "retry"
+  | "stop";
 
 export type PortRowView = {
   remotePort: number;
@@ -384,7 +520,13 @@ export type PortRowView = {
   status: ForwardStatus;
   highlighted: boolean;
   working: boolean;
+  // Null where the browser view is not offered or the forward was not asked yet.
+  chrome: ChromeProbe | null;
+  // The "Chrome" mark, only on an active row.
+  chromeMark: boolean;
   actions: readonly RowAction[];
+  // Shown but not usable, as View browser on a disconnected Chrome row.
+  unavailable: readonly RowAction[];
 };
 
 const ACTIVE_ACTIONS: readonly RowAction[] = [
@@ -393,27 +535,179 @@ const ACTIVE_ACTIONS: readonly RowAction[] = [
   "copy",
   "stop",
 ];
+const CHROME_ACTIONS: readonly RowAction[] = [
+  "open",
+  "openInBrowser",
+  "copy",
+  "viewBrowser",
+  "stop",
+];
 const DISCONNECTED_ACTIONS: readonly RowAction[] = ["retry", "stop"];
+const DISCONNECTED_CHROME_ACTIONS: readonly RowAction[] = [
+  "retry",
+  "stop",
+  "viewBrowser",
+];
+const NO_ACTIONS: readonly RowAction[] = [];
+const VIEW_BROWSER: readonly RowAction[] = ["viewBrowser"];
 
+function rowActions(
+  status: ForwardStatus,
+  chrome: boolean,
+): Pick<PortRowView, "actions" | "unavailable"> {
+  if (status === "active")
+    return {
+      actions: chrome ? CHROME_ACTIONS : ACTIVE_ACTIONS,
+      unavailable: NO_ACTIONS,
+    };
+  return chrome
+    ? { actions: DISCONNECTED_CHROME_ACTIONS, unavailable: VIEW_BROWSER }
+    : { actions: DISCONNECTED_ACTIONS, unavailable: NO_ACTIONS };
+}
+
+// `browser`: the platform offers the remote browser view.
 export function rowViews(
   model: PortsModel,
   scope: string | null,
+  browser = false,
 ): PortRowView[] {
   if (scope === null) return [];
-  return forwardsOf(model, scope).map((f) => ({
-    remotePort: f.remotePort,
-    localPort: f.localPort,
-    label: `${f.remotePort} -> localhost:${f.localPort}`,
-    address: `localhost:${f.localPort}`,
-    url: `http://localhost:${f.localPort}`,
-    moved: f.localPort !== f.remotePort,
-    status: f.status,
-    highlighted:
-      model.highlighted?.scope === scope &&
-      model.highlighted.port === f.remotePort,
-    working: isPending(model, scope, f.remotePort),
-    actions: f.status === "active" ? ACTIVE_ACTIONS : DISCONNECTED_ACTIONS,
-  }));
+  return forwardsOf(model, scope).map((f) => {
+    const chrome = browser ? chromeOf(model, scope, f) : null;
+    const isChrome = chrome === "chrome";
+    return {
+      remotePort: f.remotePort,
+      localPort: f.localPort,
+      label: `${f.remotePort} -> ${macAddress(f.localPort)}`,
+      address: macAddress(f.localPort),
+      url: macUrl(f.localPort),
+      moved: f.localPort !== f.remotePort,
+      status: f.status,
+      highlighted:
+        model.highlighted?.scope === scope &&
+        model.highlighted.port === f.remotePort,
+      working: isPending(model, scope, f.remotePort),
+      chrome,
+      chromeMark: isChrome && f.status === "active",
+      ...rowActions(f.status, isChrome),
+    };
+  });
+}
+
+export const CHROME_REQUIRED_TEXT =
+  "Google Chrome is required on this Mac to view the remote browser.";
+export const NO_PAGE_TEXT = "No page is open in the remote browser.";
+
+export function viewBrowserFailedText(reason: unknown): string {
+  return `Could not view the remote browser: ${String(reason)}`;
+}
+
+export function openChromeFailedText(reason: string | null): string {
+  return reason
+    ? `Could not open Google Chrome: ${reason}`
+    : "Could not open Google Chrome.";
+}
+
+export function browserNoticeText(server: string): string {
+  return `Anyone who can reach this port can control the browser on ${server}, including the accounts signed in there. Terax keeps it reachable from this Mac only.`;
+}
+
+export type ViewOutcome =
+  | { kind: "done" }
+  | { kind: "refresh" }
+  | { kind: "guide" }
+  | { kind: "toast"; text: string; error: boolean };
+
+// The guide explains the server setup, so it answers only what the server
+// did; a failed open on this Mac names its own reason instead.
+export function viewOutcome(view: BrowserView): ViewOutcome {
+  switch (view.status) {
+    case "opened":
+      return { kind: "done" };
+    case "forward_gone":
+      return { kind: "refresh" };
+    case "chrome_missing":
+      return { kind: "toast", text: CHROME_REQUIRED_TEXT, error: true };
+    case "no_page":
+      return { kind: "toast", text: NO_PAGE_TEXT, error: false };
+    case "open_failed":
+      return {
+        kind: "toast",
+        text: openChromeFailedText(view.reason),
+        error: true,
+      };
+    case "origin_refused":
+    case "unreachable":
+      return { kind: "guide" };
+  }
+}
+
+// Chrome's usual debugging port, for a guide without a matching forward.
+export const DEFAULT_DEBUG_PORT = 9222;
+
+export type GuidePorts = { remotePort: number; localPort: number };
+
+// A Chrome row first, then a forward of the usual port, else that port.
+export function guidePorts(model: PortsModel, scope: string): GuidePorts {
+  const list = forwardsOf(model, scope);
+  const found =
+    list.find((f) => chromeOf(model, scope, f) === "chrome") ??
+    list.find((f) => f.remotePort === DEFAULT_DEBUG_PORT);
+  return found
+    ? { remotePort: found.remotePort, localPort: found.localPort }
+    : { remotePort: DEFAULT_DEBUG_PORT, localPort: DEFAULT_DEBUG_PORT };
+}
+
+export type GuideStep = {
+  text: string;
+  // Set where the command depends on the server's setup.
+  example: string | null;
+  command: string | null;
+};
+
+export type BrowserGuide = {
+  title: string;
+  intro: string;
+  steps: readonly GuideStep[];
+  macPortNote: string;
+  warning: string;
+};
+
+export function browserGuide(
+  server: string,
+  { remotePort, localPort }: GuidePorts,
+): BrowserGuide {
+  const origin = macOrigin(localPort);
+  return {
+    title: "Set up browser view",
+    intro: `Run these steps on ${server}. Terax changes nothing on the server.`,
+    steps: [
+      {
+        text: `Start Chrome on the server with remote debugging. The program name depends on the system (google-chrome, chromium or Chrome for Testing). Chrome refuses the view without --remote-allow-origins, and it must be exactly ${origin}, not 127.0.0.1.`,
+        example: "Example:",
+        command: `google-chrome --headless=new --remote-debugging-port=${remotePort} --user-data-dir="$HOME/.cache/terax-remote-chrome" --remote-allow-origins=${origin}`,
+      },
+      {
+        text: "Attach the Chrome DevTools MCP of your coding agent to this Chrome. The setup can differ on your server.",
+        example: "Example for Claude Code:",
+        command: `claude mcp add chrome-devtools -- npx -y chrome-devtools-mcp@latest --browserUrl http://127.0.0.1:${remotePort}`,
+      },
+      {
+        text: "Check that the debugging port listens on the server only (127.0.0.1 or [::1]).",
+        example: null,
+        command: `ss -ltn 'sport = :${remotePort}'`,
+      },
+      {
+        text: `In Terax, forward port ${remotePort}. If it is already forwarded, stop it and forward it again.`,
+        example: null,
+        command: null,
+      },
+    ],
+    macPortNote:
+      "If the Mac port changes, for example because the number was taken on this Mac, restart Chrome on the server with the new origin.",
+    warning:
+      "Keep the debugging port reachable on the server only. Never start Chrome with --remote-debugging-address=0.0.0.0 or open the port in a firewall.",
+  };
 }
 
 export type PortsSummary = {

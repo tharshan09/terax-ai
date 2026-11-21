@@ -454,6 +454,8 @@ pub fn run() {
             ports::ssh_port_forward,
             ports::ssh_port_stop,
             ports::ssh_port_list,
+            ports::chrome::ssh_port_chrome,
+            ports::chrome::ssh_port_view_browser,
             tmux::tmux_list_sessions,
             tmux::tmux_kill_session,
             tmux::tmux_rename_session,
