@@ -100,6 +100,14 @@ let viewStatus: BrowserViewStatus = "opened";
 let viewReason: string | null = null;
 let viewAnswer: (view: BrowserView) => Promise<BrowserView> = async (v) => v;
 
+function answer(
+  status: BrowserViewStatus,
+  localPort = 9223,
+  reason: string | null = null,
+): BrowserView {
+  return { status, remotePort: 9222, localPort, reason };
+}
+
 function seed(
   host: string,
   list: PortForward[],
@@ -534,6 +542,172 @@ describe("View browser (AC-3 to AC-7)", () => {
     expect(toast).not.toHaveBeenCalled();
     expect(toast.error).not.toHaveBeenCalled();
     expect(guide()).toBeNull();
+  });
+});
+
+describe("an answer for a forward that changed during the check", () => {
+  // Holds the backend's answer until the test hands it over.
+  function deferView(): (view: BrowserView | Error) => Promise<void> {
+    let settleView!: (view: BrowserView | Error) => void;
+    viewAnswer = () =>
+      new Promise((resolve, reject) => {
+        settleView = (view) =>
+          view instanceof Error ? reject(view.message) : resolve(view);
+      });
+    return async (view) => {
+      await act(async () => settleView(view));
+      await settle();
+    };
+  }
+
+  async function startView() {
+    disk.set("browserNoticeConfirmed", ["ssh:devbox"]);
+    seedDevbox();
+    const reply = deferView();
+    render(<PortsStatus />);
+    await openList();
+    await press(9222, "View browser");
+    expect(calls("ssh_port_view_browser")).toHaveLength(1);
+    return reply;
+  }
+
+  function nothingShown() {
+    expect(guide()).toBeNull();
+    expect(toast).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(openUrl).not.toHaveBeenCalled();
+  }
+
+  const answers: [string, BrowserView | Error][] = [
+    ["an unreachable view", answer("unreachable")],
+    ["a refused origin", answer("origin_refused")],
+    ["a missing Chrome", answer("chrome_missing")],
+    ["no page", answer("no_page")],
+    ["a failed open", answer("open_failed", 9223, "gone")],
+    ["a gone forward", answer("forward_gone")],
+    ["an error", new Error("no active forward of port 9222 on devbox")],
+  ];
+
+  for (const [name, view] of answers)
+    it(`ends quietly on ${name} after Stop`, async () => {
+      const reply = await startView();
+      await press(9222, "Stop");
+      expect(
+        screen.getAllByTestId("ports-row").map((r) => r.dataset.status),
+      ).toEqual(["active", "disconnected"]);
+      await reply(view);
+      nothingShown();
+    });
+
+  it("never shows the guide with the old Mac port after a new forward", async () => {
+    const reply = await startView();
+    await press(9222, "Stop");
+    forwardAnswer = () => active(9222, 9224);
+    await forwardTyped(9222);
+    expect(within(row(9222)).getByTestId("ports-row-label").textContent).toBe(
+      "9222 -> localhost:9224",
+    );
+    expect(toast).toHaveBeenCalledWith(
+      "Port 9222 is available at localhost:9224",
+    );
+    toast.mockClear();
+    await reply(answer("unreachable", 9223));
+    nothingShown();
+    expect(document.body.textContent).not.toContain("localhost:9223");
+  });
+
+  it("ends quietly when the workspace left the server meanwhile", async () => {
+    seed("other", [active(9222, 9223)], { 9222: "chrome" });
+    const reply = await startView();
+    await act(async () => useWorkspaceEnvStore.setState({ env: OTHER }));
+    await settle();
+    await reply(answer("unreachable"));
+    nothingShown();
+    expect(useBrowserViewStore.getState().dialog).toBeNull();
+  });
+
+  it("shows the guide of the same forward and opens the list it was closed in", async () => {
+    const reply = await startView();
+    await closeList();
+    expect(screen.queryByTestId("ports-list")).toBeNull();
+    await reply(answer("unreachable"));
+    expect(screen.queryByTestId("ports-list")).not.toBeNull();
+    expect(guide()?.textContent).toContain(
+      "--remote-allow-origins=http://localhost:9223",
+    );
+  });
+
+  it("asks the backend once for clicks while the check runs", async () => {
+    const reply = await startView();
+    await press(9222, "View browser");
+    await press(9222, "View browser");
+    expect(calls("ssh_port_view_browser")).toHaveLength(1);
+    await reply(answer("opened"));
+    await press(9222, "View browser");
+    expect(calls("ssh_port_view_browser")).toHaveLength(2);
+    await reply(answer("opened"));
+  });
+});
+
+describe("the notice while it is open", () => {
+  async function showNotice() {
+    seedDevbox();
+    render(<PortsStatus />);
+    await openList();
+    await press(9222, "View browser");
+    expect(notice()).not.toBeNull();
+  }
+
+  function nothingDone() {
+    expect(writes).not.toHaveBeenCalled();
+    expect(commandsBut("ssh_port_list")).toEqual([]);
+    expect(disk.get("browserNoticeConfirmed")).toBeUndefined();
+  }
+
+  it("counts closing the list as Cancel", async () => {
+    await showNotice();
+    await closeList();
+    await settle();
+    expect(useBrowserViewStore.getState().dialog).toBeNull();
+    nothingDone();
+
+    await openList();
+    expect(notice()).toBeNull();
+    nothingDone();
+
+    await press(9222, "View browser");
+    expect(notice()).not.toBeNull();
+  });
+
+  it("counts leaving the server's workspace as Cancel", async () => {
+    seed("other", [active(9222, 9223)], { 9222: "chrome" });
+    await showNotice();
+    await act(async () => useWorkspaceEnvStore.setState({ env: OTHER }));
+    await settle();
+    expect(useBrowserViewStore.getState().dialog).toBeNull();
+    expect(notice()).toBeNull();
+    nothingDone();
+
+    await act(async () => useWorkspaceEnvStore.setState({ env: DEVBOX }));
+    await settle();
+    expect(notice()).toBeNull();
+    await press(9222, "View browser");
+    expect(notice()?.textContent).toContain("the browser on devbox,");
+    nothingDone();
+  });
+
+  it("stays one notice on a second click and writes nothing until Continue", async () => {
+    await showNotice();
+    await press(9222, "View browser");
+    expect(screen.queryAllByTestId("view-browser-notice")).toHaveLength(1);
+    nothingDone();
+
+    await choose("Continue");
+    expect(writes.mock.calls).toEqual([
+      ["browserNoticeConfirmed", ["ssh:devbox"]],
+    ]);
+    expect(calls("ssh_port_view_browser")).toHaveLength(1);
+    expect(notice()).toBeNull();
   });
 });
 
