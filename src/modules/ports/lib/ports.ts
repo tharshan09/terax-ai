@@ -1,4 +1,4 @@
-import { type DetectedPort, validPort } from "./portDetect";
+import { type DetectedPort, macAddress, macUrl, validPort } from "./portDetect";
 
 export type ForwardStatus = "active" | "disconnected";
 
@@ -7,6 +7,19 @@ export type PortForward = {
   remotePort: number;
   localPort: number;
   status: ForwardStatus;
+};
+
+// Shape of `ports::chrome::BrowserTarget` (serde camelCase).
+export type BrowserTargetStatus =
+  | "ready"
+  | "origin_refused"
+  | "no_page"
+  | "unreachable";
+
+export type BrowserTarget = {
+  status: BrowserTargetStatus;
+  pageId: string | null;
+  origin: string;
 };
 
 export type PortOffer = {
@@ -68,7 +81,7 @@ export function stopFailedText(port: number, reason: unknown): string {
 export function movedPortText(forward: PortForward): string | null {
   return forward.localPort === forward.remotePort
     ? null
-    : `Port ${forward.remotePort} is available at localhost:${forward.localPort}`;
+    : `Port ${forward.remotePort} is available at ${macAddress(forward.localPort)}`;
 }
 
 export type PortPhase =
@@ -403,9 +416,9 @@ export function rowViews(
   return forwardsOf(model, scope).map((f) => ({
     remotePort: f.remotePort,
     localPort: f.localPort,
-    label: `${f.remotePort} -> localhost:${f.localPort}`,
-    address: `localhost:${f.localPort}`,
-    url: `http://localhost:${f.localPort}`,
+    label: `${f.remotePort} -> ${macAddress(f.localPort)}`,
+    address: macAddress(f.localPort),
+    url: macUrl(f.localPort),
     moved: f.localPort !== f.remotePort,
     status: f.status,
     highlighted:
