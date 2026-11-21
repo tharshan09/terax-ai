@@ -22,10 +22,6 @@
     "core:event:allow-unlisten",
     "opener:default",
     {
-      "identifier": "opener:allow-open-url",
-      "allow": [{ "url": "http://localhost:*", "app": "Google Chrome" }]
-    },
-    {
       "identifier": "opener:allow-open-path",
       "allow": [{ "path": "**" }],
       "deny": [

@@ -80,12 +80,11 @@ export function parseLoopbackLink(text: string): LoopbackAddress | null {
   };
 }
 
-// Every Mac address of a forward is built here. The Mac side is always named
+// Every Mac address of a forward is built here, except the remote browser's
+// live view, which only Rust builds and opens. The Mac side is always named
 // `localhost` (CSP connect-src allows it), the same as in the Rust check: a
 // remote Chrome compares the origin letter by letter and refuses `127.0.0.1`.
 export const MAC_HOST = "localhost";
-// Chrome target ids are hex; anything else would leave the viewer path.
-const PAGE_ID = /^[A-Za-z0-9]{1,128}$/;
 
 export function macAddress(localPort: number): string {
   return `${MAC_HOST}:${localPort}`;
@@ -97,13 +96,6 @@ export function macUrl(localPort: number): string {
 
 export function macOrigin(localPort: number): string {
   return macUrl(localPort);
-}
-
-// The remote Chrome serves its own viewer, so nothing loads from a third host.
-export function macViewerUrl(localPort: number, pageId: string): string | null {
-  if (!PAGE_ID.test(pageId)) return null;
-  const host = macAddress(localPort);
-  return `http://${host}/devtools/inspector.html?ws=${host}/devtools/page/${pageId}`;
 }
 
 export function macUrlFor(address: LoopbackAddress, localPort: number): string {

@@ -9,7 +9,8 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  type BrowserTarget,
+  type BrowserView,
+  type BrowserViewStatus,
   type ChromeProbe,
   chromeProbeEnded,
   chromeProbeStarted,
@@ -80,13 +81,6 @@ vi.mock("@tauri-apps/plugin-store", () => ({
 
 const DEVBOX: WorkspaceEnv = { kind: "ssh", host: "devbox", label: "devbox" };
 const OTHER: WorkspaceEnv = { kind: "ssh", host: "other", label: "other" };
-const VIEWER =
-  "http://localhost:9223/devtools/inspector.html?ws=localhost:9223/devtools/page/A1B2";
-const READY: BrowserTarget = {
-  status: "ready",
-  pageId: "A1B2",
-  origin: "http://localhost:9223",
-};
 
 function active(remotePort: number, localPort = remotePort): PortForward {
   return { remotePort, localPort, status: "active" };
@@ -100,8 +94,11 @@ function disconnected(remotePort: number, localPort = remotePort): PortForward {
 const server = new Map<string, PortForward[]>();
 let chromeAnswer: (port: number) => Promise<boolean> = async () => false;
 let forwardAnswer: (port: number) => PortForward = (port) => active(port);
-let installed = true;
-let target: BrowserTarget = READY;
+// What ssh_port_view_browser answers; the ports are the server's forward,
+// as the backend reads them from its registry.
+let viewStatus: BrowserViewStatus = "opened";
+let viewReason: string | null = null;
+let viewAnswer: (view: BrowserView) => Promise<BrowserView> = async (v) => v;
 
 function seed(
   host: string,
@@ -216,8 +213,9 @@ async function pressEscape() {
 beforeEach(() => {
   server.clear();
   disk.clear();
-  installed = true;
-  target = READY;
+  viewStatus = "opened";
+  viewReason = null;
+  viewAnswer = async (v) => v;
   chromeAnswer = async () => false;
   forwardAnswer = (port) => active(port);
   platform.IS_MAC = true;
@@ -247,10 +245,17 @@ beforeEach(() => {
         }
         case "ssh_port_chrome":
           return chromeAnswer(args.remotePort as number);
-        case "chrome_installed":
-          return installed;
-        case "ssh_port_browser_target":
-          return target;
+        case "ssh_port_view_browser": {
+          const forward = list.find((f) => f.remotePort === args.remotePort);
+          if (!forward)
+            throw `no active forward of port ${args.remotePort} on ${host}`;
+          return viewAnswer({
+            status: viewStatus,
+            remotePort: forward.remotePort,
+            localPort: forward.localPort,
+            reason: viewReason,
+          });
+        }
       }
       throw new Error(`unexpected ${cmd}`);
     },
@@ -421,7 +426,7 @@ describe("View browser (AC-3 to AC-7)", () => {
     expect(notice()).not.toBeNull();
   });
 
-  it("remembers Continue per server and opens the viewer in Google Chrome", async () => {
+  it("remembers Continue per server and lets the backend open the view", async () => {
     seedDevbox();
     seed("other", [active(9222, 9223)], { 9222: "chrome" });
     render(<PortsStatus />);
@@ -430,29 +435,30 @@ describe("View browser (AC-3 to AC-7)", () => {
     await choose("Continue");
 
     expect(disk.get("browserNoticeConfirmed")).toEqual(["ssh:devbox"]);
-    expect(openUrl.mock.calls).toEqual([[VIEWER, "Google Chrome"]]);
-    expect(calls("ssh_port_browser_target")).toEqual([
-      ["ssh_port_browser_target", { host: "devbox", remotePort: 9222 }],
+    expect(calls("ssh_port_view_browser")).toEqual([
+      ["ssh_port_view_browser", { host: "devbox", remotePort: 9222 }],
     ]);
+    expect(commandsBut("ssh_port_list")).toEqual(["ssh_port_view_browser"]);
 
     await press(9222, "View browser");
     expect(notice()).toBeNull();
-    expect(openUrl.mock.calls).toEqual([
-      [VIEWER, "Google Chrome"],
-      [VIEWER, "Google Chrome"],
-    ]);
+    expect(calls("ssh_port_view_browser")).toHaveLength(2);
 
     await act(async () => useWorkspaceEnvStore.setState({ env: OTHER }));
     await settle();
     await press(9222, "View browser");
     expect(notice()).not.toBeNull();
     expect(notice()?.textContent).toContain("the browser on other,");
-    expect(openUrl).toHaveBeenCalledTimes(2);
+    expect(calls("ssh_port_view_browser")).toHaveLength(2);
+    expect(openUrl).not.toHaveBeenCalled();
+    expect(toast).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(guide()).toBeNull();
   });
 
   it("asks for Google Chrome when it is missing on this Mac (AC-6)", async () => {
     disk.set("browserNoticeConfirmed", ["ssh:devbox"]);
-    installed = false;
+    viewStatus = "chrome_missing";
     seedDevbox();
     render(<PortsStatus />);
     await openList();
@@ -461,49 +467,18 @@ describe("View browser (AC-3 to AC-7)", () => {
     expect(toast.error).toHaveBeenCalledWith(
       "Google Chrome is required on this Mac to view the remote browser.",
     );
-    expect(calls("ssh_port_browser_target")).toEqual([]);
-    expect(openUrl).not.toHaveBeenCalled();
+    expect(guide()).toBeNull();
   });
 
-  const fallbacks: [string, () => void, boolean][] = [
-    [
-      "a refused origin",
-      () => {
-        target = {
-          status: "origin_refused",
-          pageId: null,
-          origin: READY.origin,
-        };
-      },
-      false,
-    ],
-    [
-      "an unreachable view",
-      () => {
-        target = { status: "unreachable", pageId: null, origin: READY.origin };
-      },
-      false,
-    ],
-    [
-      "another origin",
-      () => {
-        target = { ...READY, origin: "http://127.0.0.1:9223" };
-      },
-      false,
-    ],
-    [
-      "a failed open",
-      () => {
-        openUrl.mockRejectedValue("Google Chrome not found");
-      },
-      true,
-    ],
+  const fallbacks: [string, BrowserViewStatus][] = [
+    ["a refused origin", "origin_refused"],
+    ["an unreachable view", "unreachable"],
   ];
 
-  for (const [name, arrange, opened] of fallbacks)
+  for (const [name, status] of fallbacks)
     it(`opens the guide for devbox 9222 -> 9223 on ${name} (AC-7)`, async () => {
       disk.set("browserNoticeConfirmed", ["ssh:devbox"]);
-      arrange();
+      viewStatus = status;
       seedDevbox();
       render(<PortsStatus />);
       await openList();
@@ -517,13 +492,26 @@ describe("View browser (AC-3 to AC-7)", () => {
       expect(shown.textContent).toContain(
         "--remote-allow-origins=http://localhost:9223",
       );
-      expect(openUrl).toHaveBeenCalledTimes(opened ? 1 : 0);
-      if (opened) expect(openUrl).toHaveBeenCalledWith(VIEWER, "Google Chrome");
+      expect(toast.error).not.toHaveBeenCalled();
     });
+
+  it("names the reason of a failed open on this Mac, without the server guide", async () => {
+    disk.set("browserNoticeConfirmed", ["ssh:devbox"]);
+    viewStatus = "open_failed";
+    viewReason = "Unable to find application named 'Google Chrome'";
+    seedDevbox();
+    render(<PortsStatus />);
+    await openList();
+    await press(9222, "View browser");
+    expect(toast.error).toHaveBeenCalledWith(
+      "Could not open Google Chrome: Unable to find application named 'Google Chrome'",
+    );
+    expect(guide()).toBeNull();
+  });
 
   it("says so when no page is open, without the guide (AC-7)", async () => {
     disk.set("browserNoticeConfirmed", ["ssh:devbox"]);
-    target = { status: "no_page", pageId: null, origin: READY.origin };
+    viewStatus = "no_page";
     seedDevbox();
     render(<PortsStatus />);
     await openList();
@@ -532,7 +520,20 @@ describe("View browser (AC-3 to AC-7)", () => {
       "No page is open in the remote browser.",
     );
     expect(guide()).toBeNull();
-    expect(openUrl).not.toHaveBeenCalled();
+  });
+
+  it("only asks liveness again when the backend found the forward gone", async () => {
+    disk.set("browserNoticeConfirmed", ["ssh:devbox"]);
+    viewStatus = "forward_gone";
+    seedDevbox();
+    render(<PortsStatus />);
+    await openList();
+    const listed = calls("ssh_port_list").length;
+    await press(9222, "View browser");
+    expect(calls("ssh_port_list")).toHaveLength(listed + 1);
+    expect(toast).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(guide()).toBeNull();
   });
 });
 

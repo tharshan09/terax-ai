@@ -5,7 +5,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BrowserTarget, PortForward } from "@/modules/ports/lib/ports";
+import type { BrowserView, PortForward } from "@/modules/ports/lib/ports";
 import type { WorkspaceEnv } from "@/modules/workspace";
 
 const { invoke, openUrl, disk, writes } = vi.hoisted(() => ({
@@ -55,10 +55,11 @@ const FORWARD: PortForward = {
   localPort: 9223,
   status: "active",
 };
-const TARGET: BrowserTarget = {
-  status: "ready",
-  pageId: "A1B2",
-  origin: "http://localhost:9223",
+const OPENED: BrowserView = {
+  status: "opened",
+  remotePort: 9222,
+  localPort: 9223,
+  reason: null,
 };
 
 // A new app start: every module and the store instance are loaded again.
@@ -90,12 +91,15 @@ beforeEach(() => {
     if (cmd === "ssh_port_forward") return FORWARD;
     if (cmd === "ssh_port_list") return [FORWARD];
     if (cmd === "ssh_port_chrome") return true;
-    if (cmd === "chrome_installed") return true;
-    if (cmd === "ssh_port_browser_target") return TARGET;
+    if (cmd === "ssh_port_view_browser") return OPENED;
     throw new Error(`unexpected ${cmd}`);
   });
   openUrl.mockResolvedValue(undefined);
 });
+
+function views() {
+  return invoke.mock.calls.filter(([cmd]) => cmd === "ssh_port_view_browser");
+}
 
 afterEach(() => {
   invoke.mockReset();
@@ -117,7 +121,7 @@ describe("remote browser notice", () => {
     app.store.answerBrowserNotice(false);
     await cancelled;
     expect(writes).not.toHaveBeenCalled();
-    expect(openUrl).not.toHaveBeenCalled();
+    expect(views()).toHaveLength(0);
 
     const confirmed = app.store.viewBrowser(DEVBOX, 9222);
     await settle();
@@ -126,7 +130,7 @@ describe("remote browser notice", () => {
     expect(writes.mock.calls).toEqual([
       ["browserNoticeConfirmed", ["ssh:devbox"]],
     ]);
-    expect(openUrl).toHaveBeenCalledTimes(1);
+    expect(views()).toHaveLength(1);
 
     app = await boot();
     expect(await app.settings.browserNoticeConfirmed("ssh:devbox")).toBe(true);
@@ -134,7 +138,7 @@ describe("remote browser notice", () => {
     await forwardChrome(app, DEVBOX);
     await app.store.viewBrowser(DEVBOX, 9222);
     expect(app.store.useBrowserViewStore.getState().dialog).toBeNull();
-    expect(openUrl).toHaveBeenCalledTimes(2);
+    expect(views()).toHaveLength(2);
 
     await forwardChrome(app, OTHER);
     void app.store.viewBrowser(OTHER, 9222);

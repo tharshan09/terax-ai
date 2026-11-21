@@ -1,4 +1,4 @@
-// GUARD: Responses that are read come from the Rust guarded client, and the remote Chrome commands take only host and server port of an existing forward, never a URL, and stay out of the AI module.
+// GUARD: Responses that are read come from the Rust guarded client, and the remote Chrome commands take only host and server port of an existing forward, never a URL, open the view from Rust only, and stay out of the AI module.
 // DISPOSITION: specs/2026-11-20-ssh-remote-workflow/wave-3/slop-dispositions.md
 // RULE: --
 import { readdirSync, readFileSync } from "node:fs";
@@ -16,8 +16,8 @@ const LIB_RS = readFileSync(join(ROOT, "src-tauri/src/lib.rs"), "utf8");
 // Test helpers below this line may open sockets of their own.
 const CHROME_PRODUCTION = CHROME_RS.split("#[cfg(test)]")[0];
 
-const PROBE_COMMANDS = ["ssh_port_chrome", "ssh_port_browser_target"];
-const COMMANDS = [...PROBE_COMMANDS, "chrome_installed"];
+const COMMANDS = ["ssh_port_chrome", "ssh_port_view_browser"];
+const RETIRED = ["ssh_port_browser_target", "chrome_installed"];
 
 function files(dir: string, keep: (name: string) => boolean): string[] {
   const out: string[] = [];
@@ -40,10 +40,10 @@ function parameters(command: string): string {
   return signature[1].replace(/\s+/g, " ").replace(/,\s*$/, "").trim();
 }
 
-// Keys of the object literal passed with each invoke of a probe command.
+// Keys of the object literal passed with each invoke of a remote Chrome command.
 function invokeKeys(source: string): { command: string; keys: string[] }[] {
   const call =
-    /invoke(?:<[^>]*>)?\(\s*["'`](ssh_port_chrome|ssh_port_browser_target)["'`]\s*(?:,\s*\{([^}]*)\})?/g;
+    /invoke(?:<[^>]*>)?\(\s*["'`](ssh_port_chrome|ssh_port_view_browser)["'`]\s*(?:,\s*\{([^}]*)\})?/g;
   return [...source.matchAll(call)].map(([, command, body]) => ({
     command,
     keys: (body ?? "")
@@ -55,12 +55,24 @@ function invokeKeys(source: string): { command: string; keys: string[] }[] {
 
 describe("remote Chrome probe", () => {
   it("takes only host and server port", () => {
-    for (const command of PROBE_COMMANDS)
+    for (const command of COMMANDS)
       expect(parameters(command), command).toBe(
         "host: String, remote_port: u32",
       );
-    expect(parameters("chrome_installed")).toBe("");
-    expect(CHROME_PRODUCTION.match(/#\[tauri::command\]/g)).toHaveLength(3);
+    expect(CHROME_PRODUCTION.match(/#\[tauri::command\]/g)).toHaveLength(2);
+  });
+
+  it("opens only the view address it built, in Google Chrome, from Rust", () => {
+    expect(CHROME_PRODUCTION.match(/open_url\(/g)).toHaveLength(1);
+    expect(CHROME_PRODUCTION).toMatch(
+      /tauri_plugin_opener::open_url\(url, Some\(CHROME_APP\)\)/,
+    );
+    expect(CHROME_PRODUCTION).toMatch(
+      /const CHROME_APP: &str = "Google Chrome";/,
+    );
+    expect(CHROME_PRODUCTION).toMatch(
+      /let Some\(url\) = viewer_url\(local, &page\)/,
+    );
   });
 
   it("asks the Mac port of a forward as localhost through the guarded client only", () => {
@@ -82,9 +94,11 @@ describe("remote Chrome probe", () => {
       expect(CHROME_PRODUCTION, own).not.toContain(own);
   });
 
-  it("registers exactly the three commands", () => {
+  it("registers exactly the two commands", () => {
     for (const command of COMMANDS)
       expect(LIB_RS).toContain(`ports::chrome::${command},`);
+    expect(LIB_RS.match(/ports::chrome::\w+/g)).toHaveLength(COMMANDS.length);
+    for (const command of RETIRED) expect(LIB_RS).not.toContain(command);
   });
 
   it("is called from the frontend with host and remotePort only", () => {
@@ -106,7 +120,9 @@ describe("remote Chrome probe", () => {
     const offenders = files(ai, (name) => /\.[cm]?[jt]sx?$/.test(name))
       .filter((file) => {
         const text = readFileSync(file, "utf8");
-        return COMMANDS.some((command) => text.includes(command));
+        return [...COMMANDS, ...RETIRED].some((command) =>
+          text.includes(command),
+        );
       })
       .map((file) => relative(SRC, file));
     expect(offenders).toEqual([]);

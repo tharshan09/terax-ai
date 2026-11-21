@@ -3,7 +3,6 @@ import {
   macAddress,
   macOrigin,
   macUrl,
-  macViewerUrl,
   validPort,
 } from "./portDetect";
 
@@ -16,17 +15,21 @@ export type PortForward = {
   status: ForwardStatus;
 };
 
-// Shape of `ports::chrome::BrowserTarget` (serde camelCase).
-export type BrowserTargetStatus =
-  | "ready"
+// Shape of `ports::chrome::BrowserView` (serde camelCase).
+export type BrowserViewStatus =
+  | "opened"
+  | "chrome_missing"
   | "origin_refused"
   | "no_page"
-  | "unreachable";
+  | "unreachable"
+  | "forward_gone"
+  | "open_failed";
 
-export type BrowserTarget = {
-  status: BrowserTargetStatus;
-  pageId: string | null;
-  origin: string;
+export type BrowserView = {
+  status: BrowserViewStatus;
+  remotePort: number;
+  localPort: number;
+  reason: string | null;
 };
 
 export type PortOffer = {
@@ -591,7 +594,6 @@ export function rowViews(
   });
 }
 
-export const CHROME_APP = "Google Chrome";
 export const CHROME_REQUIRED_TEXT =
   "Google Chrome is required on this Mac to view the remote browser.";
 export const NO_PAGE_TEXT = "No page is open in the remote browser.";
@@ -600,30 +602,44 @@ export function viewBrowserFailedText(reason: unknown): string {
   return `Could not view the remote browser: ${String(reason)}`;
 }
 
+export function openChromeFailedText(reason: string | null): string {
+  return reason
+    ? `Could not open Google Chrome: ${reason}`
+    : "Could not open Google Chrome.";
+}
+
 export function browserNoticeText(server: string): string {
   return `Anyone who can reach this port can control the browser on ${server}, including the accounts signed in there. Terax keeps it reachable from this Mac only.`;
 }
 
-export type ViewerPlan =
-  | { kind: "open"; url: string }
+export type ViewOutcome =
+  | { kind: "done" }
+  | { kind: "refresh" }
   | { kind: "guide" }
-  | { kind: "noPage" };
+  | { kind: "toast"; text: string; error: boolean };
 
-// The only way to a URL handed to Chrome: macViewerUrl on the forward's own
-// Mac port, and only when the origin Rust checked is exactly that port's
-// origin. Everything else falls back to the guide.
-export function viewerPlan(
-  target: BrowserTarget,
-  localPort: number,
-): ViewerPlan {
-  if (target.status === "no_page") return { kind: "noPage" };
-  if (target.status !== "ready" || target.origin !== macOrigin(localPort))
-    return { kind: "guide" };
-  const url =
-    typeof target.pageId === "string"
-      ? macViewerUrl(localPort, target.pageId)
-      : null;
-  return url === null ? { kind: "guide" } : { kind: "open", url };
+// The guide explains the server setup, so it answers only what the server
+// did; a failed open on this Mac names its own reason instead.
+export function viewOutcome(view: BrowserView): ViewOutcome {
+  switch (view.status) {
+    case "opened":
+      return { kind: "done" };
+    case "forward_gone":
+      return { kind: "refresh" };
+    case "chrome_missing":
+      return { kind: "toast", text: CHROME_REQUIRED_TEXT, error: true };
+    case "no_page":
+      return { kind: "toast", text: NO_PAGE_TEXT, error: false };
+    case "open_failed":
+      return {
+        kind: "toast",
+        text: openChromeFailedText(view.reason),
+        error: true,
+      };
+    case "origin_refused":
+    case "unreachable":
+      return { kind: "guide" };
+  }
 }
 
 // Chrome's usual debugging port, for a guide without a matching forward.

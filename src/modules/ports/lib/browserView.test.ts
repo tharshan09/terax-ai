@@ -2,12 +2,11 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { macOrigin, macViewerUrl } from "@/modules/ports/lib/portDetect";
 import {
-  type BrowserTarget,
+  type BrowserView,
+  type BrowserViewStatus,
   browserGuide,
   browserNoticeText,
-  CHROME_APP,
   type ChromeProbe,
   chromeOf,
   chromeProbeEnded,
@@ -21,7 +20,7 @@ import {
   type PortForward,
   type PortsModel,
   rowViews,
-  viewerPlan,
+  viewOutcome,
 } from "@/modules/ports/lib/ports";
 
 const DEVBOX = "ssh:devbox";
@@ -168,74 +167,48 @@ describe("chrome mark per forward (AC-1, AC-2)", () => {
   });
 });
 
-describe("viewer plan (AC-4, AC-7)", () => {
-  const ready = (over: Partial<BrowserTarget> = {}): BrowserTarget => ({
-    status: "ready",
-    pageId: "A1B2",
-    origin: "http://localhost:9223",
-    ...over,
+describe("view outcome (AC-6, AC-7)", () => {
+  const view = (
+    status: BrowserViewStatus,
+    reason: string | null = null,
+  ): BrowserView => ({ status, remotePort: 9222, localPort: 9223, reason });
+
+  it("shows the guide only for what the server answered", () => {
+    expect(viewOutcome(view("origin_refused"))).toEqual({ kind: "guide" });
+    expect(viewOutcome(view("unreachable"))).toEqual({ kind: "guide" });
   });
 
-  it("opens the viewer of the page on the forward's Mac port", () => {
-    expect(viewerPlan(ready(), 9223)).toEqual({
-      kind: "open",
-      url: "http://localhost:9223/devtools/inspector.html?ws=localhost:9223/devtools/page/A1B2",
+  it("names a failed open on this Mac with its reason, without the guide", () => {
+    expect(
+      viewOutcome(view("open_failed", "Unable to find application")),
+    ).toEqual({
+      kind: "toast",
+      text: "Could not open Google Chrome: Unable to find application",
+      error: true,
+    });
+    expect(viewOutcome(view("open_failed"))).toEqual({
+      kind: "toast",
+      text: "Could not open Google Chrome.",
+      error: true,
     });
   });
 
-  it("falls back to the guide for a refused or unreachable view or another origin", () => {
-    for (const target of [
-      ready({ status: "origin_refused", pageId: null }),
-      ready({ status: "unreachable", pageId: null }),
-      ready({ origin: "http://127.0.0.1:9223" }),
-      ready({ origin: "http://localhost:9224" }),
-      ready({ origin: "http://localhost:9223/" }),
-      ready({ origin: "HTTP://localhost:9223" }),
-      ready({ pageId: null }),
-    ])
-      expect(viewerPlan(target, 9223), JSON.stringify(target)).toEqual({
-        kind: "guide",
-      });
-    expect(
-      viewerPlan(ready({ status: "no_page", pageId: null }), 9223),
-    ).toEqual({ kind: "noPage" });
+  it("asks for Chrome, reports a missing page and ends quietly otherwise", () => {
+    expect(viewOutcome(view("chrome_missing"))).toEqual({
+      kind: "toast",
+      text: "Google Chrome is required on this Mac to view the remote browser.",
+      error: true,
+    });
+    expect(viewOutcome(view("no_page"))).toEqual({
+      kind: "toast",
+      text: "No page is open in the remote browser.",
+      error: false,
+    });
+    expect(viewOutcome(view("opened"))).toEqual({ kind: "done" });
+    expect(viewOutcome(view("forward_gone"))).toEqual({ kind: "refresh" });
   });
 
-  it("never builds a URL with another host, whatever Rust reports", () => {
-    const pageIds = [
-      "A1B2",
-      "1@evil.example",
-      "@evil.example",
-      "a/b",
-      "../../x",
-      "A1B2#@evil.example",
-      "A1B2?x=1",
-      "A1 B2",
-      "",
-    ];
-    const origins = [
-      "http://localhost:9223",
-      "http://localhost:1@evil.example",
-      "http://localhost:9223@evil.example",
-      "http://evil.example",
-    ];
-    for (const pageId of pageIds)
-      for (const origin of origins) {
-        const plan = viewerPlan({ status: "ready", pageId, origin }, 9223);
-        if (plan.kind !== "open") continue;
-        expect(plan.url).toBe(macViewerUrl(9223, pageId));
-        const url = new URL(plan.url);
-        expect(url.host).toBe("localhost:9223");
-        expect(url.username + url.password).toBe("");
-        expect(plan.url).not.toContain("@");
-        expect(url.searchParams.get("ws")).toBe(
-          `localhost:9223/devtools/page/${pageId}`,
-        );
-      }
-    expect(macOrigin(9223)).toBe("http://localhost:9223");
-  });
-
-  it("hands Chrome only the plan's URL, from one place", () => {
+  it("never opens anything in a chosen app from the frontend", () => {
     const root = fileURLToPath(new URL("../../../", import.meta.url));
     const files = (dir: string): string[] =>
       readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
@@ -253,13 +226,11 @@ describe("viewer plan (AC-4, AC-7)", () => {
           call: call.replace(/\s+/g, " "),
         })),
     );
-    expect(withApp).toEqual([
-      {
-        file: "modules/ports/lib/portsStore.ts",
-        call: "openUrl(plan.url, CHROME_APP)",
-      },
-    ]);
-    expect(CHROME_APP).toBe("Google Chrome");
+    expect(withApp).toEqual([]);
+    const viewerPath = files(root).filter((file) =>
+      readFileSync(file, "utf8").includes("devtools/inspector.html"),
+    );
+    expect(viewerPath).toEqual([]);
   });
 });
 

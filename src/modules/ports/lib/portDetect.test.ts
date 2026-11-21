@@ -7,7 +7,6 @@ import {
   macOrigin,
   macUrl,
   macUrlFor,
-  macViewerUrl,
   PortDetector,
   parseLoopbackAddress,
   parseLoopbackLink,
@@ -178,28 +177,13 @@ describe("Mac address", () => {
     expect(macUrl(5174)).toBe("http://localhost:5174");
   });
 
-  it("builds base, origin and live view of a remote browser from one host", () => {
+  it("builds base and origin of a remote browser from one host", () => {
     expect(macAddress(9223)).toBe("localhost:9223");
     expect(macUrl(9223)).toBe("http://localhost:9223");
     expect(macOrigin(9223)).toBe("http://localhost:9223");
-    const view = macViewerUrl(9223, "A1B2");
-    expect(view).toBe(
-      "http://localhost:9223/devtools/inspector.html?ws=localhost:9223/devtools/page/A1B2",
-    );
-    const hosts = [...(view ?? "").matchAll(/(?:\/\/|ws=)([^/?#]+)/g)].map(
-      (m) => m[1],
-    );
-    expect(hosts).toEqual(["localhost:9223", "localhost:9223"]);
-    expect(new URL(view ?? "").host).toBe("localhost:9223");
   });
 
-  it("has no live view for a page id that is not a plain Chrome id", () => {
-    for (const id of ["a/b", "", "../x", "A1?x", "A1#", "A 1", "F".repeat(129)])
-      expect(macViewerUrl(9223, id), id).toBeNull();
-    expect(macViewerUrl(9223, "F".repeat(128))).not.toBeNull();
-  });
-
-  it("names the Mac host exactly as the Rust origin check does", () => {
+  it("names the Mac host exactly as the Rust origin check and live view do", () => {
     const rust = readFileSync(
       fileURLToPath(
         new URL(
@@ -212,7 +196,7 @@ describe("Mac address", () => {
     expect(MAC_HOST).toBe("localhost");
     expect(rust).toMatch(/pub const MAC_HOST: &str = "localhost";/);
     expect(rust).toMatch(/format!\("http:\/\/\{MAC_HOST\}:\{port\}"\)/);
-    expect(rust).toMatch(/const MAX_PAGE_ID: usize = 128;/);
+    expect(rust).toMatch(/let host = format!\("\{MAC_HOST\}:\{port\}"\);/);
   });
 
   it("keeps scheme, path and query of a clicked address", () => {

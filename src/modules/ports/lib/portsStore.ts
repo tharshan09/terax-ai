@@ -9,7 +9,6 @@ import {
   workspaceScopeKey,
 } from "@/modules/workspace";
 import { invoke } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 import { create } from "zustand";
 import {
@@ -21,9 +20,7 @@ import {
 } from "./portDetect";
 import {
   addOffers,
-  type BrowserTarget,
-  CHROME_APP,
-  CHROME_REQUIRED_TEXT,
+  type BrowserView,
   chromeKey,
   chromeOf,
   chromeProbeEnded,
@@ -43,7 +40,6 @@ import {
   HIGHLIGHT_MS,
   highlight,
   movedPortText,
-  NO_PAGE_TEXT,
   needsChromeProbe,
   newestOffer,
   type PortForward,
@@ -52,7 +48,7 @@ import {
   startForwarding,
   stopFailedText,
   viewBrowserFailedText,
-  viewerPlan,
+  viewOutcome,
 } from "./ports";
 import { browserViewAvailable, setPortsListOpen } from "./portsList";
 
@@ -437,8 +433,21 @@ function activeChrome(scope: string, port: number): PortForward | null {
     : null;
 }
 
-// Notice once per server, then Chrome on this Mac, the page and its origin,
-// and only then the view; a view that cannot open shows the guide.
+// Whether the answer still belongs to what the user sees: the workspace is on
+// that server and the server port is forwarded to the same Mac port.
+function stillForwarded(
+  scope: string,
+  remotePort: number,
+  localPort: number,
+): boolean {
+  if (currentWorkspaceScopeKey() !== scope) return false;
+  const forward = findForward(model(), scope, remotePort);
+  return forward?.status === "active" && forward.localPort === localPort;
+}
+
+// Notice once per server, then the backend checks Chrome on this Mac, the
+// page and its origin, and opens the view; the answer shows a toast or the
+// guide only while the forward is still the one it was asked for.
 export async function viewBrowser(
   env: WorkspaceEnv | null,
   port: number,
@@ -469,35 +478,34 @@ async function openViewer(
   scope: string,
   forward: PortForward,
 ): Promise<void> {
-  let target: BrowserTarget;
+  let view: BrowserView;
   try {
-    if (!(await invoke<boolean>("chrome_installed"))) {
-      toast.error(CHROME_REQUIRED_TEXT);
-      return;
-    }
-    target = await invoke<BrowserTarget>("ssh_port_browser_target", {
+    view = await invoke<BrowserView>("ssh_port_view_browser", {
       host: env.host,
       remotePort: forward.remotePort,
     });
   } catch (err) {
+    if (!stillForwarded(scope, forward.remotePort, forward.localPort)) return;
     toast.error(viewBrowserFailedText(err));
     void refreshForwards(env);
     return;
   }
-  const plan = viewerPlan(target, forward.localPort);
-  if (plan.kind === "noPage") {
-    toast(NO_PAGE_TEXT);
-    return;
+  if (!stillForwarded(scope, forward.remotePort, view.localPort)) return;
+  const outcome = viewOutcome(view);
+  switch (outcome.kind) {
+    case "done":
+      return;
+    case "refresh":
+      void refreshForwards(env);
+      return;
+    case "toast":
+      if (outcome.error) toast.error(outcome.text);
+      else toast(outcome.text);
+      return;
+    case "guide":
+      showGuide(env, scope, {
+        remotePort: forward.remotePort,
+        localPort: view.localPort,
+      });
   }
-  if (plan.kind === "open") {
-    const opened = await openUrl(plan.url, CHROME_APP).then(
-      () => true,
-      () => false,
-    );
-    if (opened) return;
-  }
-  showGuide(env, scope, {
-    remotePort: forward.remotePort,
-    localPort: forward.localPort,
-  });
 }

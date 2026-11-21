@@ -1,12 +1,14 @@
 //! A remote Chrome behind a forward. Only the Mac port of an existing active
 //! forward is ever asked, always as `localhost`, through the guarded client
-//! without redirects; no caller can hand in a URL.
+//! without redirects; no caller can hand in a URL. The live view is opened
+//! from here too, so the webview never names an app or a URL for it.
 
 use super::{blocking, registry, validate_request};
 use crate::modules::net::{guarded_client, Profile};
 use serde_json::Value;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// The frontend names the Mac side the same way; Chrome compares the origin
@@ -17,23 +19,30 @@ const MAX_BODY: usize = 1 << 20;
 const MAX_PAGE_ID: usize = 128;
 // The key only has to be well formed; the socket is dropped after the status.
 const WEBSOCKET_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
-const CHROME_APP: &str = "Applications/Google Chrome.app";
+const CHROME_BUNDLE: &str = "Applications/Google Chrome.app";
+const CHROME_APP: &str = "Google Chrome";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TargetStatus {
-    Ready,
+pub enum ViewStatus {
+    Opened,
+    ChromeMissing,
     OriginRefused,
     NoPage,
     Unreachable,
+    ForwardGone,
+    OpenFailed,
 }
 
+/// The ports the check ran on, so a guide names the origin that was asked;
+/// `reason` is set only for `open_failed`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BrowserTarget {
-    pub status: TargetStatus,
-    pub page_id: Option<String>,
-    pub origin: String,
+pub struct BrowserView {
+    pub status: ViewStatus,
+    pub remote_port: u16,
+    pub local_port: u16,
+    pub reason: Option<String>,
 }
 
 #[tauri::command]
@@ -45,18 +54,24 @@ pub async fn ssh_port_chrome(host: String, remote_port: u32) -> Result<bool, Str
 }
 
 #[tauri::command]
-pub async fn ssh_port_browser_target(
-    host: String,
-    remote_port: u32,
-) -> Result<BrowserTarget, String> {
-    target_behind(host, remote_port, |host, remote| {
-        registry().active_local_port(host, remote)
-    })
+pub async fn ssh_port_view_browser(host: String, remote_port: u32) -> Result<BrowserView, String> {
+    view_browser(
+        host,
+        remote_port,
+        |host: &str, remote| registry().active_local_port(host, remote),
+        chrome_installed,
+        open_in_chrome,
+    )
     .await
 }
 
-#[tauri::command]
-pub async fn chrome_installed() -> bool {
+/// Called from Rust, so the webview's opener scope does not apply and the
+/// capability needs no entry that names an app.
+fn open_in_chrome(url: &str) -> Result<(), String> {
+    tauri_plugin_opener::open_url(url, Some(CHROME_APP)).map_err(|e| e.to_string())
+}
+
+fn chrome_installed() -> bool {
     cfg!(target_os = "macos")
         && dirs::home_dir().is_some_and(|home| chrome_installed_under(Path::new("/"), &home))
 }
@@ -70,13 +85,52 @@ async fn chrome_behind(
     Ok(is_chrome(port).await)
 }
 
-async fn target_behind(
+/// The forward is looked up again right before the open, so one stopped or
+/// moved to another Mac port during the check opens nothing.
+async fn view_browser<L>(
     host: String,
     remote_port: u32,
-    lookup: impl FnOnce(&str, u16) -> Result<u16, String> + Send + 'static,
-) -> Result<BrowserTarget, String> {
-    let port = active_mac_port(host, remote_port, lookup).await?;
-    Ok(browser_target(port).await)
+    lookup: L,
+    installed: impl FnOnce() -> bool,
+    open: impl FnOnce(&str) -> Result<(), String> + Send + 'static,
+) -> Result<BrowserView, String>
+where
+    L: Fn(&str, u16) -> Result<u16, String> + Send + Sync + 'static,
+{
+    let remote = validate_request(&host, remote_port)?;
+    let lookup = Arc::new(lookup);
+    let local = active_mac_port(host.clone(), remote_port, shared(&lookup)).await?;
+    let view = |status, reason| BrowserView {
+        status,
+        remote_port: remote,
+        local_port: local,
+        reason,
+    };
+    if !installed() {
+        return Ok(view(ViewStatus::ChromeMissing, None));
+    }
+    let page = match browser_target(local).await {
+        Ok(page) => page,
+        Err(status) => return Ok(view(status, None)),
+    };
+    if active_mac_port(host, remote_port, shared(&lookup)).await != Ok(local) {
+        return Ok(view(ViewStatus::ForwardGone, None));
+    }
+    let Some(url) = viewer_url(local, &page) else {
+        return Ok(view(ViewStatus::NoPage, None));
+    };
+    Ok(match blocking("open_chrome", move || open(&url)).await {
+        Ok(()) => view(ViewStatus::Opened, None),
+        Err(reason) => view(ViewStatus::OpenFailed, Some(reason)),
+    })
+}
+
+fn shared<L>(lookup: &Arc<L>) -> impl FnOnce(&str, u16) -> Result<u16, String> + Send + 'static
+where
+    L: Fn(&str, u16) -> Result<u16, String> + Send + Sync + 'static,
+{
+    let lookup = Arc::clone(lookup);
+    move |host, remote| lookup(host, remote)
 }
 
 async fn active_mac_port(
@@ -90,6 +144,18 @@ async fn active_mac_port(
 
 pub fn mac_origin(port: u16) -> String {
     format!("http://{MAC_HOST}:{port}")
+}
+
+/// The only place the view address is built: the fixed host, the Mac port
+/// from the registry and a checked id, so the server cannot point it elsewhere.
+fn viewer_url(port: u16, page_id: &str) -> Option<String> {
+    if !valid_page_id(page_id) {
+        return None;
+    }
+    let host = format!("{MAC_HOST}:{port}");
+    Some(format!(
+        "http://{host}/devtools/inspector.html?ws={host}/devtools/page/{page_id}"
+    ))
 }
 
 /// Chrome target ids are hex; anything else would leave the path it is put in.
@@ -117,11 +183,11 @@ fn pick_page(targets: &[Value]) -> Option<String> {
     })
 }
 
-fn status_of_handshake(status: Option<u16>) -> TargetStatus {
+fn status_of_handshake(status: Option<u16>) -> Result<(), ViewStatus> {
     match status {
-        Some(101) => TargetStatus::Ready,
-        Some(403) => TargetStatus::OriginRefused,
-        _ => TargetStatus::Unreachable,
+        Some(101) => Ok(()),
+        Some(403) => Err(ViewStatus::OriginRefused),
+        _ => Err(ViewStatus::Unreachable),
     }
 }
 
@@ -167,26 +233,19 @@ async fn is_chrome(port: u16) -> bool {
         .is_some_and(|version| browser_is_chrome(&version))
 }
 
-async fn browser_target(port: u16) -> BrowserTarget {
-    let origin = mac_origin(port);
-    let target = |status, page_id| BrowserTarget {
-        status,
-        page_id,
-        origin: origin.clone(),
-    };
+/// The page whose view would load, else why it would not.
+async fn browser_target(port: u16) -> Result<String, ViewStatus> {
     let Some(Value::Array(targets)) = fetch_json(port, "/json/list").await else {
-        return target(TargetStatus::Unreachable, None);
+        return Err(ViewStatus::Unreachable);
     };
-    let Some(id) = pick_page(&targets) else {
-        return target(TargetStatus::NoPage, None);
-    };
-    let status = handshake(port, &id, &origin).await;
-    target(status, Some(id))
+    let id = pick_page(&targets).ok_or(ViewStatus::NoPage)?;
+    handshake(port, &id, &mac_origin(port)).await?;
+    Ok(id)
 }
 
 /// Chrome answers the viewer's WebSocket with 101 for an allowed origin and
 /// 403 otherwise, so the status alone tells whether the view would load.
-async fn handshake(port: u16, id: &str, origin: &str) -> TargetStatus {
+async fn handshake(port: u16, id: &str, origin: &str) -> Result<(), ViewStatus> {
     let path = format!("/devtools/page/{id}");
     let headers = [
         ("Connection", "Upgrade"),
@@ -205,7 +264,7 @@ async fn handshake(port: u16, id: &str, origin: &str) -> TargetStatus {
 }
 
 fn chrome_candidates(home: &Path) -> [PathBuf; 2] {
-    [Path::new("/").join(CHROME_APP), home.join(CHROME_APP)]
+    [Path::new("/").join(CHROME_BUNDLE), home.join(CHROME_BUNDLE)]
 }
 
 fn chrome_installed_under(root: &Path, home: &Path) -> bool {
@@ -228,7 +287,7 @@ mod tests {
 
     const OWNER: u32 = 7;
 
-    type Lookup = Box<dyn FnOnce(&str, u16) -> Result<u16, String> + Send>;
+    type Lookup = Box<dyn Fn(&str, u16) -> Result<u16, String> + Send + Sync>;
 
     #[derive(Debug, Clone)]
     struct Seen {
@@ -405,23 +464,71 @@ mod tests {
             .block_on(work)
     }
 
-    /// The registry with `devbox 9222 -> {port}` on master `OWNER`, and a
-    /// master check that reports `live`.
+    fn registry_with(port: u16) -> Arc<Registry> {
+        let registry = Registry::new(vec!["-o".into(), "ControlPath=/nonexistent/%C".into()]);
+        registry.insert_for_test("devbox", 9222, port, OWNER);
+        Arc::new(registry)
+    }
+
+    /// Reads `registry` with a master check that reports `live`.
+    fn reading(
+        registry: &Arc<Registry>,
+        live: Option<u32>,
+    ) -> impl Fn(&str, u16) -> Result<u16, String> + Send + Sync + 'static {
+        let registry = Arc::clone(registry);
+        move |host, remote| registry.active_local_port_with(host, remote, |_, _| live)
+    }
+
+    /// The registry with `devbox 9222 -> {port}` on master `OWNER`.
     fn lookup(
         port: u16,
         live: Option<u32>,
-    ) -> impl FnOnce(&str, u16) -> Result<u16, String> + Send + 'static {
-        let registry = Registry::new(vec!["-o".into(), "ControlPath=/nonexistent/%C".into()]);
-        registry.insert_for_test("devbox", 9222, port, OWNER);
-        move |host, remote| registry.active_local_port_with(host, remote, |_, _| live)
+    ) -> impl Fn(&str, u16) -> Result<u16, String> + Send + Sync + 'static {
+        reading(&registry_with(port), live)
     }
 
     fn chrome(fake: &FakeChrome) -> bool {
         run(chrome_behind("devbox".into(), 9222, lookup(fake.port, Some(OWNER)))).unwrap()
     }
 
-    fn target(fake: &FakeChrome) -> BrowserTarget {
-        run(target_behind("devbox".into(), 9222, lookup(fake.port, Some(OWNER)))).unwrap()
+    /// Stands in for Google Chrome on the Mac: records each URL it is handed.
+    #[derive(Clone, Default)]
+    struct Opener {
+        urls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Opener {
+        fn answering(&self, answer: Result<(), String>) -> impl FnOnce(&str) -> Result<(), String> + Send + 'static {
+            let urls = Arc::clone(&self.urls);
+            move |url| {
+                urls.lock().unwrap().push(url.to_string());
+                answer
+            }
+        }
+
+        fn opener(&self) -> impl FnOnce(&str) -> Result<(), String> + Send + 'static {
+            self.answering(Ok(()))
+        }
+
+        fn urls(&self) -> Vec<String> {
+            self.urls.lock().unwrap().clone()
+        }
+    }
+
+    fn view_with(
+        lookup: impl Fn(&str, u16) -> Result<u16, String> + Send + Sync + 'static,
+        installed: bool,
+        open: impl FnOnce(&str) -> Result<(), String> + Send + 'static,
+    ) -> Result<BrowserView, String> {
+        run(view_browser("devbox".into(), 9222, lookup, || installed, open))
+    }
+
+    fn view(fake: &FakeChrome, opener: &Opener) -> BrowserView {
+        view_with(lookup(fake.port, Some(OWNER)), true, opener.opener()).unwrap()
+    }
+
+    fn viewer(port: u16, id: &str) -> String {
+        format!("http://localhost:{port}/devtools/inspector.html?ws=localhost:{port}/devtools/page/{id}")
     }
 
     fn timed<T>(work: impl FnOnce() -> T) -> (T, Duration) {
@@ -480,10 +587,12 @@ mod tests {
             let registry = Registry::new(vec!["-o".into(), "ControlPath=/nonexistent/%C".into()]);
             move |host: &str, remote| registry.active_local_port_with(host, remote, |_, _| Some(OWNER))
         };
+        let opener = Opener::default();
         let both = |host: &str, remote_port: u32, make: &dyn Fn() -> Lookup| {
             (
                 run(chrome_behind(host.into(), remote_port, make())).unwrap_err(),
-                run(target_behind(host.into(), remote_port, make())).unwrap_err(),
+                run(view_browser(host.into(), remote_port, make(), || true, opener.opener()))
+                    .unwrap_err(),
             )
         };
         let missing = "no active forward of port 9222 on devbox".to_string();
@@ -504,6 +613,7 @@ mod tests {
         let (bad_host, _) = both("-oProxyCommand=x", 9222, &|| Box::new(lookup(fake.port, Some(OWNER))));
         assert!(!bad_host.is_empty());
         assert_eq!(fake.connections(), 0);
+        assert!(opener.urls().is_empty());
     }
 
     fn page_list() -> String {
@@ -528,16 +638,19 @@ mod tests {
     }
 
     #[test]
-    fn the_first_real_page_is_chosen_and_its_own_address_is_ignored() {
+    fn the_first_real_page_opens_and_its_own_address_is_ignored() {
         let fake = browser(ok(&page_list()), switching());
+        let opener = Opener::default();
         assert_eq!(
-            target(&fake),
-            BrowserTarget {
-                status: TargetStatus::Ready,
-                page_id: Some("A1B2".into()),
-                origin: format!("http://localhost:{}", fake.port),
+            view(&fake, &opener),
+            BrowserView {
+                status: ViewStatus::Opened,
+                remote_port: 9222,
+                local_port: fake.port,
+                reason: None,
             }
         );
+        assert_eq!(opener.urls(), [viewer(fake.port, "A1B2")]);
         let seen = fake.seen();
         let paths: Vec<&str> = seen.iter().map(|s| s.path.as_str()).collect();
         assert_eq!(paths, ["/json/list", "/devtools/page/A1B2"]);
@@ -551,9 +664,9 @@ mod tests {
             {"type": "page", "id": "a/b"},
         ]);
         let fake = browser(ok(&no_page.to_string()), switching());
-        let found = target(&fake);
-        assert_eq!(found.status, TargetStatus::NoPage);
-        assert_eq!(found.page_id, None);
+        let opener = Opener::default();
+        assert_eq!(view(&fake, &opener).status, ViewStatus::NoPage);
+        assert!(opener.urls().is_empty());
         assert_eq!(
             fake.seen().iter().map(|s| s.path.clone()).collect::<Vec<_>>(),
             ["/json/list"]
@@ -563,14 +676,19 @@ mod tests {
     #[test]
     fn the_handshake_tells_an_allowed_origin_from_a_refused_one() {
         for (handshake, expected) in [
-            (switching(), TargetStatus::Ready),
-            (status(403), TargetStatus::OriginRefused),
-            (Reply::Silent, TargetStatus::Unreachable),
+            (switching(), ViewStatus::Opened),
+            (status(403), ViewStatus::OriginRefused),
+            (status(404), ViewStatus::Unreachable),
+            (Reply::Silent, ViewStatus::Unreachable),
         ] {
             let fake = browser(ok(&page_list()), handshake);
-            let (found, took) = timed(|| target(&fake));
+            let opener = Opener::default();
+            let (found, took) = timed(|| view(&fake, &opener));
             assert_eq!(found.status, expected);
+            assert_eq!(found.local_port, fake.port);
             assert!(took <= Duration::from_millis(2500), "{expected:?} took {took:?}");
+            let opened = usize::from(expected == ViewStatus::Opened);
+            assert_eq!(opener.urls().len(), opened, "{expected:?}");
             let seen = fake.seen();
             let shake = seen
                 .iter()
@@ -587,12 +705,141 @@ mod tests {
     fn a_list_that_fails_is_unreachable_without_a_handshake() {
         for list in [Reply::Silent, status(500), ok("not json"), ok("{}")] {
             let fake = browser(list, switching());
-            let (found, took) = timed(|| target(&fake));
-            assert_eq!(found.status, TargetStatus::Unreachable);
-            assert_eq!(found.page_id, None);
+            let opener = Opener::default();
+            let (found, took) = timed(|| view(&fake, &opener));
+            assert_eq!(found.status, ViewStatus::Unreachable);
             assert!(took <= Duration::from_millis(2500), "{took:?}");
             assert!(fake.seen().iter().all(|s| s.path == "/json/list"));
+            assert!(opener.urls().is_empty());
         }
+    }
+
+    #[test]
+    fn without_chrome_on_this_mac_the_server_is_not_asked() {
+        let fake = browser(ok(&page_list()), switching());
+        let opener = Opener::default();
+        let found = view_with(lookup(fake.port, Some(OWNER)), false, opener.opener()).unwrap();
+        assert_eq!(found.status, ViewStatus::ChromeMissing);
+        assert_eq!((found.remote_port, found.local_port), (9222, fake.port));
+        assert_eq!(fake.connections(), 0);
+        assert!(opener.urls().is_empty());
+    }
+
+    #[test]
+    fn a_failed_open_keeps_its_reason() {
+        let fake = browser(ok(&page_list()), switching());
+        let opener = Opener::default();
+        let open = opener.answering(Err("Unable to find application named 'Google Chrome'".into()));
+        let found = view_with(lookup(fake.port, Some(OWNER)), true, open).unwrap();
+        assert_eq!(
+            found,
+            BrowserView {
+                status: ViewStatus::OpenFailed,
+                remote_port: 9222,
+                local_port: fake.port,
+                reason: Some("Unable to find application named 'Google Chrome'".into()),
+            }
+        );
+        assert_eq!(opener.urls(), [viewer(fake.port, "A1B2")]);
+    }
+
+    /// The handshake stands for the moment the user stops the forward or it
+    /// comes back on another Mac port, while the check runs.
+    fn changed_during_check(change: impl Fn(&Registry, u16) + Send + Sync + 'static) -> (BrowserView, Opener, FakeChrome) {
+        let registry: Arc<Mutex<Option<Arc<Registry>>>> = Arc::default();
+        let during = Arc::clone(&registry);
+        let fake = FakeChrome::start(move |seen| {
+            if seen.path == "/json/list" {
+                return ok(&page_list());
+            }
+            if let Some(registry) = during.lock().unwrap().as_ref() {
+                let port = seen.header("host")[0].rsplit(':').next().unwrap().parse().unwrap();
+                change(registry, port);
+            }
+            switching()
+        });
+        let shared = registry_with(fake.port);
+        *registry.lock().unwrap() = Some(Arc::clone(&shared));
+        let opener = Opener::default();
+        let found = view_with(reading(&shared, Some(OWNER)), true, opener.opener()).unwrap();
+        (found, opener, fake)
+    }
+
+    #[test]
+    fn a_forward_that_ends_or_moves_during_the_check_opens_nothing() {
+        type Change = fn(&Registry, u16);
+        let cases: [(&str, Change); 3] = [
+            ("stopped", |registry, port| registry.insert_for_test("devbox", 9222, port, OWNER + 1)),
+            ("moved", |registry, port| registry.insert_for_test("devbox", 9222, port + 1, OWNER)),
+            ("other server port", |registry, port| {
+                registry.insert_for_test("devbox", 9222, port, OWNER + 1);
+                registry.insert_for_test("devbox", 9223, port, OWNER);
+            }),
+        ];
+        for (name, change) in cases {
+            let (found, opener, fake) = changed_during_check(change);
+            assert_eq!(found.status, ViewStatus::ForwardGone, "{name}");
+            assert_eq!((found.remote_port, found.local_port), (9222, fake.port), "{name}");
+            assert!(opener.urls().is_empty(), "{name}");
+            assert!(fake.seen().iter().any(|s| s.path == "/devtools/page/A1B2"), "{name}");
+        }
+        let (found, opener, fake) = changed_during_check(|registry, port| {
+            registry.insert_for_test("devbox", 9222, port, OWNER);
+        });
+        assert_eq!(found.status, ViewStatus::Opened, "the same forward again");
+        assert_eq!(opener.urls(), [viewer(fake.port, "A1B2")]);
+    }
+
+    #[test]
+    fn a_page_id_from_the_server_never_leaves_the_view_path() {
+        let hostile = json!([
+            {"type": "page", "id": "1@evil.example"},
+            {"type": "page", "id": "A1B2#@evil.example"},
+            {"type": "page", "id": "..%2F..%2Fx"},
+            {"type": "page", "id": "A1B2?ws=evil.example"},
+            {"type": "page", "id": "A1B2/../../evil"},
+            {"type": "page", "id": "C3"},
+        ]);
+        let fake = browser(ok(&hostile.to_string()), switching());
+        let opener = Opener::default();
+        assert_eq!(view(&fake, &opener).status, ViewStatus::Opened);
+        assert_eq!(opener.urls(), [viewer(fake.port, "C3")]);
+        let paths: Vec<String> = fake.seen().iter().map(|s| s.path.clone()).collect();
+        assert_eq!(paths, ["/json/list", "/devtools/page/C3"]);
+
+        let only_hostile = json!([{"type": "page", "id": "1@evil.example"}]);
+        let fake = browser(ok(&only_hostile.to_string()), switching());
+        let opener = Opener::default();
+        assert_eq!(view(&fake, &opener).status, ViewStatus::NoPage);
+        assert!(opener.urls().is_empty());
+    }
+
+    #[test]
+    fn the_view_address_is_built_only_from_checked_parts() {
+        assert_eq!(viewer_url(9223, "A1B2").as_deref(), Some(viewer(9223, "A1B2").as_str()));
+        for id in [
+            "",
+            "a/b",
+            "../x",
+            "1@evil.example",
+            "A1B2#@evil.example",
+            "A1B2?x=1",
+            "A1 B2",
+            "A1B2\r\nHost: evil",
+            &"F".repeat(MAX_PAGE_ID + 1),
+        ] {
+            assert_eq!(viewer_url(9223, id), None, "{id:?}");
+        }
+        let url = viewer_url(9223, &"F".repeat(MAX_PAGE_ID)).unwrap();
+        let parsed = url::Url::parse(&url).unwrap();
+        assert_eq!(parsed.host_str(), Some(MAC_HOST));
+        assert_eq!(parsed.port(), Some(9223));
+        assert_eq!((parsed.username(), parsed.password()), ("", None));
+        assert_eq!(parsed.path(), "/devtools/inspector.html");
+        let ws: Vec<_> = parsed.query_pairs().collect();
+        assert_eq!(ws.len(), 1);
+        assert_eq!(ws[0].0, "ws");
+        assert_eq!(ws[0].1, format!("localhost:9223/devtools/page/{}", "F".repeat(MAX_PAGE_ID)));
     }
 
     #[test]
@@ -606,25 +853,30 @@ mod tests {
     }
 
     #[test]
-    fn the_target_serializes_for_the_frontend() {
-        let ready = BrowserTarget {
-            status: TargetStatus::Ready,
-            page_id: Some("A1B2".into()),
-            origin: mac_origin(9223),
+    fn the_view_serializes_for_the_frontend() {
+        let failed = BrowserView {
+            status: ViewStatus::OpenFailed,
+            remote_port: 9222,
+            local_port: 9223,
+            reason: Some("no app".into()),
         };
         assert_eq!(
-            serde_json::to_value(ready).unwrap(),
-            json!({"status": "ready", "pageId": "A1B2", "origin": "http://localhost:9223"})
+            serde_json::to_value(failed).unwrap(),
+            json!({"status": "open_failed", "remotePort": 9222, "localPort": 9223, "reason": "no app"})
         );
         for (status, text) in [
-            (TargetStatus::OriginRefused, "origin_refused"),
-            (TargetStatus::NoPage, "no_page"),
-            (TargetStatus::Unreachable, "unreachable"),
+            (ViewStatus::Opened, "opened"),
+            (ViewStatus::ChromeMissing, "chrome_missing"),
+            (ViewStatus::OriginRefused, "origin_refused"),
+            (ViewStatus::NoPage, "no_page"),
+            (ViewStatus::Unreachable, "unreachable"),
+            (ViewStatus::ForwardGone, "forward_gone"),
         ] {
             assert_eq!(serde_json::to_value(status).unwrap(), json!(text));
         }
-        assert_eq!(status_of_handshake(Some(404)), TargetStatus::Unreachable);
-        assert_eq!(status_of_handshake(None), TargetStatus::Unreachable);
+        assert_eq!(status_of_handshake(Some(101)), Ok(()));
+        assert_eq!(status_of_handshake(Some(404)), Err(ViewStatus::Unreachable));
+        assert_eq!(status_of_handshake(None), Err(ViewStatus::Unreachable));
     }
 
     #[test]
@@ -653,11 +905,11 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn chrome_counts_as_missing_outside_macos() {
-        assert!(!run(chrome_installed()));
+        assert!(!chrome_installed());
     }
 
     #[test]
-    fn chrome_may_open_only_localhost_urls_and_nothing_else_names_an_app() {
+    fn the_webview_cannot_pick_the_app_an_address_opens_in() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities/default.json");
         let capability: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let permissions = capability["permissions"].as_array().unwrap();
@@ -670,7 +922,11 @@ mod tests {
             })
             .collect();
         assert!(opener.contains(&&json!("opener:default")));
-        let with_app: Vec<&Value> = opener
+        assert!(
+            opener.iter().all(|p| p["identifier"] != "opener:allow-open-url"),
+            "{opener:?}"
+        );
+        let with_app: Vec<&&Value> = opener
             .iter()
             .filter(|p| {
                 ["allow", "deny"].iter().any(|side| {
@@ -679,15 +935,9 @@ mod tests {
                         .is_some_and(|entries| entries.iter().any(|e| e.get("app").is_some()))
                 })
             })
-            .copied()
             .collect();
-        assert_eq!(
-            with_app,
-            [&json!({
-                "identifier": "opener:allow-open-url",
-                "allow": [{ "url": "http://localhost:*", "app": "Google Chrome" }]
-            })]
-        );
+        assert!(with_app.is_empty(), "{with_app:?}");
+        assert_eq!(CHROME_APP, "Google Chrome");
     }
 
     #[test]
@@ -701,12 +951,14 @@ mod tests {
 /// `chrome --headless --no-sandbox --remote-debugging-port=<port> --remote-allow-origins=http://localhost:<port> --user-data-dir=<empty dir> about:blank`
 /// on this machine's loopback (in a container: `--network host`), then run
 /// `TERAX_E2E_CHROME_PORT=<port> cargo test --lib ports::chrome::e2e -- --ignored --nocapture`.
-/// The debugging port stands in for the Mac port of a forward. Without
+/// The debugging port stands in for the Mac port of a forward, and the open
+/// only records the address, which is then fetched from that Chrome. Without
 /// `--remote-allow-origins` set `TERAX_E2E_CHROME_EXPECT=origin_refused`.
 #[cfg(test)]
 mod e2e {
     use super::super::Registry;
     use super::*;
+    use std::sync::Mutex;
 
     fn port() -> u16 {
         std::env::var("TERAX_E2E_CHROME_PORT")
@@ -715,7 +967,7 @@ mod e2e {
             .expect("TERAX_E2E_CHROME_PORT names the debugging port, see the module comment")
     }
 
-    fn lookup(port: u16) -> impl FnOnce(&str, u16) -> Result<u16, String> + Send + 'static {
+    fn lookup(port: u16) -> impl Fn(&str, u16) -> Result<u16, String> + Send + Sync + 'static {
         let registry = Registry::new(vec!["-o".into(), "ControlPath=/nonexistent/%C".into()]);
         registry.insert_for_test("devbox", 9222, port, 1);
         move |host, remote| registry.active_local_port_with(host, remote, |_, _| Some(1))
@@ -731,16 +983,35 @@ mod e2e {
 
     #[test]
     #[ignore = "needs a running Chrome, see the module comment"]
-    fn e2e_a_real_chrome_is_found_and_its_origin_checked() {
+    fn e2e_a_real_chrome_is_found_and_its_view_opens() {
         let port = port();
         let found = run(chrome_behind("devbox".into(), 9222, lookup(port)));
-        let target = run(target_behind("devbox".into(), 9222, lookup(port)));
-        println!("E2E chrome on {port} -> {found:?}; target -> {target:?}");
+        let urls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = Arc::clone(&urls);
+        let open = move |url: &str| {
+            sink.lock().unwrap().push(url.to_string());
+            Ok(())
+        };
+        let view = run(view_browser("devbox".into(), 9222, lookup(port), || true, open));
+        let urls = urls.lock().unwrap().clone();
+        println!("E2E chrome on {port} -> {found:?}; view -> {view:?}; opened {urls:?}");
         assert_eq!(found, Ok(true));
-        let target = target.unwrap();
-        assert_eq!(target.origin, format!("http://localhost:{port}"));
-        assert!(target.page_id.as_deref().is_some_and(valid_page_id));
-        let expected = std::env::var("TERAX_E2E_CHROME_EXPECT").unwrap_or_else(|_| "ready".into());
-        assert_eq!(serde_json::to_value(target.status).unwrap(), Value::String(expected));
+        let view = view.unwrap();
+        assert_eq!((view.remote_port, view.local_port), (9222, port));
+        let expected = std::env::var("TERAX_E2E_CHROME_EXPECT").unwrap_or_else(|_| "opened".into());
+        assert_eq!(serde_json::to_value(view.status).unwrap(), Value::String(expected));
+        if view.status != ViewStatus::Opened {
+            assert!(urls.is_empty());
+            return;
+        }
+        let [url] = urls.as_slice() else {
+            panic!("one address opened, got {urls:?}");
+        };
+        let prefix = format!("http://localhost:{port}/devtools/inspector.html?ws=localhost:{port}/devtools/page/");
+        assert!(url.strip_prefix(&prefix).is_some_and(valid_page_id), "{url}");
+        let path = url.strip_prefix(&mac_origin(port)).unwrap();
+        let served = run(send(port, path, &[])).map(|r| r.status().as_u16());
+        println!("E2E viewer {url} -> {served:?}");
+        assert_eq!(served, Some(200));
     }
 }
