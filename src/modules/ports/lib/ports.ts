@@ -328,7 +328,7 @@ export function forwardStopped(
 ): PortsModel {
   const list = forwardsOf(model, scope);
   const next = list.filter((f) => f.remotePort !== port);
-  if (next.length === list.length) return model;
+  if (next.length === list.length) return dropChrome(model, scope, port);
   const forwards = { ...model.forwards };
   if (next.length === 0) delete forwards[scope];
   else forwards[scope] = next;
