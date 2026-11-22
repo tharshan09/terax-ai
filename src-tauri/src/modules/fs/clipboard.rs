@@ -108,7 +108,8 @@ fn read_png(pasteboard: &objc2_app_kit::NSPasteboard) -> Option<Vec<u8>> {
     match image_flavor(holds_files, png.is_some(), tiff.is_some())? {
         ImageFlavor::Png => png.map(|png| png.to_vec()),
         ImageFlavor::Tiff => {
-            let image = NSBitmapImageRep::imageRepWithData(&tiff?)?;
+            let tiff = tiff?;
+            let image = NSBitmapImageRep::imageRepWithData(&tiff)?;
             let properties = objc2_foundation::NSDictionary::<
                 objc2_foundation::NSString,
                 objc2::runtime::AnyObject,
