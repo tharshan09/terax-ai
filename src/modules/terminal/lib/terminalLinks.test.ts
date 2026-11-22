@@ -9,7 +9,7 @@ import {
 } from "./terminalLinks";
 import { findPathLinks } from "./terminalPathLinks";
 
-vi.mock("@/lib/platform", () => ({ IS_WINDOWS: false }));
+vi.mock("@/lib/platform", () => ({ IS_MAC: false, IS_WINDOWS: false }));
 
 const SSH = true;
 const LOCAL = false;

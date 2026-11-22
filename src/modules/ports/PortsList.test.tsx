@@ -35,7 +35,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl }));
 vi.mock("sonner", () => ({ toast }));
 vi.mock("@/lib/clipboard", () => ({ writeSystemClipboard }));
-vi.mock("@/lib/platform", () => ({ IS_WINDOWS: false }));
+vi.mock("@/lib/platform", () => ({ IS_MAC: false, IS_WINDOWS: false }));
 vi.mock("@tauri-apps/plugin-store", () => ({
   LazyStore: class {
     get = vi.fn(async () => undefined);

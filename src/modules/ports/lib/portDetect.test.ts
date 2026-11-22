@@ -1,12 +1,17 @@
-import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   findLoopbackAddresses,
+  MAC_HOST,
+  macAddress,
+  macOrigin,
   macUrl,
   macUrlFor,
   PortDetector,
   parseLoopbackAddress,
   parseLoopbackLink,
 } from "@/modules/ports/lib/portDetect";
+import { describe, expect, it, vi } from "vitest";
 
 const enc = new TextEncoder();
 
@@ -170,6 +175,28 @@ describe("findLoopbackAddresses", () => {
 describe("Mac address", () => {
   it("is localhost with the Mac port", () => {
     expect(macUrl(5174)).toBe("http://localhost:5174");
+  });
+
+  it("builds base and origin of a remote browser from one host", () => {
+    expect(macAddress(9223)).toBe("localhost:9223");
+    expect(macUrl(9223)).toBe("http://localhost:9223");
+    expect(macOrigin(9223)).toBe("http://localhost:9223");
+  });
+
+  it("names the Mac host exactly as the Rust origin check and live view do", () => {
+    const rust = readFileSync(
+      fileURLToPath(
+        new URL(
+          "../../../../src-tauri/src/modules/ports/chrome.rs",
+          import.meta.url,
+        ),
+      ),
+      "utf8",
+    );
+    expect(MAC_HOST).toBe("localhost");
+    expect(rust).toMatch(/pub const MAC_HOST: &str = "localhost";/);
+    expect(rust).toMatch(/format!\("http:\/\/\{MAC_HOST\}:\{port\}"\)/);
+    expect(rust).toMatch(/let host = format!\("\{MAC_HOST\}:\{port\}"\);/);
   });
 
   it("keeps scheme, path and query of a clicked address", () => {

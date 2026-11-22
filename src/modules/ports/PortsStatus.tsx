@@ -15,14 +15,16 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useMemo } from "react";
 import { offerView, portsSummary, rowViews } from "./lib/ports";
 import {
+  browserViewAvailable,
   portsAvailable,
   setPortsListOpen,
   usePortsListStore,
 } from "./lib/portsList";
 import {
   acceptOffer,
+  closeBrowserDialog,
   dismissOffer,
-  refreshForwards,
+  portsListOpened,
   usePortsStore,
 } from "./lib/portsStore";
 import { PortsList } from "./PortsList";
@@ -43,11 +45,20 @@ function SshPortsStatus({ env }: { env: SshEnv }) {
   const scope = workspaceScopeKey(env);
   const offer = useMemo(() => offerView(model, scope), [model, scope]);
   const summary = useMemo(() => portsSummary(model, scope), [model, scope]);
-  const rows = useMemo(() => rowViews(model, scope), [model, scope]);
+  const rows = useMemo(
+    () => rowViews(model, scope, browserViewAvailable()),
+    [model, scope],
+  );
 
   useEffect(() => {
-    if (open) void refreshForwards(env);
+    if (open) void portsListOpened(env);
   }, [open, env]);
+
+  // A dialog lives in the list of its server and goes with it.
+  useEffect(() => {
+    if (!open) return;
+    return () => closeBrowserDialog(scope);
+  }, [open, scope]);
 
   useEffect(() => () => setPortsListOpen(false), []);
 

@@ -14,6 +14,8 @@ use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
+pub mod chrome;
+
 // Prints once the session runs, so a refused or ended session is told apart
 // from one that holds the master.
 const HOLDER_COMMAND: &str = "echo ready; exec cat >/dev/null";
@@ -82,6 +84,10 @@ fn validate_request(host: &str, port: u32) -> Result<u16, String> {
 
 pub fn not_connected(host: &str) -> String {
     format!("not connected to {host}")
+}
+
+pub fn no_active_forward(host: &str, remote: u16) -> String {
+    format!("no active forward of port {remote} on {host}")
 }
 
 fn no_free_port(from: u16) -> String {
@@ -595,6 +601,49 @@ impl Registry {
         let live = ssh::master_pid_at(&self.control, host);
         entry.reconcile_holder(&self.control, host, live);
         Ok(entry.view(live))
+    }
+
+    /// The Mac port of an active forward. The host's lock is held only to read
+    /// the entry, so a slow master check never blocks a forward or a stop.
+    pub fn active_local_port(&self, host: &str, remote: u16) -> Result<u16, String> {
+        self.active_local_port_with(host, remote, ssh::master_pid_at)
+    }
+
+    fn active_local_port_with(
+        &self,
+        host: &str,
+        remote: u16,
+        live: impl FnOnce(&[String], &str) -> Option<u32>,
+    ) -> Result<u16, String> {
+        validate_request(host, u32::from(remote))?;
+        let found = self.slot(host).and_then(|slot| {
+            let entry = lock_host(&slot);
+            entry
+                .forwards
+                .get(&remote)
+                .map(|forward| (forward.local_port, forward.master_pid))
+        });
+        match found {
+            Some((local, owner))
+                if status_of(owner, live(&self.control, host)) == ForwardStatus::Active =>
+            {
+                Ok(local)
+            }
+            _ => Err(no_active_forward(host, remote)),
+        }
+    }
+
+    #[cfg(test)]
+    fn insert_for_test(&self, host: &str, remote: u16, local: u16, master_pid: u32) {
+        let slot = self.slot_or_insert(host);
+        lock_host(&slot).forwards.insert(
+            remote,
+            Forward {
+                local_port: local,
+                master_pid,
+                families: BOTH_LOOPBACKS,
+            },
+        );
     }
 }
 

@@ -437,7 +437,7 @@ Slice 2 -> Slice 3 (Welle 2) -> Slice 4 -> Slice 5 (Welle 3)
 
 | # | Question | Options | Recommended | Decision |
 |---|----------|---------|-------------|----------|
-| 1 | Lässt sich die Live-Ansicht im Mac-Chrome mit einem Klick aus Terax öffnen? | A) Ja, ein Klick B) Nein, einmalige Einrichtung im Mac-Chrome mit Anleitung | A, Rückfall B | Offen bis Slice 4 (BR-24) |
+| 1 | Lässt sich die Live-Ansicht im Mac-Chrome mit einem Klick aus Terax öffnen? | A) Ja, ein Klick B) Nein, einmalige Einrichtung im Mac-Chrome mit Anleitung | A, Rückfall B | A, auf Linux belegt (2026-11-20, siehe Research Log): Der Server-Chrome liefert die Ansicht selbst über seinen Fernsteuer-Port aus, ohne Dritte. Offen bleibt nur die Bestätigung auf dem Mac (Übergabe der Adresse an Google Chrome). Rückfall B bleibt als Anleitung erhalten |
 
 ---
 
@@ -454,6 +454,8 @@ Slice 2 -> Slice 3 (Welle 2) -> Slice 4 -> Slice 5 (Welle 3)
 | 2026-11-20 | Codebase | Keine Nutzungsmessung in Terax |
 | 2026-11-20 | Server (Dev-Box) | Kein Bildschirm; Profilordner des Chrome DevTools MCP vorhanden; vier Chrome-Builds installiert (151 und 156, je Voll- und Headless-Variante) |
 | 2026-11-20 | Server (Dev-Box) | Test mit allen vier Builds: Fernsteuer-Zugang antwortet und listet Seiten; die Ansichts-Seite wird nicht mitgeliefert (Platzhalter mit 990 Bytes), der Verweis zeigt auf eine von Google gehostete Seite. Folge: Die Ansicht muss der Mac-Chrome selbst stellen; Ein-Klick-Weg unbelegt |
+| 2026-11-20 | Korrektur | Der Befund der vorigen Zeile war falsch gedeutet: Die 990 Bytes sind die echte Ansichts-Seite, die ihre rund 200 Module vom selben Port nachlädt. Der Server-Chrome liefert die Ansicht also selbst aus |
+| 2026-11-20 | Machbarkeit Welle 3 (Linux, zwei Chrome-Instanzen, Tunnel simuliert) | Fünf Wege geprüft. Belegt mit einem Klick und ohne Dritte: Ansicht des Server-Chrome über den freigegebenen Port in einem laufenden Chrome öffnen; Bild, Klick und Tippen kommen an (Chrome 151 und 156, auch die Headless-Variante). Voraussetzung: Der Server-Chrome muss die Herkunft der Mac-Adresse zulassen (Startargument) oder Mac- und Server-Port sind gleich (nur ab Chrome 156). Abgelehnt, weil Code von einem Google-Host geladen wird: gehostete Ansicht und "Geräte untersuchen". Zwei Clients gleichzeitig (Automatisierung und Betrachter) stören sich nicht. Der Fernsteuer-Port lauscht bei allen Builds nur lokal. Ungeprüft: alles macOS-Spezifische |
 | 2026-11-20 | Web | Siehe Web Research |
 | 2026-11-20 | Werkzeug | Mockup-Werkzeug nicht nutzbar: `zip.config.json` fehlt im Projekt und unter `~/litha` |
 
