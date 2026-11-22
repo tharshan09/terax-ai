@@ -153,17 +153,20 @@ BYOK. Cloud providers via `@ai-sdk/*`: **OpenAI, Anthropic, Google, xAI, Cerebra
 
 Kept apart:
 - By identifier (Tauri): settings and the other `tauri-plugin-store` files, window state, logs, WebView storage, notification permission, the autostart LaunchAgent (named after the product name).
-- By suffix: SSH ControlMaster sockets in `~/.terax/ssh-control-dev`, so the variant never rides the installed app's connections and quitting it runs `ssh -O exit` only on its own; shell integration scripts in `~/.cache/terax/shell-integration-dev`.
+- By suffix: SSH ControlMaster sockets in `~/.terax/ssh-control-dev`, so the variant never rides the installed app's connections and quitting it runs `ssh -O exit` only on its own; shell integration scripts in `~/.cache/terax/shell-integration-dev`; the `TERAX_PTY_ID` of its terminals (`3-dev` instead of `3`), so the Claude stats files `~/.claude/.terax/status-<id>.json` of the two apps never cross.
+- Managed tmux sessions: both apps talk to the same tmux server, so the restart-safe prefix is per build (`variant::managed_tmux_prefix`): `terax-rs-` for the installed app, `terax-dev-rs-` for the variant. Neither prefix starts with the other, so each app's boot reaper and tab-close kill only ever touch its own sessions. Rust hands the prefix to the webview in an init script before any page script runs; without it the frontend claims no session as its own (no reaping, no kill on close, no new managed session), a leak rather than a foreign kill. The variant also refuses `terax-rs-` for a session you create or rename.
 - Not done by the variant at all: the launch-time agent hook migration, the automatic install and removal of the Claude statusline wrapper on SSH hosts, saving or removing API keys in the keychain, rewriting an existing `~/.config/fish/conf.d/terax.fish`.
 
 Shared on purpose:
 - Keychain items of service `terax-ai`, read only: the variant uses the installed app's API keys. macOS may ask once to let `Terax Dev` read them; "Always Allow" only adds it to the item's access list.
-- `~/.claude/settings.json`, `~/.codex/hooks.json`, `~/.gemini/settings.json` and the local statusline wrapper in `~/.claude/.terax`: written only when you toggle agent hooks or Claude stats in the variant (same idempotent code as the installed app), and the change then applies to both apps.
-- `~/.ssh/config`, ssh-agent, `known_hosts` and shell history are read as usual.
-- On SSH hosts: `~/.terax/uploads`, tmux sessions and the remote Claude settings. A tmux session attached from both apps is sized for both clients, and killing it in either ends it for both; use separate tmux sessions for tests.
+- `~/.claude/settings.json`, `~/.codex/hooks.json`, `~/.gemini/settings.json` and the local statusline wrapper in `~/.claude/.terax`: written when you toggle agent hooks or Claude stats in the variant, and the Claude hooks also when the Terax agent starts a Claude session there (same idempotent code as the installed app); the change then applies to both apps.
+- `~/.ssh/config`, ssh-agent, `known_hosts` and shell history are read as usual; shells started in either app append to the same history files.
+- tmux, locally and on SSH hosts: the server, its global options (`allow-passthrough`, set to the same value by both) and the `<socket>.terax` marker the agent hooks check. Each app lists the other's managed sessions as ordinary user sessions in the session picker; Kill there ends them for real, so leave them alone. A user session attached from both apps is sized for both clients, and killing it in either ends it for both; use separate tmux sessions for tests.
+- On SSH hosts: `~/.terax/uploads` (both apps sweep entries older than 7 days, the same rule) and the remote Claude settings.
 - The temp dir: `terax-clipboard-*` staging folders, swept by whichever app pastes an image once they are a day old.
+- `~/.config/fish/conf.d/terax.fish`: written by the variant only when it is missing, then kept up to date by the installed app.
 
-Risks: the variant opens its own SSH connections, so hosts that ask for a password, an OTP or a hardware key touch ask again. Both apps show the same icon; tell them apart by name. Windows and WSL paths are not split (the variant is a macOS test build).
+Risks: the variant opens its own SSH connections, so hosts that ask for a password, an OTP or a hardware key touch ask again. Both apps show the same icon; tell them apart by name. Windows and WSL paths are not split (the variant is a macOS test build). A variant state saved before the per-build tmux prefix may still name `terax-rs-` sessions; the variant no longer treats them as its own, and the installed app reaps them at its next start.
 
 ### Known gotchas
 

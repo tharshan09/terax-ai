@@ -53,7 +53,7 @@ export const MAX_PANES_PER_TAB = 4;
 function managedSessionForNewLocalTab(): string | undefined {
   if (currentWorkspaceEnv().kind !== "local") return undefined;
   return usePreferencesStore.getState().restartSafeSessions
-    ? newManagedSession()
+    ? (newManagedSession() ?? undefined)
     : undefined;
 }
 

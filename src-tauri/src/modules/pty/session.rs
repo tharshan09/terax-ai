@@ -336,7 +336,10 @@ pub fn spawn(
     // Lets a Claude Code statusLine wrapper attribute its stats to this exact
     // tab (see modules::claude). Set parallel to TERAX_TERMINAL so it crosses
     // the same boundaries; harmless over SSH (never reaches the remote host).
-    cmd.env("TERAX_PTY_ID", id.to_string());
+    cmd.env(
+        "TERAX_PTY_ID",
+        crate::modules::claude::pty_status_key(id, crate::modules::variant::suffix()),
+    );
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     drop(pair.slave);
 

@@ -170,12 +170,18 @@ fn build_ssh(
     Ok(cmd)
 }
 
-/// Prefix of a Terax-managed (restart-safe) tmux session. Mirrors
-/// `MANAGED_PREFIX` in `src/modules/terminal/lib/managedTmux.ts`. Managed
-/// sessions get tmux's own status line turned off, because Terax surfaces the
-/// restart-safe state in its own status bar and the tmux line would just waste a
-/// terminal row. A user's own tmux tab (Cmd+Shift+M) keeps its status line.
-const MANAGED_SESSION_PREFIX: &str = "terax-rs-";
+/// Whether `session` is a Terax-managed (restart-safe) tmux session of THIS
+/// build (`variant::managed_tmux_prefix`, the same prefix the frontend gets).
+/// Managed sessions get tmux's own status line turned off, because Terax
+/// surfaces the restart-safe state in its own status bar and the tmux line
+/// would just waste a terminal row. A user's own tmux tab (Cmd+Shift+M) keeps
+/// its status line.
+#[cfg(unix)]
+fn is_managed_session(session: &str) -> bool {
+    session.starts_with(&crate::modules::variant::managed_tmux_prefix(
+        crate::modules::variant::suffix(),
+    ))
+}
 
 /// Login-shell command that attaches to, or creates, `session` in tmux. Used by
 /// both the SSH path (over the remote login shell) and the local path (through
@@ -431,7 +437,7 @@ mod unix {
             cmd.arg("-c");
             // A Terax-managed (restart-safe) session hides tmux's own status
             // line; a user's own tmux tab keeps it.
-            let hide_status = session.starts_with(super::MANAGED_SESSION_PREFIX);
+            let hide_status = super::is_managed_session(session);
             cmd.arg(super::tmux_attach_command(session, hide_status));
             super::apply_common(&mut cmd, cwd, blocks);
             return Ok(cmd);
