@@ -160,6 +160,10 @@ pub async fn secrets_set(
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (app, state);
+        // The keychain item is the installed app's; this build only reads it.
+        if crate::modules::variant::is_side_by_side() {
+            return Err(crate::modules::variant::refused("Saving API keys"));
+        }
         let e = entry(&service, &account)?;
         e.set_password(&password).map_err(|e| e.to_string())
     }
@@ -187,6 +191,9 @@ pub async fn secrets_delete(
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (app, state);
+        if crate::modules::variant::is_side_by_side() {
+            return Err(crate::modules::variant::refused("Removing API keys"));
+        }
         let e = entry(&service, &account)?;
         match e.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),

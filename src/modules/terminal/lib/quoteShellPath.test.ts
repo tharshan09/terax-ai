@@ -35,3 +35,29 @@ describe("quoteShellPath", () => {
     );
   });
 });
+
+describe("quoteShellPath posix style", () => {
+  it("passes a clean server path through unquoted", () => {
+    expect(quoteShellPath("/home/u/.terax/uploads/a.png", "posix")).toBe(
+      "/home/u/.terax/uploads/a.png",
+    );
+  });
+
+  it("single-quotes spaces, quotes and backslashes", () => {
+    expect(quoteShellPath("/home/u/my shot.png", "posix")).toBe(
+      "'/home/u/my shot.png'",
+    );
+    expect(quoteShellPath("/home/u/it's.png", "posix")).toBe(
+      `'/home/u/it'\\''s.png'`,
+    );
+    expect(quoteShellPath("/home/u/a\\b.png", "posix")).toBe(
+      "'/home/u/a\\b.png'",
+    );
+  });
+
+  it("joins server paths in posix style with a trailing space", () => {
+    expect(formatDroppedPaths(["/a/b c.png", "/d.png"], "posix")).toBe(
+      "'/a/b c.png' /d.png ",
+    );
+  });
+});

@@ -69,6 +69,7 @@ pub struct CopyFailure {
 
 /// Failures stay per item so one bad source never sinks the batch. Sources skip
 /// the workspace jail (the user picked them in the OS), not the user file policy.
+/// `refuse_secrets` (the terminal upload) refuses secret paths even when named.
 #[tauri::command]
 pub async fn fs_copy(
     app: tauri::AppHandle,
@@ -76,6 +77,7 @@ pub async fn fs_copy(
     dest_dir: String,
     workspace: Option<WorkspaceEnv>,
     rename_on_conflict: Option<bool>,
+    refuse_secrets: Option<bool>,
 ) -> Result<CopyResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         copy_batch(
@@ -84,6 +86,7 @@ pub async fn fs_copy(
             &WorkspaceEnv::from_option(workspace),
             &app.state::<WorkspaceRegistry>(),
             rename_on_conflict.unwrap_or(false),
+            refuse_secrets.unwrap_or(false),
         )
     })
     .await
@@ -96,13 +99,54 @@ fn copy_batch(
     workspace: &WorkspaceEnv,
     registry: &WorkspaceRegistry,
     rename_on_conflict: bool,
+    refuse_secrets: bool,
 ) -> Result<CopyResult, String> {
     if sources.len() > MAX_COPY_SOURCES {
         return Err(format!("copy at most {MAX_COPY_SOURCES} items at a time"));
     }
-    if let WorkspaceEnv::Ssh { host } = workspace {
-        return crate::modules::ssh::copy(host, &sources, dest_dir, rename_on_conflict, registry);
+    let mut refused = Vec::new();
+    let mut allowed = Vec::with_capacity(sources.len());
+    for source in sources {
+        match refuse_secrets.then(|| secret_source(Path::new(&source))) {
+            Some(Err(message)) => refused.push(CopyFailure {
+                source,
+                message,
+                maybe_placed: false,
+            }),
+            _ => allowed.push(source),
+        }
     }
+    let mut result = match workspace {
+        WorkspaceEnv::Ssh { host } => {
+            crate::modules::ssh::copy(host, &allowed, dest_dir, rename_on_conflict, registry)?
+        }
+        _ => copy_local(allowed, dest_dir, workspace, registry, rename_on_conflict)?,
+    };
+    result.failed.splice(0..0, refused);
+    Ok(result)
+}
+
+/// The strict mode: the deny-list judges the named path and where it leads,
+/// before any read, so a secret never leaves the machine by name either.
+pub(crate) fn secret_source(src: &Path) -> Result<(), String> {
+    let not_sent = |reason: String| {
+        let reason = reason.strip_prefix("refused: ").unwrap_or(&reason).to_string();
+        format!("secret paths are never uploaded; {reason}")
+    };
+    guard::check_read_str(&src.to_string_lossy()).map_err(not_sent)?;
+    if let Ok(canonical) = std::fs::canonicalize(src) {
+        guard::check_read_str(&canonical.to_string_lossy()).map_err(not_sent)?;
+    }
+    Ok(())
+}
+
+fn copy_local(
+    sources: Vec<String>,
+    dest_dir: &str,
+    workspace: &WorkspaceEnv,
+    registry: &WorkspaceRegistry,
+    rename_on_conflict: bool,
+) -> Result<CopyResult, String> {
     let named_dest = resolve_path(dest_dir, workspace);
     let dest = copy_destination(&named_dest, registry)?;
     let mut result = CopyResult::default();
@@ -280,7 +324,8 @@ fn same_name(raw: &Path, name: &OsStr, real: &OsStr) -> bool {
 }
 
 // SECURITY: a paste is an explicit user action, so copies follow the editor's
-// trusted open/save policy: named paths pass, symlink detours to secrets do not.
+// trusted open/save policy: named paths pass (unless `refuse_secrets` refused
+// them up front, see `secret_source`), symlink detours to secrets never do.
 pub(crate) fn guard_read(registry: &WorkspaceRegistry, path: &Path) -> io::Result<PathBuf> {
     guard::enforce_read(registry, path, &path.to_string_lossy(), true).map_err(refused)
 }
@@ -1233,6 +1278,7 @@ mod tests {
             &WorkspaceEnv::Local,
             &reg_for(dest),
             rename,
+            false,
         )
         .unwrap()
     }
@@ -1297,6 +1343,7 @@ mod tests {
             &named,
             &WorkspaceEnv::Local,
             &reg_for(dest.path()),
+            false,
             false,
         )
         .unwrap();
@@ -1649,6 +1696,7 @@ mod tests {
             &WorkspaceEnv::Local,
             &reg_for(dest.path()),
             true,
+            false,
         )
         .unwrap();
         let messages: Vec<&str> = result.failed.iter().map(|f| f.message.as_str()).collect();
@@ -1690,7 +1738,7 @@ mod tests {
             },
         ] {
             let err =
-                copy_batch(too_many.clone(), &s(dest.path()), &workspace, &reg, true).unwrap_err();
+                copy_batch(too_many.clone(), &s(dest.path()), &workspace, &reg, true, false).unwrap_err();
             assert_eq!(err, "copy at most 1024 items at a time");
         }
         assert!(names(dest.path()).is_empty());
@@ -1945,6 +1993,122 @@ mod tests {
         assert_eq!(result.created, [s(ssh.join(".env"))]);
     }
 
+    fn secret_fixture(src: &Path) -> Vec<PathBuf> {
+        ["id_test", ".env", "credentials", "notes.txt"]
+            .iter()
+            .zip(["home/.ssh", "app", "home/.aws", "app"])
+            .map(|(name, dir)| {
+                let path = src.join(dir).join(name);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, b"secret").unwrap();
+                path
+            })
+            .collect()
+    }
+
+    #[test]
+    fn refuse_secrets_fails_named_secrets_alone_and_copies_the_rest() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let sources = secret_fixture(src.path());
+        let result = copy_batch(
+            sources.iter().map(s).collect(),
+            &s(dest.path()),
+            &WorkspaceEnv::Local,
+            &reg_for(dest.path()),
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(result.created, [s(dest.path().join("notes.txt"))]);
+        let failed: Vec<(String, String)> = result
+            .failed
+            .iter()
+            .map(|f| (f.source.clone(), f.message.clone()))
+            .collect();
+        let refused = |i: usize, reason: &str| {
+            (
+                s(&sources[i]),
+                format!("secret paths are never uploaded; {reason}"),
+            )
+        };
+        assert_eq!(
+            failed,
+            [
+                refused(0, "path is inside a protected directory (.ssh)"),
+                refused(1, "\".env\" matches a sensitive-file pattern"),
+                refused(2, "\"credentials\" matches a sensitive-file pattern"),
+            ]
+        );
+        assert_eq!(names(dest.path()), ["notes.txt"]);
+    }
+
+    #[test]
+    fn without_refuse_secrets_named_secrets_copy_as_the_explorer_does() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let result = copy(&secret_fixture(src.path()), dest.path(), true);
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        assert_eq!(
+            names(dest.path()),
+            [".env", "credentials", "id_test", "notes.txt"]
+        );
+    }
+
+    #[test]
+    fn refuse_secrets_on_ssh_fails_secrets_before_any_remote_call() {
+        let src = tempfile::tempdir().unwrap();
+        let mut secrets = secret_fixture(src.path());
+        secrets.pop();
+        let result = copy_batch(
+            secrets.iter().map(s).collect(),
+            "/home/u/.terax/uploads",
+            &WorkspaceEnv::Ssh {
+                host: "terax-no-such-host".into(),
+            },
+            &WorkspaceRegistry::default(),
+            true,
+            true,
+        )
+        .unwrap();
+        assert!(result.created.is_empty());
+        assert!(result.aborted.is_none());
+        assert_eq!(result.failed.len(), 3);
+        assert!(result
+            .failed
+            .iter()
+            .all(|f| f.message.starts_with("secret paths are never uploaded; ")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuse_secrets_judges_a_link_by_its_name_and_by_its_target() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::create_dir(src.path().join("keys")).unwrap();
+        std::fs::write(src.path().join("keys/id_ed25519"), b"PRIVATE").unwrap();
+        std::fs::write(src.path().join("plain.txt"), b"p").unwrap();
+        std::os::unix::fs::symlink(src.path().join("keys/id_ed25519"), src.path().join("a.txt"))
+            .unwrap();
+        std::os::unix::fs::symlink(src.path().join("plain.txt"), src.path().join(".env")).unwrap();
+        for name in ["a.txt", ".env"] {
+            let err = secret_source(&src.path().join(name)).unwrap_err();
+            assert!(err.starts_with("secret paths are never uploaded; "), "{err}");
+        }
+        assert_eq!(secret_source(&src.path().join("plain.txt")), Ok(()));
+        let result = copy_batch(
+            vec![s(src.path().join(".env"))],
+            &s(dest.path()),
+            &WorkspaceEnv::Local,
+            &reg_for(dest.path()),
+            true,
+            true,
+        )
+        .unwrap();
+        assert!(result.created.is_empty());
+        assert!(names(dest.path()).is_empty());
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_symlinked_destination_cannot_land_in_a_protected_folder() {
@@ -1961,6 +2125,7 @@ mod tests {
             &WorkspaceEnv::Local,
             &reg_for(root.path()),
             true,
+            false,
         )
         .unwrap();
         assert!(result.created.is_empty());
@@ -2031,6 +2196,7 @@ mod tests {
             &WorkspaceEnv::Local,
             &reg_for(ws.path()),
             true,
+            false,
         )
         .unwrap();
         assert!(result.failed.is_empty(), "{:?}", result.failed);
@@ -2186,6 +2352,7 @@ mod tests {
             &WorkspaceEnv::Local,
             &reg,
             true,
+            false,
         )
         .unwrap_err();
         assert!(
@@ -2200,6 +2367,7 @@ mod tests {
             &WorkspaceEnv::Local,
             &reg,
             true,
+            false,
         )
         .unwrap_err();
         assert_eq!(err, "copy destination is not a directory");

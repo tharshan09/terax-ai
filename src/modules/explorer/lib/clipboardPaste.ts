@@ -1,11 +1,12 @@
-import { invoke } from "@tauri-apps/api/core";
-import { toast } from "sonner";
+import { type CopyResult, copyFailureReason } from "@/lib/copyFailure";
 import { basename } from "@/lib/utils";
 import {
   isTerminalPasteChord,
   type TerminalKeyEvent,
 } from "@/modules/terminal/lib/keymap";
 import type { WorkspaceEnv } from "@/modules/workspace";
+import { invoke } from "@tauri-apps/api/core";
+import { toast } from "sonner";
 import { dirname } from "./paths";
 import type { RefreshOptions } from "./useFileTree";
 
@@ -43,12 +44,7 @@ export function pasteKeyAction(
   return e.repeat ? "swallow" : "paste";
 }
 
-export type CopyResult = {
-  created: string[];
-  // `maybePlaced`: cut off while publishing, so the item may be in place.
-  failed: { source: string; message: string; maybePlaced?: boolean }[];
-  aborted?: string | null;
-};
+export type { CopyResult };
 
 // `unresolved` counts file URLs whose file is gone (deleted since the copy).
 type ClipboardFiles = { paths: string[]; unresolved: number };
@@ -115,14 +111,10 @@ function maybePlacedNote(failed: CopyResult["failed"]): string | null {
   return `${basename(placed[0].source)}${more} may already be in place.`;
 }
 
-// A lost connection explains every failure after it, so it beats the first one.
 export function reportCopyFailures(result: CopyResult, unresolved = 0): void {
   const count = result.failed.length + unresolved;
   if (count === 0) return;
-  const first = result.failed[0];
-  const reason =
-    result.aborted ??
-    (first ? `${first.source}: ${first.message}` : missingItems(unresolved));
+  const reason = copyFailureReason(result) ?? missingItems(unresolved);
   const note = maybePlacedNote(result.failed);
   toast.error(`Could not copy ${count} ${count === 1 ? "item" : "items"}`, {
     description: note ? `${reason.replace(/\.$/, "")}. ${note}` : reason,

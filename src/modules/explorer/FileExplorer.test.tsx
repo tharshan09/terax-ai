@@ -233,6 +233,8 @@ describe("FileExplorer paste and drop scope", () => {
       workspace: LOCAL,
       renameOnConflict: true,
     });
+    // Only the terminal upload refuses secrets the user named.
+    expect(invoke.mock.lastCall?.[1]).not.toHaveProperty("refuseSecrets");
     let before = invoke.mock.calls.length;
     await act(async () => copies[0]({ created: [], failed: [] }));
     await settle();

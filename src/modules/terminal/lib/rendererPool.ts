@@ -18,6 +18,7 @@ import {
   terminalLineNavigationSequence,
   terminalWordNavigationSequence,
 } from "./keymap";
+import { createPasteBacklog, type PasteSlot } from "./pasteBacklog";
 import { pendingPtyResize } from "./rendererResize";
 import { findPathLinks } from "./terminalPathLinks";
 import { activateUnicode11 } from "./unicodeWidth";
@@ -126,6 +127,17 @@ function setWindowActive(active: boolean): void {
   }
 }
 
+// Claims a browser paste before xterm sees it; returning true swallows it.
+let pasteInterceptor:
+  | ((leafId: number, data: DataTransfer | null) => boolean)
+  | null = null;
+
+export function setTerminalPasteInterceptor(
+  fn: (leafId: number, data: DataTransfer | null) => boolean,
+): void {
+  pasteInterceptor = fn;
+}
+
 export function configureRendererPool(a: SlotAdapter): void {
   adapter = a;
   bindWindowActivityListeners();
@@ -180,6 +192,25 @@ export function pasteIntoLeaf(leafId: number, text: string): boolean {
   if (!slot) return false;
   slot.term.paste(text);
   return true;
+}
+
+const pasteBacklog = createPasteBacklog(
+  (leafId) => Boolean(adapter?.resolveLeaf(leafId)),
+);
+
+function pasteSlot(slot: Slot): PasteSlot {
+  return {
+    boundLeafId: () => slot.currentLeafId,
+    afterPendingWrites: (run) => slot.term.write("", run),
+    paste: (text) => slot.term.paste(text),
+  };
+}
+
+// Like pasteIntoLeaf, but a pane without a slot gets the text once it binds
+// one again instead of losing it.
+export function pasteIntoLeafWhenBound(leafId: number, text: string): void {
+  const slot = slots.find((s) => s.currentLeafId === leafId);
+  pasteBacklog.add(leafId, text, slot ? pasteSlot(slot) : null);
 }
 
 function getRecycler(): HTMLDivElement {
@@ -277,6 +308,20 @@ function createSlot(): Slot {
     lastH: 0,
     lastUsedAt: 0,
   };
+
+  // Capture phase on the host runs before xterm's paste listeners inside it.
+  // macOS only: there Cmd+V arrives as this event (see the paste chord below).
+  host.addEventListener(
+    "paste",
+    (e) => {
+      const leafId = slot.currentLeafId;
+      if (!IS_MAC || leafId === null || !pasteInterceptor) return;
+      if (!pasteInterceptor(leafId, e.clipboardData)) return;
+      e.preventDefault();
+      e.stopPropagation();
+    },
+    true,
+  );
 
   // File-path links (Cmd/Ctrl+Click → open in a tab). WebLinksAddon still owns
   // URLs; this provider only surfaces paths, and only while the modifier is
@@ -642,6 +687,7 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
   }
 
   p.onSearchReady(slot.searchAddon);
+  pasteBacklog.flush(p.leafId, pasteSlot(slot));
 }
 
 function scheduleUnhide(slot: Slot, stale: boolean): void {
@@ -1154,6 +1200,7 @@ export function refreshLeafSlot(leafId: number): void {
 }
 
 export function disposeLeafSlot(leafId: number): void {
+  pasteBacklog.drop(leafId);
   const slot = slots.find(
     (s) => s.currentLeafId === leafId || s.retainedLeafId === leafId,
   );

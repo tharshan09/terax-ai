@@ -175,7 +175,7 @@ function hydrateTab(
       const { tree, activeLeafId, firstLeafCwd } = hydrateTree(s.tree, allocId);
       // Mirror labelFor: a managed restart-safe session's random name is
       // noise, so a restored managed tab keeps the cwd-derived title instead
-      // of surfacing the raw terax-rs- token.
+      // of surfacing the raw managed token.
       const sessionTitle = isManagedSession(s.tmuxSession)
         ? undefined
         : s.tmuxSession;

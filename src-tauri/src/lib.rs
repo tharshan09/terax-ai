@@ -3,7 +3,8 @@ pub mod modules;
 #[cfg(target_os = "macos")]
 use modules::app_menu;
 use modules::{
-    agent, claude, fs, git, history, net, pty, secrets, shell, ssh, test_bridge, tmux, workspace,
+    agent, claude, fs, git, history, net, pty, secrets, shell, ssh, test_bridge, tmux, variant,
+    workspace,
 };
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -299,6 +300,9 @@ pub fn run() {
         }
     }
 
+    let context = tauri::generate_context!();
+    variant::init(&context.config().identifier);
+
     let cli_dir = parse_launch_dir();
     workspace::init_launch_cwd(cli_dir.as_deref());
 
@@ -324,6 +328,13 @@ pub fn run() {
         .plugin(
             tauri_plugin_window_state::Builder::new()
                 .with_state_flags(StateFlags::all() & !StateFlags::VISIBLE)
+                .build(),
+        )
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry, ()>::new("terax-variant")
+                .js_init_script(variant::managed_tmux_init_script(
+                    &variant::managed_tmux_prefix(variant::suffix()),
+                ))
                 .build(),
         )
         .plugin(tauri_plugin_autostart::Builder::new().build())
@@ -408,6 +419,7 @@ pub fn run() {
             fs::mutate::fs_delete,
             fs::copy::fs_copy,
             fs::clipboard::fs_clipboard_paths,
+            fs::clipboard::fs_clipboard_image,
             fs::watch::fs_watch_add,
             fs::watch::fs_watch_remove,
             fs::search::fs_search,
@@ -445,6 +457,7 @@ pub fn run() {
             shell::shell_bg_kill,
             shell::shell_bg_list,
             ssh::ssh_list_hosts,
+            ssh::ssh_prepare_upload_dir,
             tmux::tmux_list_sessions,
             tmux::tmux_kill_session,
             tmux::tmux_rename_session,
@@ -479,7 +492,7 @@ pub fn run() {
             history::history_record,
             history::history_list,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application")
         .run(|_app_handle, event| {
             // Tear down lingering SSH ControlMaster sockets when the app exits,

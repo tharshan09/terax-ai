@@ -151,12 +151,31 @@ pub fn control_args() -> Vec<String> {
 #[cfg(unix)]
 fn control_dir() -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
-    let dir = dirs::home_dir()
-        .map(|h| h.join(".terax").join("ssh-control"))
-        .unwrap_or_else(|| std::env::temp_dir().join("terax-ssh-control"));
+    let dir = control_dir_path(
+        dirs::home_dir().as_deref(),
+        &std::env::temp_dir(),
+        crate::modules::variant::suffix(),
+    );
     let _ = std::fs::create_dir_all(&dir);
     let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     dir
+}
+
+/// A side-by-side build gets its own folder: sharing one would let it ride
+/// the installed app's masters and `-O exit` them when it quits.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn control_dir_path(
+    home: Option<&std::path::Path>,
+    temp: &std::path::Path,
+    variant: Option<&str>,
+) -> std::path::PathBuf {
+    use crate::modules::variant::scoped_name;
+    match home {
+        Some(home) => home
+            .join(".terax")
+            .join(scoped_name("ssh-control", variant)),
+        None => temp.join(scoped_name("terax-ssh-control", variant)),
+    }
 }
 
 // Hosts we've opened a multiplexed connection to this session, so we can tear
@@ -215,7 +234,7 @@ pub fn disconnect_all() {
 /// envelope on stdout. Mirrors the local fs semantics (symlink-follow,
 /// dirs-first sort, 10 MB read cap, atomic write) so callers are
 /// local/remote-blind.
-const REMOTE_PYTHON: &str = r#"import sys, os, json, tempfile, shutil, base64, functools, errno
+const REMOTE_PYTHON: &str = r#"import sys, os, json, tempfile, shutil, base64, functools, errno, time
 
 
 def _natcmp(a, b):
@@ -452,6 +471,48 @@ def create_dir(req):
 def mkstage(req):
     # mkdtemp picks a free name and creates it 0700 in one step; never the parent.
     return tempfile.mkdtemp(prefix=STAGING_PREFIX, dir=os.path.expanduser(req["path"]))
+
+
+UPLOAD_KEEP_SECS = 7 * 24 * 3600
+
+
+def prep_uploads(req):
+    # Absolute, because a quoted pasted path is never tilde-expanded by the shell.
+    path = os.path.join(os.path.expanduser("~"), ".terax", "uploads")
+    if not os.path.isabs(path):
+        raise ValueError("could not resolve the home directory")
+    for d in (os.path.dirname(path), path):
+        try:
+            os.mkdir(d, 0o700)
+        except FileExistsError:
+            pass
+    # A link here could aim the sweep below at files outside the folder.
+    if not S_ISDIR(os.lstat(path).st_mode):
+        raise NotADirectoryError("upload folder is not a plain folder: " + path)
+    # Uploads keep their source mode, so owner-only access comes from the folder.
+    os.chmod(path, 0o700)
+    _sweep_uploads(path, time.time() - UPLOAD_KEEP_SECS)
+    return path
+
+
+def _sweep_uploads(path, cutoff):
+    # Silent and best effort: what cannot go now goes on a later upload.
+    try:
+        entries = list(os.scandir(path))
+    except OSError:
+        return
+    for e in entries:
+        try:
+            st = e.stat(follow_symlinks=False)
+            if st.st_mtime >= cutoff:
+                continue
+            if S_ISDIR(st.st_mode):
+                if _staging(e.name):
+                    shutil.rmtree(os.path.join(path, e.name), ignore_errors=True)
+                continue
+            os.unlink(os.path.join(path, e.name))
+        except OSError:
+            pass
 
 
 def rename(req):
@@ -721,6 +782,7 @@ OPS = {"read_dir": read_dir, "list_subdirs": list_subdirs, "stat": stat,
        "exists": exists, "realpath": realpath, "read_file": read_file,
        "read_bytes": read_bytes, "write_file": write_file,
        "create_file": create_file, "create_dir": create_dir, "mkstage": mkstage,
+       "prep_uploads": prep_uploads,
        "rename": rename, "delete": delete, "publish": publish,
        "write_bytes": write_bytes, "search": search, "grep": grep}
 
@@ -1515,6 +1577,32 @@ pub fn delete(host: &str, path: &str) -> Result<(), String> {
     Ok(())
 }
 
+const UPLOAD_DIR_TAIL: &str = "/.terax/uploads";
+
+/// The terminal upload folder on `host`, resolved to an absolute path, owner
+/// only, swept of what is older than 7 days. Uploads themselves go through `fs_copy`.
+#[tauri::command]
+pub async fn ssh_prepare_upload_dir(host: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || prepare_upload_dir(&host))
+        .await
+        .map_err(|e| format!("ssh_prepare_upload_dir task failed: {e}"))?
+}
+
+fn prepare_upload_dir(host: &str) -> Result<String, String> {
+    validate_ssh_host(host)?;
+    prepare_upload_dir_with(&mut |request, timeout| run_remote_json(host, request, timeout))
+}
+
+fn prepare_upload_dir_with(run: &mut RemoteRun) -> Result<String, String> {
+    let data = run(&serde_json::json!({ "op": "prep_uploads" }), Some(REMOTE_FS_TIMEOUT))?;
+    match data.as_str() {
+        Some(path) if path.starts_with('/') && path.ends_with(UPLOAD_DIR_TAIL) => {
+            Ok(path.to_string())
+        }
+        _ => Err(format!("bad prep_uploads response: {data}")),
+    }
+}
+
 type RemoteReply = Result<serde_json::Value, RemoteError>;
 
 /// The copy path's transport, so tests can swap in a stub.
@@ -1932,6 +2020,51 @@ mod tests {
             !args.iter().any(|a| a.contains("accept-new")),
             "`accept-new` silently trusts unknown hosts (MITM on first connect): {args:?}"
         );
+    }
+
+    #[test]
+    fn the_installed_app_keeps_its_control_dir_and_a_variant_gets_its_own() {
+        use std::path::Path;
+        let home = Some(Path::new("/Users/u"));
+        let temp = Path::new("/tmp");
+        assert_eq!(
+            control_dir_path(home, temp, None),
+            Path::new("/Users/u/.terax/ssh-control")
+        );
+        assert_eq!(
+            control_dir_path(None, temp, None),
+            Path::new("/tmp/terax-ssh-control")
+        );
+        assert_eq!(
+            control_dir_path(home, temp, Some("dev")),
+            Path::new("/Users/u/.terax/ssh-control-dev")
+        );
+        assert_eq!(
+            control_dir_path(None, temp, Some("dev")),
+            Path::new("/tmp/terax-ssh-control-dev")
+        );
+        let production = crate::modules::variant::side_by_side_suffix(
+            crate::modules::variant::PRODUCTION_IDENTIFIER,
+        );
+        assert_eq!(
+            control_dir_path(home, temp, production.as_deref()),
+            Path::new("/Users/u/.terax/ssh-control")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn control_args_point_at_the_installed_apps_folder_by_default() {
+        let expected = format!(
+            "ControlPath={}/%C",
+            control_dir_path(
+                dirs::home_dir().as_deref(),
+                &std::env::temp_dir(),
+                None
+            )
+            .display()
+        );
+        assert!(control_args().contains(&expected), "{expected}");
     }
 
     #[test]
@@ -2941,6 +3074,212 @@ Host !secret prod
         assert_eq!(mode("private"), 0o700);
         assert_eq!(create("shared", 0o775).unwrap()["ok"], true);
         assert_eq!(mode("shared"), 0o775, "the umask must not cut the mode");
+    }
+
+    /// Runs `prepare_upload_dir_with` against the real helper with `HOME` set to
+    /// `home`; `None` without a local python3.
+    #[cfg(unix)]
+    fn prepare_with_helper(home: &std::path::Path) -> Option<Result<String, String>> {
+        let prelude = format!(
+            "import os\nos.umask(0o022)\nos.environ[\"HOME\"] = {}\n",
+            serde_json::json!(home.to_string_lossy())
+        );
+        let mut skipped = false;
+        let result = prepare_upload_dir_with(&mut |request, _| {
+            let Some(envelope) = run_helper(&prelude, request) else {
+                skipped = true;
+                return Err(RemoteError::Transport("no local python3".into()));
+            };
+            if envelope["ok"] == true {
+                Ok(envelope["data"].clone())
+            } else {
+                let error = envelope["error"].as_str().unwrap_or_default();
+                Err(RemoteError::Failed(error.to_string()))
+            }
+        });
+        (!skipped).then_some(result)
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    fn age_days(path: &std::path::Path, days: u64) {
+        let then = std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400);
+        std::fs::File::open(path).unwrap().set_modified(then).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn upload_dir_is_made_owner_only_and_returned_absolute() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("u");
+        std::fs::create_dir(&home).unwrap();
+        let Some(result) = prepare_with_helper(&home) else {
+            return;
+        };
+        let path = result.unwrap();
+        let expected = home.join(".terax/uploads");
+        assert_eq!(path, expected.to_string_lossy());
+        assert!(path.starts_with('/') && !path.contains('~'), "{path}");
+        assert!(expected.is_dir());
+        assert_eq!(mode_of(&expected), 0o700);
+        assert_eq!(mode_of(&home.join(".terax")), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_upload_dir_is_narrowed_to_owner_only_and_keeps_recent_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("u");
+        let uploads = home.join(".terax/uploads");
+        std::fs::create_dir_all(&uploads).unwrap();
+        std::fs::set_permissions(&uploads, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let recent = uploads.join("gestern.png");
+        std::fs::write(&recent, b"png").unwrap();
+        age_days(&recent, 1);
+        let Some(result) = prepare_with_helper(&home) else {
+            return;
+        };
+        assert_eq!(result.unwrap(), uploads.to_string_lossy());
+        assert_eq!(mode_of(&uploads), 0o700);
+        assert_eq!(std::fs::read(&recent).unwrap(), b"png");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_sweep_removes_only_week_old_entries_of_the_upload_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("u");
+        let terax = home.join(".terax");
+        let uploads = terax.join("uploads");
+        let project = home.join("projekt");
+        std::fs::create_dir_all(&uploads).unwrap();
+        std::fs::create_dir(&project).unwrap();
+        let file = |path: std::path::PathBuf, days: u64| {
+            std::fs::write(&path, b"x").unwrap();
+            age_days(&path, days);
+            path
+        };
+        let old = file(uploads.join("alt.png"), 8);
+        let young = file(uploads.join("neu.png"), 6);
+        let beside = file(terax.join("alt.txt"), 8);
+        let elsewhere = file(project.join("alt.txt"), 8);
+        let link = uploads.join("link.png");
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+        let stale_link = std::process::Command::new("touch")
+            .args(["-h", "-d", "8 days ago"])
+            .arg(&link)
+            .status()
+            .is_ok_and(|status| status.success());
+        let stage = |tail: &str| {
+            uploads.join(format!("{}{tail}", crate::modules::fs::copy::STAGING_PREFIX))
+        };
+        let stale_stage = stage("ab12CD34");
+        let fresh_stage = stage("ef56GH78");
+        let folder = uploads.join("ordner");
+        for dir in [&stale_stage, &fresh_stage, &folder] {
+            std::fs::create_dir(dir).unwrap();
+            std::fs::write(dir.join("item"), b"x").unwrap();
+        }
+        age_days(&stale_stage, 8);
+        age_days(&folder, 8);
+
+        let Some(result) = prepare_with_helper(&home) else {
+            return;
+        };
+        assert_eq!(result.unwrap(), uploads.to_string_lossy(), "only the path, no report");
+        assert!(!old.exists());
+        assert!(young.exists() && beside.exists() && elsewhere.exists());
+        if stale_link {
+            assert!(std::fs::symlink_metadata(&link).is_err(), "the old link goes");
+        }
+        assert_eq!(std::fs::read(&elsewhere).unwrap(), b"x", "never its target");
+        assert!(!stale_stage.exists(), "an abandoned staging dir goes");
+        assert!(fresh_stage.join("item").exists());
+        assert!(folder.join("item").exists(), "other folders are never removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unwritable_home_fails_with_the_hosts_reason() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("u");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o500)).unwrap();
+        // Root writes anyway, so the refusal cannot be staged there.
+        let root_user = std::fs::create_dir(home.join("probe")).is_ok();
+        let result = prepare_with_helper(&home);
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let Some(result) = result else {
+            return;
+        };
+        if root_user {
+            return;
+        }
+        let error = result.unwrap_err();
+        assert!(error.contains("Permission denied"), "{error}");
+        assert!(!home.join(".terax").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_upload_dir_is_refused_and_its_target_left_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("u");
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir_all(home.join(".terax")).unwrap();
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let old = elsewhere.join("alt.png");
+        std::fs::write(&old, b"x").unwrap();
+        age_days(&old, 8);
+        std::os::unix::fs::symlink(&elsewhere, home.join(".terax/uploads")).unwrap();
+        let Some(result) = prepare_with_helper(&home) else {
+            return;
+        };
+        let error = result.unwrap_err();
+        assert!(error.contains("not a plain folder"), "{error}");
+        assert!(old.exists());
+        assert_eq!(mode_of(&elsewhere), 0o755);
+    }
+
+    #[test]
+    fn the_upload_dir_reply_must_be_absolute_and_budgeted() {
+        let reply = |data: serde_json::Value| {
+            let mut budgets = Vec::new();
+            let result = prepare_upload_dir_with(&mut |request, timeout| {
+                assert_eq!(request["op"], "prep_uploads");
+                budgets.push(timeout);
+                Ok(data.clone())
+            });
+            assert_eq!(budgets, [Some(REMOTE_FS_TIMEOUT)]);
+            result
+        };
+        assert_eq!(
+            reply(serde_json::json!("/home/u/.terax/uploads")).unwrap(),
+            "/home/u/.terax/uploads"
+        );
+        for bad in [
+            serde_json::json!("~/.terax/uploads"),
+            serde_json::json!("home/u/.terax/uploads"),
+            serde_json::json!("/home/u"),
+            serde_json::json!(true),
+        ] {
+            let error = reply(bad.clone()).unwrap_err();
+            assert!(error.starts_with("bad prep_uploads response"), "{bad}: {error}");
+        }
+        let refused = prepare_upload_dir_with(&mut |_, _| {
+            Err(RemoteError::Failed("[Errno 13] Permission denied: '/home/u/.terax'".into()))
+        });
+        assert_eq!(refused.unwrap_err(), "[Errno 13] Permission denied: '/home/u/.terax'");
+        assert!(prepare_upload_dir("-oProxyCommand=x").is_err());
     }
 
     fn stub_copy(
