@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import babel from "@rolldown/plugin-babel";
 import tailwindcss from "@tailwindcss/vite";
 import react, { reactCompilerPreset } from "@vitejs/plugin-react";
@@ -146,6 +147,9 @@ export default defineConfig(async ({ mode }): Promise<UserConfig> => ({
         },
       },
     },
+  },
+  test: {
+    setupFiles: ["./src/test/setup.ts"],
   },
   clearScreen: false,
   server: {

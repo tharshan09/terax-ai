@@ -330,6 +330,13 @@ pub fn run() {
                 .with_state_flags(StateFlags::all() & !StateFlags::VISIBLE)
                 .build(),
         )
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry, ()>::new("terax-variant")
+                .js_init_script(variant::managed_tmux_init_script(
+                    &variant::managed_tmux_prefix(variant::suffix()),
+                ))
+                .build(),
+        )
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_os::init())
