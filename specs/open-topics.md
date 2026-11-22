@@ -1,4 +1,4 @@
-# Offene Themen (Stand 2026-10-27; Abschnitte 1 bis 4 vom 2026-09-06)
+# Offene Themen (Stand 2026-11-22; Abschnitte 1 bis 4 vom 2026-09-06)
 
 `main` = `e41418a`, Version 0.8.6. Upstream-Sync Runde 3 und beide Follow-up-Runden sind
 abgeschlossen. Diese Datei ist der Einstieg für die nächste Session.
@@ -10,6 +10,15 @@ Als Nächstes steht Welle C an (Pane von Tab A nach Tab B).
 ---
 
 ## 0. Reihenfolge ab 27.10.2026 (vom User so bestätigt)
+
+**Stand 22.11.2026: SSH-Remote-Workflow gemergt und installiert.** Drei Wellen aus `specs/2026-11-20-ssh-remote-workflow/`: PR #93 Upload von Bildern und Dateien in SSH-Terminals, PR #94 Port-Freigaben, PR #95 Browser-Ansicht eines Chrome auf dem Server. `main` = `98ee853`, Version bleibt 0.8.7, am 22.11. aus genau diesem Commit installiert (alte App als Zip in `~/.terax/app-backup/`).
+
+- **Geprüft:** alle Prüfungen auf dem Mac grün (1336 Frontend-Tests, Clippy, 623 Rust-Tests) und ein Durchlauf aller drei Wellen in der laufenden App über die Test-Bridge gegen einen echten Server. Einzelheiten stehen in den PR-Beschreibungen.
+- **Offene QA von Hand:** echter Screenshot mit Cmd+V in Claude Code über SSH, echter Finder-Drag auf ein SSH-Terminal, Bedienung der Chrome-Live-Ansicht (Klick, Tippen, Anmeldung, Tastenbelegung), „Open in browser“, das Angebot bei farbiger oder neu zeichnender Dev-Server-Ausgabe, zwei Apps mit demselben Port.
+- **Folgepunkte:** Nach „Stop“ bleibt der Vorschau-Tab des Ports mit toter Adresse offen. Gedrückt gehaltenes Cmd+V startet mehrere Uploads. Bei mehreren Seiten zeigt die Browser-Ansicht nur die erste, ohne Auswahl. Die bekannten Grenzen stehen in den PRs #93 bis #95.
+- **CI:** Auf dem Fork ist seit dem 27.10.2026 kein Lauf mehr gestartet, weder für PRs noch für Pushes auf `main`. Actions ist eingeschaltet, die Ursache ist unbekannt. Bis das geklärt ist, gelten nur die lokalen Prüfungen; der Windows-Teil der neuen Befehle wurde nie kompiliert.
+- **Beim Installieren beachten:** Der Boot-Reaper entfernt bei jedem Start die `terax-rs-*`-Sessions, die kein Tab im gespeicherten Zustand referenziert. Am 22.11. fielen so sechs von acht Sessions weg. Vor einem Neustart `tmux ls -F '#{session_name} #{session_attached}'` ansehen und dem User sagen, welche Sessions wegfallen.
+- **Test-Variante:** `pnpm tauri:build:dev-variant` baut „Terax Dev“, das neben der installierten App läuft (siehe TERAX.md, „Side-by-side test build“).
 
 **Stand 29.10.2026:** Punkte 1 und 2 sind gemergt (PRs #84 bis #89 für den Sync, Version 0.8.7; PR #90 für B1/B2). Installation offen, nur mit Ja des Users. QA in der echten App und Folgepunkte siehe unten unter „Nach dem Sync“.
 

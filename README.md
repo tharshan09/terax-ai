@@ -31,6 +31,9 @@ This fork closes that gap. Source control, Claude Code's live stats, tmux sessio
 | **Source control over SSH** | The full git panel (status, side-by-side diffs, commit graph, branches, checkout, stage/commit/push) runs on the remote host over a shared SSH connection. Review and commit remote repos without leaving the app. |
 | **Paste and drop files over SSH** | Cmd+V in the explorer pastes files and folders copied in the Finder, and a Finder drop copies them, into a local folder or onto the SSH host. Names clash Finder-style (`a copy.txt`), nothing is overwritten, and an interrupted copy never shows up half-written. |
 | **Images over SSH** | The image preview reads remote images through the SSH connection instead of looking the path up on your Mac. Secret paths such as `~/.ssh` stay refused, also through symlinks. |
+| **Upload into SSH terminals** | Cmd+V with an image on the clipboard, or a Finder drop onto an SSH terminal, uploads the file to `~/.terax/uploads` on the host and pastes the server path. A screenshot pasted into a remote Claude Code arrives as `[Image #1]`. Up to 100 MB per file, nothing is overwritten, and secret paths such as `~/.ssh` are refused. |
+| **Port forwarding** | A loopback address in the output of an SSH terminal (`localhost:3000`) raises "Forward port 3000?" in the status bar. One click, or a click on the address itself, forwards the port over the shared SSH connection and opens it in the preview. A Ports list forwards by hand, copies, stops and retries. Forwards bind to loopback on the Mac only and move to the next free number when the port is taken. |
+| **Remote browser view** | When a forwarded port is the remote-debugging port of a Chrome on the host, "View browser" opens a live view of that browser in Google Chrome on the Mac, served by the remote Chrome itself through the forward. A notice explains the access once per server, and a guide shows the start command when the remote Chrome does not allow the Mac's origin. macOS only. |
 | **Search over SSH** | Both file-name search (explorer) and full-text content search (command palette) run on the remote host, so they work over SSH exactly like locally. |
 | **Claude Code stats over SSH** | Model, context %, cost and +/- line counts appear in the status bar even when Claude runs in a remote tmux session, not just locally. |
 | **Keepalive and reconnect** | SSH tabs no longer close on idle; a dropped connection offers "Press Enter to reconnect" in the same tab. |
@@ -46,7 +49,7 @@ This fork closes that gap. Source control, Claude Code's live stats, tmux sessio
 
 ### How the SSH features work
 
-Transport is the **system `ssh` binary with ControlMaster multiplexing**: no bundled SSH crate, no extra daemon on the host. Hosts come from your `~/.ssh/config`; auth is **keys/agent only**. Git, tmux, file copies and the remote stat reads all reuse the one multiplexed connection, so they are fast and add no new credentials. The model is *trust-the-host-account*: if your key can reach the host, the app can act as that account there, the same boundary as your own shell.
+Transport is the **system `ssh` binary with ControlMaster multiplexing**: no bundled SSH crate, no extra daemon on the host. Hosts come from your `~/.ssh/config`; auth is **keys/agent only**. Git, tmux, file copies, port forwards and the remote stat reads all reuse the one multiplexed connection, so they are fast and add no new credentials. The model is *trust-the-host-account*: if your key can reach the host, the app can act as that account there, the same boundary as your own shell.
 
 ## Other additions
 
