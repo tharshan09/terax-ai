@@ -1,6 +1,8 @@
 import { writeSystemClipboard } from "@/lib/clipboard";
 import { resolveFontFamily } from "@/lib/fonts";
+import { openLoopbackAddress, portsAvailable } from "@/modules/ports";
 import { usePreferencesStore } from "@/modules/settings/preferences";
+import type { WorkspaceEnv } from "@/modules/workspace";
 import { buildTerminalTheme } from "@/styles/terminalTheme";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { FitAddon } from "@xterm/addon-fit";
@@ -20,7 +22,13 @@ import {
 } from "./keymap";
 import { createPasteBacklog, type PasteSlot } from "./pasteBacklog";
 import { pendingPtyResize } from "./rendererResize";
-import { findPathLinks } from "./terminalPathLinks";
+import {
+  activateTerminalLink,
+  bareLoopbackLinks,
+  type LinkOpeners,
+  pathLinksBesideAddresses,
+  WEB_URL_REGEX,
+} from "./terminalLinks";
 import { activateUnicode11 } from "./unicodeWidth";
 
 export const POOL_MAX_SIZE = 5;
@@ -35,6 +43,8 @@ export type SlotAdapter = {
   isLeafBlocks(leafId: number): boolean;
   isLeafBusy(leafId: number): boolean;
   isLeafVisible(leafId: number): boolean;
+  // The env the pane's PTY was spawned on; null once it is closed.
+  leafWorkspace(leafId: number): WorkspaceEnv | null;
   storeSnapshot(leafId: number, out: SerializeOutput): void;
 };
 
@@ -264,6 +274,22 @@ export function applyBackgroundActive(active: boolean): void {
   }
 }
 
+function slotWorkspace(slot: Slot): WorkspaceEnv | null {
+  const leafId = slot.currentLeafId;
+  return leafId === null ? null : (adapter?.leafWorkspace(leafId) ?? null);
+}
+
+const LINK_OPENERS: LinkOpeners = {
+  forward: openLoopbackAddress,
+  browser: (text) => {
+    openUrl(text).catch(console.error);
+  },
+};
+
+function activateLink(slot: Slot, text: string): void {
+  activateTerminalLink(text, slotWorkspace(slot), LINK_OPENERS);
+}
+
 function createSlot(): Slot {
   const term = new Terminal(termOptions());
   const fitAddon = new FitAddon();
@@ -273,7 +299,9 @@ function createSlot(): Slot {
   term.loadAddon(searchAddon);
   term.loadAddon(serializeAddon);
   term.loadAddon(
-    new WebLinksAddon((_e, uri) => openUrl(uri).catch(console.error)),
+    new WebLinksAddon((_e, uri) => activateLink(slot, uri), {
+      urlRegex: WEB_URL_REGEX,
+    }),
   );
   activateUnicode11(term);
 
@@ -323,6 +351,29 @@ function createSlot(): Slot {
     true,
   );
 
+  // `localhost:3000` without a scheme, only in panes on a forwardable SSH
+  // host; WebLinksAddon keeps every URL that has one.
+  term.registerLinkProvider({
+    provideLinks(bufferLine, callback) {
+      if (!portsAvailable(slotWorkspace(slot))) return callback(undefined);
+      const line = term.buffer.active.getLine(bufferLine - 1);
+      if (!line) return callback(undefined);
+      const found = bareLoopbackLinks(line.translateToString(true), true);
+      if (found.length === 0) return callback(undefined);
+      callback(
+        found.map((a) => ({
+          text: a.text,
+          range: {
+            start: { x: a.start + 1, y: bufferLine },
+            end: { x: a.end, y: bufferLine },
+          },
+          activate: (_event: MouseEvent, text: string) =>
+            activateLink(slot, text),
+        })),
+      );
+    },
+  });
+
   // File-path links (Cmd/Ctrl+Click → open in a tab). WebLinksAddon still owns
   // URLs; this provider only surfaces paths, and only while the modifier is
   // held so untouched output stays clean.
@@ -331,7 +382,10 @@ function createSlot(): Slot {
       if (!modifierHeld || !pathOpener) return callback(undefined);
       const line = term.buffer.active.getLine(bufferLine - 1);
       if (!line) return callback(undefined);
-      const found = findPathLinks(line.translateToString(true));
+      const found = pathLinksBesideAddresses(
+        line.translateToString(true),
+        portsAvailable(slotWorkspace(slot)),
+      );
       if (found.length === 0) return callback(undefined);
       callback(
         found.map((l) => ({

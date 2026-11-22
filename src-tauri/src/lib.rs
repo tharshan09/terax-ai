@@ -3,8 +3,8 @@ pub mod modules;
 #[cfg(target_os = "macos")]
 use modules::app_menu;
 use modules::{
-    agent, claude, fs, git, history, net, pty, secrets, shell, ssh, test_bridge, tmux, variant,
-    workspace,
+    agent, claude, fs, git, history, net, ports, pty, secrets, shell, ssh, test_bridge, tmux,
+    variant, workspace,
 };
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -458,6 +458,9 @@ pub fn run() {
             shell::shell_bg_list,
             ssh::ssh_list_hosts,
             ssh::ssh_prepare_upload_dir,
+            ports::ssh_port_forward,
+            ports::ssh_port_stop,
+            ports::ssh_port_list,
             tmux::tmux_list_sessions,
             tmux::tmux_kill_session,
             tmux::tmux_rename_session,

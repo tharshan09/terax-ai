@@ -1,0 +1,1 @@
+{"feature":"ssh-remote-workflow","wave":2,"slice":"slice-02","timestamp":"2026-11-20T12:17:38+00:00","status":"completed","implementation":{"commit":"4bfe35d","lint_exit":0,"typecheck_exit":0},"validation":{"overall_status":"passed","summary":"vitest 1201 passed (110 files), 0 errors"},"debug_retries":0}

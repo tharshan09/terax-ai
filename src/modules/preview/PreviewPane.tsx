@@ -1,3 +1,6 @@
+import { isLoopbackUrl } from "@/lib/loopback";
+import { portsAvailable } from "@/modules/ports";
+import { useWorkspaceEnvStore } from "@/modules/workspace";
 import { Alert02Icon, Globe02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
@@ -59,7 +62,7 @@ export const PreviewPane = forwardRef<PreviewPaneHandle, Props>(
       [url],
     );
 
-    const showXfoHint = url ? !isLocalUrl(url) : false;
+    const showXfoHint = url ? !isLoopbackUrl(url, "preview") : false;
 
     return (
       <div
@@ -155,7 +158,10 @@ function SuspendedState({ onReload }: { onReload: () => void }) {
   );
 }
 
+const CHIP = "rounded bg-muted px-1 py-0.5 font-mono text-[10.5px]";
+
 function EmptyState() {
+  const env = useWorkspaceEnvStore((s) => s.env);
   return (
     <div className="flex h-full w-full flex-col items-center justify-center gap-4 px-6 text-center">
       <div className="flex size-12 items-center justify-center rounded-2xl border border-border/60 bg-card text-muted-foreground">
@@ -166,31 +172,25 @@ function EmptyState() {
           Nothing to preview yet
         </p>
         <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
-          Type a URL above, or open the{" "}
-          <span className="rounded bg-muted px-1 py-0.5 font-mono text-[10.5px]">
-            Ports
-          </span>{" "}
-          dropdown to jump straight to your running dev server. Public sites
-          often block embedding — open them in your browser via the link icon
-          if you see a blank page.
+          {portsAvailable(env) ? (
+            <>
+              A dev server on {env.label ?? env.host} needs a forwarded port.
+              Click a localhost link in its terminal or forward one from{" "}
+              <span className={CHIP}>Ports</span> in the status bar; it then
+              shows up in the <span className={CHIP}>Ports</span> dropdown
+              above.
+            </>
+          ) : (
+            <>
+              Type a URL above, or open the <span className={CHIP}>Ports</span>{" "}
+              dropdown to jump straight to your running dev server. Public sites
+              often block embedding. If you see a blank page, open it in your
+              browser via the link icon.
+            </>
+          )}
         </p>
       </div>
     </div>
   );
 }
 
-function isLocalUrl(url: string): boolean {
-  try {
-    const u = new URL(url);
-    const h = u.hostname;
-    return (
-      h === "localhost" ||
-      h === "127.0.0.1" ||
-      h === "0.0.0.0" ||
-      h === "[::1]" ||
-      h.endsWith(".localhost")
-    );
-  } catch {
-    return false;
-  }
-}
