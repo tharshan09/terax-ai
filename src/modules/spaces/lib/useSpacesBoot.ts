@@ -86,7 +86,8 @@ export function useSpacesBoot({
           setActiveSpaceForNewTabs(DEFAULT_SPACE_ID);
           useSpaces.getState().hydrate([meta], DEFAULT_SPACE_ID);
           // No persisted state means nothing legitimately references a
-          // managed session: whatever carries our prefix is a leak.
+          // managed session: whatever carries our prefix is a leak. The reaper
+          // only ever matches this build's prefix and does nothing without it.
           void reapOrphanedManagedSessions(new Set());
           return;
         }

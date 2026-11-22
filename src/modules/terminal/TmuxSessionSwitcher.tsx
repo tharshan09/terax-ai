@@ -17,7 +17,11 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useMemo, useState } from "react";
-import { isManagedSession, newSessionNameError } from "./lib/managedTmux";
+import {
+  isManagedSession,
+  isReservedSessionName,
+  newSessionNameError,
+} from "./lib/managedTmux";
 import {
   autoSessionName,
   isValidSessionName,
@@ -107,10 +111,10 @@ export function TmuxSessionSwitcher({
       .finally(() => void refresh(workspace));
   };
   const renameSession = (from: string, to: string) => {
-    // The terax-rs- prefix is reserved: renaming a user session INTO it would
-    // hand the session to the managed-session cleanup (boot reaper, tab-close
-    // kill).
-    if (isManagedSession(to)) return;
+    // The managed prefixes are reserved: renaming a user session INTO one
+    // would hand the session to a managed-session cleanup (boot reaper,
+    // tab-close kill).
+    if (isReservedSessionName(to)) return;
     void renameTmuxSession(workspace, from, to)
       .then(() => onRenamed?.(from, to))
       .catch((e) => console.error("[terax] tmux rename failed:", e))
@@ -142,7 +146,8 @@ export function TmuxSessionSwitcher({
   const newName = typedName || autoSessionName(sessions.map((s) => s.name));
   // The reserved prefix also blocks CREATE, so a user session can never be
   // mistaken for (and reaped as) a managed one.
-  const canCreate = isValidSessionName(newName) && !isManagedSession(newName);
+  const canCreate =
+    isValidSessionName(newName) && !isReservedSessionName(newName);
 
   // A typed name is already a decision, so Enter creates it straight away.
   // Without one we would silently invent s1, s2, ... and leave the user to

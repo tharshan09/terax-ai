@@ -391,6 +391,13 @@ pub async fn claude_status(
     })
 }
 
+/// The `TERAX_PTY_ID` a PTY carries and its stats file is keyed by. PTY ids
+/// restart at 1 in every app, so a side-by-side build tags its own; otherwise
+/// both apps would read each other's `status-<id>.json`.
+pub fn pty_status_key(pty_id: u32, variant: Option<&str>) -> String {
+    crate::modules::variant::scoped_name(&pty_id.to_string(), variant)
+}
+
 fn status_local(pty_id: u32, tmux_session: Option<&str>) -> Option<ClaudeStatus> {
     if let Some(session) = tmux_session {
         // Defense in depth: the name is spliced into a filename.
@@ -400,7 +407,8 @@ fn status_local(pty_id: u32, tmux_session: Option<&str>) -> Option<ClaudeStatus>
             }
         }
     }
-    read_local_status(&format!("status-{pty_id}.json"))
+    let key = pty_status_key(pty_id, crate::modules::variant::suffix());
+    read_local_status(&format!("status-{key}.json"))
 }
 
 fn read_local_status(file: &str) -> Option<ClaudeStatus> {
@@ -714,6 +722,13 @@ pub fn claude_status_batch_local(tmux_sessions: Vec<String>) -> Vec<Option<Claud
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_pty_status_key_stays_the_bare_id_for_the_installed_app() {
+        assert_eq!(pty_status_key(3, None), "3");
+        assert_eq!(pty_status_key(3, Some("dev")), "3-dev");
+        assert_ne!(pty_status_key(3, Some("dev")), pty_status_key(3, None));
+    }
 
     #[test]
     fn sets_statusline_and_preserves_siblings() {

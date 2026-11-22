@@ -1,0 +1,11 @@
+[
+  { "suffix": null, "prefix": "terax-rs-" },
+  { "suffix": "dev", "prefix": "terax-dev-rs-" },
+  { "suffix": "teraxbeta", "prefix": "terax-teraxbeta-rs-" },
+  { "suffix": "a-very-long-vari", "prefix": "terax-averylongvari-rs-" },
+  { "suffix": "Beta2", "prefix": "terax-beta2-rs-" },
+  { "suffix": "rs", "prefix": "terax-variant-rs-" },
+  { "suffix": "rs-x", "prefix": "terax-rsx-rs-" },
+  { "suffix": "-", "prefix": "terax-variant-rs-" },
+  { "suffix": "", "prefix": "terax-variant-rs-" }
+]

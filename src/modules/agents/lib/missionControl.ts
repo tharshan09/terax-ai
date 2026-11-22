@@ -65,7 +65,7 @@ function rowFromSession(session: AgentSession, tabs: Tab[]): AgentRow {
   const found = findTabAndLeaf(tabs, session.leafId);
   const tab = found?.tab ?? null;
   const leaf = found?.leaf ?? null;
-  // A managed restart-safe session's random `terax-rs-` name is an
+  // A managed restart-safe session's random prefixed name is an
   // implementation detail, not a place the user knows; keep it out of the row.
   const tmuxSession = leaf?.tmuxSession ?? tab?.tmuxSession ?? null;
 
