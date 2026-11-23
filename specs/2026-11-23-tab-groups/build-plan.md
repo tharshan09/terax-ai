@@ -545,7 +545,10 @@ Schreibweise: Leiste eines Space von links; `G1(t2, t3)` ist Gruppe G1 mit den M
 
 **Wie gebaut**
 
-_(leer bis zum Merge)_
+- Merge-Commit: `adce15d` (Implementierung `1f56669`)
+- Review: 0 Befunde, davon 0 blockierend bestätigt; Ergebnis APPROVED
+- Prüfungen: Lint, Typprüfung und Test-Suite grün (124 Dateien, 1381 Tests, 2 Worker; erster Lauf unter Speicherdruck rot, Wiederholung ohne Code-Änderung grün)
+- Abweichungen vom Plan: keine; acht Detailentscheidungen des Helfers zu Randfällen (unbekannte Gruppe, Lücke in fremder Gruppe, Kürzen an Zeichenpaaren) stehen in der Evidence
 
 ### slice-02-tab-state: Tab-Zustand mit Gruppen
 

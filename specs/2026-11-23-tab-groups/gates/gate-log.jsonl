@@ -34,3 +34,14 @@
 {"v": 2, "ts": "2026-11-23T23:12:58+00:00", "kind": "gate", "gate": "slice_merge", "slice": "slice-00-contracts", "result": "PASSED", "attempt": 1, "findings_count": 0, "merge_commit": "75b1d67", "rebase_attempts": 0}
 {"v": 2, "ts": "2026-11-23T23:12:58+00:00", "kind": "gate", "gate": "typecheck", "slice": "slice-00-contracts", "result": "PASSED", "attempt": 1, "findings_count": 0, "scope": "feature_after_merge"}
 {"v": 2, "ts": "2026-11-23T23:12:58+00:00", "kind": "marker", "gate": "slice_complete", "slice": "slice-00-contracts"}
+{"v": 2, "ts": "2026-11-23T23:13:28+00:00", "kind": "gate", "gate": "worktree_bootstrap", "slice": "slice-01-group-rules", "result": "PASSED", "attempt": 1, "findings_count": 0}
+{"v": 2, "ts": "2026-11-23T23:37:42+00:00", "kind": "fix", "gate": "marker_scrub", "slice": "slice-01-group-rules", "class": "hygiene", "removed": 0}
+{"v": 2, "ts": "2026-11-23T23:37:42+00:00", "kind": "gate", "gate": "lint", "slice": "slice-01-group-rules", "result": "PASSED", "attempt": 1, "findings_count": 0}
+{"v": 2, "ts": "2026-11-23T23:37:42+00:00", "kind": "gate", "gate": "typecheck", "slice": "slice-01-group-rules", "result": "PASSED", "attempt": 1, "findings_count": 0}
+{"v": 2, "ts": "2026-11-23T23:37:42+00:00", "kind": "gate", "gate": "tests", "slice": "slice-01-group-rules", "result": "FAILED", "attempt": 1, "findings_count": 33, "suite": "guarantee", "note": "4 Dateien, 33 Tests rot unter Speicherdruck der Box; Lauf kurz vor dem Speicher-Absturz der Werkbank, rote Dateien nicht mehr erhoben"}
+{"v": 2, "ts": "2026-11-23T23:37:42+00:00", "kind": "gate", "gate": "tests", "slice": "slice-01-group-rules", "result": "PASSED", "attempt": 2, "findings_count": 0, "suite": "guarantee", "note": "Wiederholung ohne Code-Aenderung nach dem Absturz, mit --maxWorkers=2: 124 Dateien, 1381 Tests"}
+{"v": 2, "ts": "2026-11-23T23:37:42+00:00", "kind": "note", "gate": "note", "slice": "run", "topic": "host_crash_resume", "text": "Speicher-Absturz der Werkbank um 23:24 UTC; Sitzung wieder aufgenommen, Stand intakt. Ab hier Testlaeufe mit hoechstens 2 Workern und nie mehrere schwere Laeufe gleichzeitig."}
+{"v": 2, "ts": "2026-11-23T23:39:55+00:00", "kind": "gate", "gate": "code_review", "slice": "slice-01-group-rules", "result": "PASSED", "attempt": 1, "findings_count": 0}
+{"v": 2, "ts": "2026-11-23T23:39:55+00:00", "kind": "gate", "gate": "slice_merge", "slice": "slice-01-group-rules", "result": "PASSED", "attempt": 1, "findings_count": 0, "merge_commit": "adce15d", "rebase_attempts": 0}
+{"v": 2, "ts": "2026-11-23T23:39:55+00:00", "kind": "gate", "gate": "typecheck", "slice": "slice-01-group-rules", "result": "PASSED", "attempt": 1, "findings_count": 0, "scope": "feature_after_merge"}
+{"v": 2, "ts": "2026-11-23T23:39:55+00:00", "kind": "marker", "gate": "slice_complete", "slice": "slice-01-group-rules"}
