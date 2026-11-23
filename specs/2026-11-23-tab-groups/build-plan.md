@@ -374,7 +374,10 @@ Die Discovery-Tabelle „Nach dem Merge“ trägt keine Kennungen; keiner ihrer 
 
 **Wie gebaut**
 
-_(leer bis zum Merge)_
+- Merge-Commit: `75b1d67` (Implementierung `a926acf`)
+- Review: 0 Befunde, davon 0 blockierend bestätigt; Ergebnis APPROVED
+- Prüfungen: Lint, Typprüfung und Test-Suite grün (121 Dateien, 1336 Tests)
+- Abweichungen vom Plan: WorkspaceSurface.tsx unverändert (Typ wird abgeleitet); index.ts exportiert von den Funktionen nur visibleTabsInSpace und tabForSpaceSwitch, spätere Slices importieren direkt aus lib/tabGroups
 
 ### slice-01-group-rules: Gruppen-Regeln als reine Funktionen
 

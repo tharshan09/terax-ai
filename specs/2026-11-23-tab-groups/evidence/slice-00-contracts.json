@@ -1,0 +1,31 @@
+{
+  "feature": "tab-groups",
+  "slice": "slice-00-contracts",
+  "timestamp": "2026-11-23T23:12:58+00:00",
+  "status": "merged",
+  "implementation": {
+    "commit": "a926acf",
+    "fix_commits": []
+  },
+  "review": {
+    "verdict": "APPROVED",
+    "findings": 0,
+    "confirmed_blocking": 0
+  },
+  "deterministic_gate": {
+    "marker_scrub": "PASSED",
+    "lint": "PASSED",
+    "typecheck": "PASSED",
+    "typecheck_after_merge": "PASSED"
+  },
+  "tests": {
+    "suite": "full (no guarantee suite configured)",
+    "result": "PASSED",
+    "summary": "121 Dateien, 1336 Tests"
+  },
+  "obligations": [],
+  "notes": [
+    "AC 7 nur statisch geprüft, Prüfweg QA"
+  ],
+  "merge_commit": "75b1d67"
+}
