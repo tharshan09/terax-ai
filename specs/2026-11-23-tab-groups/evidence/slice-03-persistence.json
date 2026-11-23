@@ -1,0 +1,32 @@
+{
+  "feature": "tab-groups",
+  "slice": "slice-03-persistence",
+  "timestamp": "2026-11-23T23:50:30+00:00",
+  "status": "merged",
+  "implementation": {
+    "commit": "80395bd",
+    "fix_commits": []
+  },
+  "review": {
+    "verdict": "APPROVED",
+    "findings": 0,
+    "confirmed_blocking": 0
+  },
+  "deterministic_gate": {
+    "marker_scrub": "PASSED",
+    "lint": "PASSED",
+    "typecheck": "PASSED",
+    "typecheck_after_merge": "PASSED"
+  },
+  "tests": {
+    "suite": "full (no guarantee suite configured)",
+    "result": "PASSED",
+    "summary": "127 Dateien, 1404 Tests, 2 Worker"
+  },
+  "obligations": [],
+  "notes": [
+    "AC 12 (umbenennen, umfärben, einklappen, beenden, starten) Prüfweg QA",
+    "Aufklappen der Gruppe des aktiven Tabs beim Start (BR-20) liegt laut Plan in slice-02"
+  ],
+  "merge_commit": "2d62cb4"
+}

@@ -874,7 +874,10 @@ Schreibweise: Leiste eines Space von links; `G1(t2, t3)` ist Gruppe G1 mit den M
 
 **Wie gebaut**
 
-_(leer bis zum Merge)_
+- Merge-Commit: `2d62cb4` (Implementierung `80395bd`)
+- Review: 0 Befunde, davon 0 blockierend bestätigt; Ergebnis APPROVED
+- Prüfungen: Lint, Typprüfung und Test-Suite grün (127 Dateien, 1404 Tests, 2 Worker)
+- Abweichungen vom Plan: keine
 
 ### slice-04-tab-strip: Leiste mit Kopf, Linie, Menüs und Ziehen
 
