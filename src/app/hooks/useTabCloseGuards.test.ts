@@ -2,8 +2,11 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Tab, TabGroup } from "@/modules/tabs";
+import type { ForegroundCheck } from "@/modules/terminal/lib/useTerminalSession";
 
-const foreground = vi.fn((_leaf: number) => Promise.resolve(false));
+const foreground = vi.fn(
+  (_leaf: number): Promise<ForegroundCheck> => Promise.resolve("idle"),
+);
 const nextActive = vi.fn(
   (tabs: Tab[], closingId: number, _groups?: TabGroup[]) => {
     const closing = tabs.find((t) => t.id === closingId);
@@ -16,8 +19,10 @@ const nextActive = vi.fn(
 );
 
 vi.mock("@/modules/terminal", () => ({
-  leafHasForegroundProcess: (leaf: number) => foreground(leaf),
   leafIds: (tree: { id: number }) => [tree.id],
+}));
+vi.mock("@/modules/terminal/lib/useTerminalSession", () => ({
+  leafForegroundCheck: (leaf: number) => foreground(leaf),
 }));
 vi.mock("@/modules/tabs", () => ({
   nextActiveInSpace: (tabs: Tab[], id: number, groups?: TabGroup[]) =>
@@ -75,14 +80,14 @@ describe("closeConfirmReason", () => {
   });
 
   it("flags a terminal with a foreground process", async () => {
-    foreground.mockResolvedValue(true);
+    foreground.mockResolvedValue("running");
     expect(await closeConfirmReason(terminal(3))).toBe("process");
-    foreground.mockResolvedValue(false);
+    foreground.mockResolvedValue("idle");
     expect(await closeConfirmReason(terminal(3))).toBeNull();
   });
 
   it("treats a failed process check as a running process", async () => {
-    foreground.mockRejectedValue(new Error("gone"));
+    foreground.mockResolvedValue("failed");
     expect(await closeConfirmReason(terminal(3))).toBe("process");
   });
 });
@@ -91,12 +96,14 @@ describe("useTabCloseGuards group close", () => {
   afterEach(cleanup);
   beforeEach(() => {
     foreground.mockReset();
-    foreground.mockResolvedValue(false);
+    foreground.mockResolvedValue("idle");
     nextActive.mockClear();
   });
 
   it("asks once for the whole group when members need confirmation", async () => {
-    foreground.mockImplementation((leaf) => Promise.resolve(leaf === 30));
+    foreground.mockImplementation((leaf) =>
+      Promise.resolve(leaf === 30 ? "running" : "idle"),
+    );
     const tabs = [
       terminal(1),
       editor(2, true, "g1"),
@@ -126,7 +133,7 @@ describe("useTabCloseGuards group close", () => {
   });
 
   it("closes the group on confirm", async () => {
-    foreground.mockResolvedValue(true);
+    foreground.mockResolvedValue("running");
     const tabs = [terminal(1), terminal(3, "g1")];
     const { result, disposeGroup } = setup(tabs, [group("g1")]);
     await act(() => result.current.requestCloseGroup("g1"));
@@ -138,7 +145,7 @@ describe("useTabCloseGuards group close", () => {
   });
 
   it("leaves everything as is on cancel", async () => {
-    foreground.mockResolvedValue(true);
+    foreground.mockResolvedValue("running");
     const tabs = [terminal(1), terminal(3, "g1")];
     const { result, disposeGroup, disposeTab } = setup(tabs, [group("g1")]);
     await act(() => result.current.requestCloseGroup("g1"));
@@ -149,7 +156,7 @@ describe("useTabCloseGuards group close", () => {
   });
 
   it("counts a member whose process check fails", async () => {
-    foreground.mockRejectedValue(new Error("gone"));
+    foreground.mockResolvedValue("failed");
     const tabs = [terminal(1), terminal(3, "g1")];
     const { result, disposeGroup } = setup(tabs, [group("g1")]);
     await act(() => result.current.requestCloseGroup("g1"));
@@ -166,7 +173,9 @@ describe("useTabCloseGuards single close", () => {
   });
 
   it("routes each tab through closeConfirmReason and passes the groups on", async () => {
-    foreground.mockImplementation((leaf) => Promise.resolve(leaf === 30));
+    foreground.mockImplementation((leaf) =>
+      Promise.resolve(leaf === 30 ? "running" : "idle"),
+    );
     const groups = [group("g1", true)];
     const tabs = [terminal(1), editor(2, true), terminal(3), terminal(5, "g1")];
     const { result, disposeTab } = setup(tabs, groups);

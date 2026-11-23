@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
-import { leafHasForegroundProcess, leafIds } from "@/modules/terminal";
+import { leafIds } from "@/modules/terminal";
+import { leafForegroundCheck } from "@/modules/terminal/lib/useTerminalSession";
 import {
   type GroupClosePlan,
   nextActiveInSpace,
@@ -22,14 +23,10 @@ export async function closeConfirmReason(
 ): Promise<"unsaved" | "process" | null> {
   if (tab.kind === "editor" && tab.dirty) return "unsaved";
   if (tab.kind !== "terminal") return null;
-  try {
-    const checks = await Promise.all(
-      leafIds(tab.paneTree).map(leafHasForegroundProcess),
-    );
-    return checks.some(Boolean) ? "process" : null;
-  } catch {
-    return "process";
-  }
+  const checks = await Promise.all(
+    leafIds(tab.paneTree).map(leafForegroundCheck),
+  );
+  return checks.some((c) => c !== "idle") ? "process" : null;
 }
 
 /**
