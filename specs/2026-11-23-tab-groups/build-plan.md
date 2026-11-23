@@ -1141,4 +1141,7 @@ Schreibweise: `G1(t2, t3)` ist Gruppe G1 mit den Mitgliedern t2, t3; Tabs ohne K
 
 **Wie gebaut**
 
-_(leer bis zum Merge)_
+- Merge-Commit: `5e6067e` (Implementierung `3c2a9f8`)
+- Review: 1 Befunde, davon 1 blockierend bestätigt; Ergebnis APPROVED nach einem Fix
+- Prüfungen: Lint, Typprüfung und Test-Suite grün (127 Dateien, 1398 Tests, 2 Worker, vor und nach dem Fix)
+- Abweichungen vom Plan: eine Datei außerhalb des geplanten Dateibereichs geändert (src/modules/terminal/lib/useTerminalSession.ts): neue Abfrage leafForegroundCheck, damit eine gescheiterte Prozess-Abfrage die Rückfrage auslöst (Review-Befund CR-1); die bestehende Abfrage verhält sich unverändert

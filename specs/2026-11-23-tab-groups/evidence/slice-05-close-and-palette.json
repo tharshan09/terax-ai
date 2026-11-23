@@ -1,0 +1,36 @@
+{
+  "feature": "tab-groups",
+  "slice": "slice-05-close-and-palette",
+  "timestamp": "2026-11-23T23:53:13+00:00",
+  "status": "merged",
+  "implementation": {
+    "commit": "3c2a9f8",
+    "fix_commits": [
+      "5a13165"
+    ]
+  },
+  "review": {
+    "verdict": "APPROVED nach einem Fix",
+    "findings": 1,
+    "confirmed_blocking": 1
+  },
+  "deterministic_gate": {
+    "marker_scrub": "PASSED",
+    "lint": "PASSED",
+    "typecheck": "PASSED",
+    "typecheck_after_merge": "PASSED"
+  },
+  "tests": {
+    "suite": "full (no guarantee suite configured)",
+    "result": "PASSED",
+    "summary": "127 Dateien, 1398 Tests, 2 Worker, vor und nach dem Fix"
+  },
+  "obligations": [],
+  "notes": [
+    "AC 9 und 10 Prüfweg QA",
+    "AC 7 hängt am Nachfolger-Algorithmus aus slice-02",
+    "kein Test für leafForegroundCheck selbst: der Fehlerzweig ist ohne laufende App nicht erreichbar",
+    "scheitert die Prozess-Abfrage beim Schließen eines einzelnen Terminals, erscheint jetzt die Rückfrage (vorher schloss der Tab sofort)"
+  ],
+  "merge_commit": "5e6067e"
+}

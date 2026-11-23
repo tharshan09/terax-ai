@@ -63,3 +63,11 @@
 {"v": 2, "ts": "2026-11-23T23:50:30+00:00", "kind": "gate", "gate": "slice_merge", "slice": "slice-03-persistence", "result": "PASSED", "attempt": 1, "findings_count": 0, "merge_commit": "2d62cb4", "rebase_attempts": 0}
 {"v": 2, "ts": "2026-11-23T23:50:30+00:00", "kind": "gate", "gate": "typecheck", "slice": "slice-03-persistence", "result": "PASSED", "attempt": 1, "findings_count": 0, "scope": "feature_after_merge"}
 {"v": 2, "ts": "2026-11-23T23:50:30+00:00", "kind": "marker", "gate": "slice_complete", "slice": "slice-03-persistence"}
+{"v": 2, "ts": "2026-11-23T23:52:25+00:00", "kind": "fix", "gate": "fix", "slice": "slice-05-close-and-palette", "class": "bug", "commit": "5a13165", "finding": "CR-1"}
+{"v": 2, "ts": "2026-11-23T23:52:25+00:00", "kind": "gate", "gate": "lint", "slice": "slice-05-close-and-palette", "result": "PASSED", "attempt": 2, "findings_count": 0}
+{"v": 2, "ts": "2026-11-23T23:52:25+00:00", "kind": "gate", "gate": "typecheck", "slice": "slice-05-close-and-palette", "result": "PASSED", "attempt": 2, "findings_count": 0}
+{"v": 2, "ts": "2026-11-23T23:52:25+00:00", "kind": "gate", "gate": "tests", "slice": "slice-05-close-and-palette", "result": "PASSED", "attempt": 2, "findings_count": 0, "suite": "guarantee", "note": "nach dem Fix, 2 Worker: 127 Dateien, 1398 Tests"}
+{"v": 2, "ts": "2026-11-23T23:53:13+00:00", "kind": "gate", "gate": "code_review", "slice": "slice-05-close-and-palette", "result": "PASSED", "attempt": 2, "findings_count": 0, "note": "Delta-Review über Fix-Commit 5a13165; CR-1 behoben"}
+{"v": 2, "ts": "2026-11-23T23:53:13+00:00", "kind": "gate", "gate": "slice_merge", "slice": "slice-05-close-and-palette", "result": "PASSED", "attempt": 1, "findings_count": 0, "merge_commit": "5e6067e", "rebase_attempts": 0}
+{"v": 2, "ts": "2026-11-23T23:53:13+00:00", "kind": "gate", "gate": "typecheck", "slice": "slice-05-close-and-palette", "result": "PASSED", "attempt": 1, "findings_count": 0, "scope": "feature_after_merge"}
+{"v": 2, "ts": "2026-11-23T23:53:13+00:00", "kind": "marker", "gate": "slice_complete", "slice": "slice-05-close-and-palette"}
