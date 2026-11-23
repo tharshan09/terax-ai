@@ -9,7 +9,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import type { AppCloseBlocker } from "@/app/hooks/useAppCloseGuard";
-import type { Tab } from "@/modules/tabs";
+import type { GroupClosePlan, Tab } from "@/modules/tabs";
 
 type Props = {
   tabs: Tab[];
@@ -22,6 +22,9 @@ type Props = {
   pendingDeleteTabs: number[] | null;
   onCancelDeleteClose: () => void;
   onConfirmDeleteClose: () => void;
+  pendingGroupClose: GroupClosePlan | null;
+  onCancelGroupClose: () => void;
+  onConfirmGroupClose: () => void;
   pendingAppClose: AppCloseBlocker | null;
   onCancelAppClose: () => void;
   onConfirmAppClose: () => void;

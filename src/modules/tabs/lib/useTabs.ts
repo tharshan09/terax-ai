@@ -37,6 +37,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { applyDocView } from "./applyDocView";
 import { resolveFileTabOpen } from "./resolveFileTabOpen";
+import type { GapTarget, TabGroup } from "./tabGroups";
 
 // Matches the renderer slot pool size — over this we'd evict an active leaf.
 export const MAX_PANES_PER_TAB = 4;
@@ -68,6 +69,8 @@ type TabBase = {
   spaceId: string;
   /** Restored from disk, not yet activated: rendered as a placeholder, not mounted. */
   cold?: boolean;
+  /** Group in the same space; absent = loose. */
+  groupId?: string;
 };
 
 export type TerminalTab = TabBase & {
@@ -214,12 +217,19 @@ export type TabPatch = Partial<{
 
 export const DEFAULT_SPACE_ID = "default";
 
+const NO_GROUPS: TabGroup[] = [];
+
+function gapIndexOf(target: number | GapTarget): number {
+  return typeof target === "number" ? target : target.index;
+}
+
 // Returns the tab at position `idx` within the given space, or undefined when
 // idx is out of range or no matching space tab exists.
 export function pickTabBySpaceIndex(
   tabs: Tab[],
   idx: number,
   spaceId: string,
+  _groups?: TabGroup[],
 ): Tab | undefined {
   const pool = tabs.filter((t) => t.spaceId === spaceId);
   return pool[idx];
@@ -339,7 +349,7 @@ export function canBreakOutPane(tabs: Tab[], leafId: number): boolean {
 }
 
 /** Pull `leafId` out of its split into a brand-new tab with id `newTabId`,
- *  placed at `gapIndex` in its space's strip. The leaf object moves untouched,
+ *  placed at the `target` gap in its space's strip. The leaf object moves untouched,
  *  so its PTY and any managed tmux session travel with it: the caller must NOT
  *  dispose it and must NOT reap its managed session (`removedManagedSessions`
  *  compares one tab's tree and would report the still-live pane as gone).
@@ -348,7 +358,8 @@ export function breakOutPaneFromTabs(
   tabs: Tab[],
   leafId: number,
   newTabId: number,
-  gapIndex: number,
+  target: number | GapTarget,
+  _groups?: TabGroup[],
 ): { tabs: Tab[]; undo: BrokenOutPane } | null {
   const src = tabs.find(
     (t) => t.kind === "terminal" && hasLeaf(t.paneTree, leafId),
@@ -386,7 +397,7 @@ export function breakOutPaneFromTabs(
       : t,
   );
   return {
-    tabs: insertTabAtSpaceGap(without, born, gapIndex),
+    tabs: insertTabAtSpaceGap(without, born, gapIndexOf(target)),
     undo: {
       tabId: newTabId,
       leafId,
@@ -460,6 +471,7 @@ function visibleSpaceId(fallback: string): string {
 export function nextActiveInSpace(
   tabs: Tab[],
   closingId: number,
+  _groups?: TabGroup[],
 ): number | null {
   const closing = tabs.find((t) => t.id === closingId);
   if (!closing) return null;
@@ -591,11 +603,14 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     activeSpaceIdRef.current = spaceId;
   }, []);
 
-  const replaceTabs = useCallback((next: Tab[], nextActiveId: number) => {
-    if (next.length === 0) return;
-    setTabs(next);
-    setActiveId(nextActiveId);
-  }, []);
+  const replaceTabs = useCallback(
+    (next: Tab[], nextActiveId: number, _groups?: TabGroup[]) => {
+      if (next.length === 0) return;
+      setTabs(next);
+      setActiveId(nextActiveId);
+    },
+    [],
+  );
 
   // Appends a cold terminal tab to a space without stealing focus, so the
   // overview can populate a space in place; it spawns when first opened.
@@ -1496,7 +1511,10 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   // to return. Both gestures are one-off (a drop, a toast button), so the extra
   // synchronous render costs nothing that was not going to happen anyway.
   const breakOutPane = useCallback(
-    (leafId: number, gapIndex: number): BrokenOutPane | BreakOutRefusal => {
+    (
+      leafId: number,
+      target: number | GapTarget,
+    ): BrokenOutPane | BreakOutRefusal => {
       let tabId: number | null = null;
       let result: BrokenOutPane | BreakOutRefusal = "collapsed";
       // Read once, out here: the updater must answer from `prev` alone, or a
@@ -1527,7 +1545,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
           if (!canBreakOutPane(prev, leafId)) return prev;
           if (tabId === null) tabId = nextIdRef.current++;
           const born = tabId;
-          const out = breakOutPaneFromTabs(prev, leafId, born, gapIndex);
+          const out = breakOutPaneFromTabs(prev, leafId, born, target);
           if (!out) return prev;
           result = out.undo;
           // Inside the success branch: outside it, a refusal would leave
@@ -1679,12 +1697,57 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     for (const lid of toDispose) disposeSession(lid);
   }, []);
 
-  const reorderTabByGap = useCallback((fromId: number, toGapIndex: number) => {
-    setTabs((prev) => reorderTabsByGap(prev, fromId, toGapIndex));
-  }, []);
+  const reorderTabByGap = useCallback(
+    (fromId: number, target: GapTarget, _spawnCwd?: string) => {
+      setTabs((prev) => reorderTabsByGap(prev, fromId, target.index));
+    },
+    [],
+  );
+
+  const createGroupFromTab = useCallback(
+    (_tabId: number): string | null => null,
+    [],
+  );
+
+  const addTabToGroup = useCallback(
+    (_tabId: number, _groupId: string, _spawnCwd?: string) => {},
+    [],
+  );
+
+  const removeTabFromGroup = useCallback((_tabId: number) => {}, []);
+
+  const ungroup = useCallback((_groupId: string) => {}, []);
+
+  const renameGroup = useCallback((_groupId: string, _name: string) => {}, []);
+
+  const setGroupColor = useCallback(
+    (_groupId: string, _color: number) => {},
+    [],
+  );
+
+  const toggleGroupCollapsed = useCallback(
+    (_groupId: string, _spawnCwd?: string) => {},
+    [],
+  );
+
+  const moveGroupByGap = useCallback(
+    (_groupId: string, _target: GapTarget) => {},
+    [],
+  );
+
+  const moveGroupToSpace = useCallback(
+    (_groupId: string, _targetSpaceId: string, _spawnCwd?: string) => {},
+    [],
+  );
+
+  const closeGroup = useCallback(
+    (_groupId: string, _spawnCwd?: string) => {},
+    [],
+  );
 
   return {
     tabs,
+    groups: NO_GROUPS,
     activeId,
     setActiveId,
     allocId,
@@ -1692,6 +1755,16 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     moveTabToSpace,
     reorderTab,
     reorderTabByGap,
+    createGroupFromTab,
+    addTabToGroup,
+    removeTabFromGroup,
+    ungroup,
+    renameGroup,
+    setGroupColor,
+    toggleGroupCollapsed,
+    moveGroupByGap,
+    moveGroupToSpace,
+    closeGroup,
     newTabInSpace,
     removeTabsForSpace,
     markBooted,

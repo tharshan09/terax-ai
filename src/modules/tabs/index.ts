@@ -1,4 +1,13 @@
-export { TabBar, TabIcon } from "./TabBar";
+export { TabBar, TabIcon, type TabBarGroupProps } from "./TabBar";
+export {
+  tabForSpaceSwitch,
+  visibleTabsInSpace,
+  type GapTarget,
+  type GroupClosePlan,
+  type GroupState,
+  type StripItem,
+  type TabGroup,
+} from "./lib/tabGroups";
 export { TabSwitcherHud } from "./TabSwitcherHud";
 export {
   useTabSwitcher,

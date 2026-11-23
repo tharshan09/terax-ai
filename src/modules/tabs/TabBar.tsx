@@ -52,6 +52,7 @@ import {
   useMemo,
 } from "react";
 import { labelFor } from "./lib/tabLabel";
+import type { GapTarget, TabGroup } from "./lib/tabGroups";
 import type { EditorTab, Tab, TerminalTab } from "./lib/useTabs";
 import { TabActivityIndicator } from "./TabActivityIndicator";
 
@@ -64,7 +65,25 @@ type DropTarget =
  *  the gesture falls back to a (reversible) reorder, never a merge. */
 const MERGE_Y_SLACK = 8;
 
+export type TabBarGroupProps = {
+  spaceId: string;
+  groups: TabGroup[];
+  renamingGroupId: string | null;
+  onRenamingGroupChange: (groupId: string | null) => void;
+  onCreateGroup: (tabId: number) => void;
+  onAddToGroup: (tabId: number, groupId: string) => void;
+  onRemoveFromGroup: (tabId: number) => void;
+  onUngroup: (groupId: string) => void;
+  onRenameGroup: (groupId: string, name: string) => void;
+  onSetGroupColor: (groupId: string, color: number) => void;
+  onToggleGroup: (groupId: string) => void;
+  onMoveGroup: (groupId: string, target: GapTarget) => void;
+  onMoveGroupToSpace: (groupId: string, spaceId: string) => void;
+  onCloseGroup: (groupId: string) => void;
+};
+
 type Props = {
+  /** The whole strip of the active space, collapsed members included. */
   tabs: Tab[];
   activeId: number;
   onSelect: (id: number) => void;
@@ -83,12 +102,13 @@ type Props = {
   onPin: (id: number) => void;
   /** Set a terminal tab's custom label; empty string resets to default. */
   onRename: (id: number, title: string) => void;
-  /** Move a dragged tab to a new position (insertion gap index 0..tabs.length). */
-  onReorder: (fromId: number, toGapIndex: number) => void;
+  /** Move a dragged tab to the insertion gap it was dropped on. */
+  onReorder: (fromId: number, target: GapTarget) => void;
   /** Drop a terminal tab onto another terminal tab: merge it in as a split pane. */
   onMergeInto?: (fromId: number, intoId: number) => void;
   onOverrideLanguage?: (id: number, lang: string | null) => void;
   compact?: boolean;
+  groupProps: TabBarGroupProps;
 };
 
 export function TabBar({
@@ -126,7 +146,7 @@ export function TabBar({
     s.target?.kind === "newTab" ? s.sourceTabId : null,
   );
   const paneDropAt = usePaneDndStore((s) =>
-    s.target?.kind === "newTab" ? s.target.gapIndex : null,
+    s.target?.kind === "newTab" ? s.target.gap.index : null,
   );
   // Only when this strip is the pane's own. The strip lists one space and the
   // space shortcuts keep working during a drag, so checking at render time is
@@ -402,7 +422,11 @@ export function TabBar({
                     if (st?.active && target?.kind === "merge" && onMergeInto) {
                       onMergeInto(st.fromId, target.id);
                     } else if (st?.active && target?.kind === "gap") {
-                      onReorder(st.fromId, target.index);
+                      onReorder(st.fromId, {
+                        index: target.index,
+                        groupId: null,
+                        onCollapsedHeader: false,
+                      });
                     } else if (st && !st.active) {
                       onSelect(t.id);
                     }

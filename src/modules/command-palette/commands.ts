@@ -68,6 +68,9 @@ export type CommandPaletteActionContext = {
   openSpacesOverview: () => void;
   newSpace: () => void;
   switchSpace: (id: string) => void;
+  createGroupFromTab?: (tabId: number) => void;
+  removeTabFromGroup?: (tabId: number) => void;
+  toggleGroupCollapsed?: (groupId: string) => void;
 };
 
 const noop = () => {};

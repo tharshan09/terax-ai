@@ -1,11 +1,20 @@
 import { useCallback, useState } from "react";
 import { leafHasForegroundProcess, leafIds } from "@/modules/terminal";
-import { nextActiveInSpace, type Tab } from "@/modules/tabs";
+import {
+  type GroupClosePlan,
+  nextActiveInSpace,
+  type Tab,
+  type TabGroup,
+} from "@/modules/tabs";
 
 type Params = {
   tabs: Tab[];
+  groups: TabGroup[];
   disposeTab: (id: number) => void;
+  disposeGroup: (groupId: string) => void;
 };
+
+const pendingGroupClose: GroupClosePlan | null = null;
 
 /**
  * Guards tab closing: dirty editors and terminals with a live foreground
@@ -75,6 +84,12 @@ export function useTabCloseGuards({ tabs, disposeTab }: Params) {
     setPendingDeleteTabs(null);
   }, []);
 
+  const requestCloseGroup = useCallback(async (_groupId: string) => {}, []);
+
+  const confirmGroupClose = useCallback(() => {}, []);
+
+  const cancelGroupClose = useCallback(() => {}, []);
+
   const handlePathDeleted = useCallback(
     (path: string) => {
       const dirty: number[] = [];
@@ -104,5 +119,9 @@ export function useTabCloseGuards({ tabs, disposeTab }: Params) {
     confirmDeleteClose,
     cancelDeleteClose,
     handlePathDeleted,
+    pendingGroupClose,
+    requestCloseGroup,
+    confirmGroupClose,
+    cancelGroupClose,
   };
 }

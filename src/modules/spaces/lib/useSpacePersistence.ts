@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import { subscribeWindowHidden } from "@/lib/windowVisibility";
-import type { Tab } from "@/modules/tabs";
+import type { Tab, TabGroup } from "@/modules/tabs";
 import { isSerializableTab, serializeTabs } from "./serialize";
 import { saveState } from "./store";
 import { useSpaces } from "./useSpaces";
@@ -10,6 +10,8 @@ const DEBOUNCE_MS = 3000;
 type Snapshot = { tabs: Tab[]; activeId: number; activeSpaceId: string };
 
 type Params = Snapshot & {
+  /** Every space's groups. */
+  groups: TabGroup[];
   /** Gate writes until boot hydration finished, so restore never round-trips. */
   enabled: boolean;
 };

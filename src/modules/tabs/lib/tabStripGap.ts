@@ -1,3 +1,5 @@
+import type { GapTarget } from "./tabGroups";
+
 /** Marks the scroll container that holds the tab buttons. Both drags hit-test
  *  against it: a tab drag to place the insertion line, a pane drag to decide
  *  that the drop means "break this pane out into a tab here". */
@@ -50,4 +52,26 @@ export function gapIndexAt(strip: Element, clientX: number): number {
     if (clientX < r.left + r.width / 2) return i;
   }
   return els.length;
+}
+
+/** On a group header element; the value is the group id. */
+export const GROUP_HEADER_ATTR = "data-group-header";
+
+/** On a group header element while the group is collapsed. */
+export const GROUP_COLLAPSED_ATTR = "data-group-collapsed";
+
+/** On the tab element of a group member; the value is the group id. */
+export const TAB_GROUP_ATTR = "data-tab-group";
+
+/** The insertion gap under `clientX` together with its group context. */
+export function gapTargetAt(
+  strip: Element,
+  clientX: number,
+  _opts?: { headerDrop?: boolean },
+): GapTarget {
+  return {
+    index: gapIndexAt(strip, clientX),
+    groupId: null,
+    onCollapsedHeader: false,
+  };
 }
