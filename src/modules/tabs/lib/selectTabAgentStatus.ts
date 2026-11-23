@@ -28,3 +28,10 @@ export function selectTabAgentStatus(
   }
   return waiting ? "waiting" : null;
 }
+
+export function groupAggregateStatus(
+  _sessions: Record<number, AgentSession>,
+  _leafIds: readonly number[],
+): "working" | "waiting" | null {
+  return null;
+}
