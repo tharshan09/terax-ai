@@ -44,6 +44,16 @@ function appCloseMessage(blocker: AppCloseBlocker): string {
   return "A process is still running in a terminal. Quitting will terminate it.";
 }
 
+function groupCloseTitle(plan: GroupClosePlan): string {
+  return plan.n === 1 ? "Close 1 tab?" : `Close ${plan.n} tabs?`;
+}
+
+function groupCloseMessage(plan: GroupClosePlan): string {
+  return plan.m === 1
+    ? "1 of them still has a running process or unsaved changes."
+    : `${plan.m} of them still have a running process or unsaved changes.`;
+}
+
 /** Confirmation dialogs for closing dirty editors and terminals with live processes. */
 export function CloseDialogs({
   tabs,
@@ -56,6 +66,9 @@ export function CloseDialogs({
   pendingDeleteTabs,
   onCancelDeleteClose,
   onConfirmDeleteClose,
+  pendingGroupClose,
+  onCancelGroupClose,
+  onConfirmGroupClose,
   pendingAppClose,
   onCancelAppClose,
   onConfirmAppClose,
@@ -136,6 +149,30 @@ export function CloseDialogs({
             </AlertDialogCancel>
             <AlertDialogAction onClick={onConfirmDeleteClose}>
               Close Anyway
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={pendingGroupClose !== null}
+        onOpenChange={(open) => !open && onCancelGroupClose()}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {pendingGroupClose ? groupCloseTitle(pendingGroupClose) : ""}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingGroupClose ? groupCloseMessage(pendingGroupClose) : ""}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={onCancelGroupClose}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction onClick={onConfirmGroupClose}>
+              Close group
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
