@@ -122,6 +122,8 @@ Vorgänger-Notiz: `specs/open-topics.md`, Punkt F2 „Tab-Gruppen, ein- und ausk
 - EP-5: „Move group to space" leert den Herkunfts-Space -> dort entsteht wie heute ein neues Terminal.
 - EP-6: Es gibt nur einen Space -> „Move group to space" ist ausgegraut.
 - EP-7: Im Space gibt es keine Gruppe (oder nur die eigene des Tabs) -> „Add to group" ist ausgegraut.
+- EP-8: Der letzte sichtbare Tab eines Space wird geschlossen, es gibt aber eingeklappte Gruppen -> der Tab schließt, aktiv wird der nächstgelegene Tab einer eingeklappten Gruppe, die dabei aufklappt (Architecture Q&A 5).
+- EP-9: „Close group" auf eine Gruppe, die alle Tabs des Space enthält -> alle Tabs der Gruppe schließen (Rückfrage nach BR-15), im Space öffnet sich ein neues Terminal (Architecture Q&A 6).
 
 ---
 
@@ -244,6 +246,8 @@ keine
 - BR-21: Das Sammelzeichen einer Gruppe: wartet schlägt arbeitet (bewusst umgekehrt zum Zeichen am einzelnen Tab, weil die eingeklappte Gruppe zeigen soll, ob der Nutzer gebraucht wird). Ruhige Sessions und Tabs ohne Agent tragen nichts bei.
 - BR-22: Lose Tabs bleiben dauerhaft erlaubt; es gibt keine Pflicht zur Gruppe und keine Obergrenze für Gruppen oder Mitglieder.
 - BR-23: Sichtbare Texte der Oberfläche sind Englisch wie der Rest der App.
+- BR-24: Wird ein Tab geschlossen und im Space ist kein anderer sichtbarer Tab, wird der nächstgelegene Tab einer eingeklappten Gruppe aktiv (erst links, sonst rechts); diese Gruppe klappt auf. Der letzte Tab eines Space lässt sich wie heute nicht einzeln schließen. (Nachtrag aus Architecture Q&A 5)
+- BR-25: „Close group" darf einen Space leeren: nach dem Schließen öffnet sich dort ein neues Terminal außerhalb der Gruppen. (Nachtrag aus Architecture Q&A 6)
 
 ---
 
