@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { native } from "@/modules/ai/lib/native";
-import type { Tab } from "@/modules/tabs";
+import type { Tab, TabGroup } from "@/modules/tabs";
+import { visibleTabsInSpace } from "@/modules/tabs/lib/tabGroups";
 import { DEFAULT_SPACE_ID } from "@/modules/tabs/lib/useTabs";
 import {
   collectManagedSessions,
@@ -10,7 +11,7 @@ import {
 import { isLeaf, type PaneNode } from "@/modules/terminal/lib/panes";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import { activeSpaceEnv, freshTabCwd } from "./activeSpace";
-import { freshTerminalTab, hydrateTabs } from "./serialize";
+import { freshTerminalTab, hydrateSpace } from "./serialize";
 import { loadAll, saveActiveId, saveSpacesList, type SpaceMeta } from "./store";
 import { useSpaces } from "./useSpaces";
 
@@ -19,7 +20,7 @@ type Params = {
   launchCwd: string | null;
   home: string | null;
   allocId: () => number;
-  replaceTabs: (tabs: Tab[], activeId: number) => void;
+  replaceTabs: (tabs: Tab[], activeId: number, groups?: TabGroup[]) => void;
   markBooted: () => void;
   setActiveSpaceForNewTabs: (id: string) => void;
   adoptWorkspaceEnv: (env: WorkspaceEnv) => Promise<string | null>;
@@ -93,10 +94,13 @@ export function useSpacesBoot({
         }
 
         const restored: Tab[] = [];
+        const groups: TabGroup[] = [];
         for (const space of spaces) {
           const st = states.get(space.id);
           if (!st) continue;
-          restored.push(...hydrateTabs(st.tabs, space.id, allocId));
+          const hydrated = hydrateSpace(st, space.id, allocId);
+          restored.push(...hydrated.tabs);
+          groups.push(...hydrated.groups);
         }
 
         // Reap leaked managed tmux sessions (picker switch-away, workspace
@@ -131,10 +135,16 @@ export function useSpacesBoot({
           initialActiveIndex[id] = st.activeTabIndex;
         useSpaces.getState().hydrate(spaces, active, initialActiveIndex);
 
-        const inActive = restored.filter((t) => t.spaceId === active);
+        // Counted over every stored tab of the space, collapsed members too:
+        // the index was written that way, and useTabs expands the group.
+        const inActive = visibleTabsInSpace(
+          { tabs: restored, groups },
+          active,
+          { all: true },
+        );
         const idx = states.get(active)?.activeTabIndex ?? 0;
         const activeTab = inActive[idx] ?? inActive[0] ?? restored[0];
-        replaceTabs(restored, activeTab.id);
+        replaceTabs(restored, activeTab.id, groups);
       } catch (e) {
         console.error("[terax] spaces boot failed:", e);
       } finally {

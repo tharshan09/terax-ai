@@ -16,13 +16,21 @@ import {
   collectManagedSessions,
   isManagedSession,
 } from "@/modules/terminal/lib/managedTmux";
+import {
+  type GroupState,
+  newGroupId,
+  normalizeGroups,
+  type TabGroup,
+} from "@/modules/tabs/lib/tabGroups";
 import { LOCAL_WORKSPACE, type WorkspaceEnv } from "@/modules/workspace";
+import type { SpaceState } from "./store";
+import { readGroupEntries, readGroupRef } from "./validate";
 
 export type SerializedNode =
   | { kind: "leaf"; cwd?: string; active?: boolean; tmuxSession?: string }
   | { kind: "split"; dir: SplitDir; children: SerializedNode[] };
 
-export type SerializedTab =
+export type SerializedTab = (
   | {
       kind: "terminal";
       tree: SerializedNode;
@@ -38,7 +46,17 @@ export type SerializedTab =
   | { kind: "editor"; path: string; workspace?: WorkspaceEnv }
   | { kind: "preview"; url: string }
   | { kind: "markdown"; path: string; workspace?: WorkspaceEnv }
-  | { kind: "html"; path: string; workspace?: WorkspaceEnv };
+  | { kind: "html"; path: string; workspace?: WorkspaceEnv }
+) & {
+  /** Position in the space's `groups`. Absent == loose. */
+  group?: number;
+};
+
+export type SerializedGroup = {
+  name?: string;
+  color: number;
+  collapsed?: boolean;
+};
 
 // Only non-local envs need to survive a reload; Local is the default, so we
 // keep the serialized state minimal by omitting it.
@@ -287,4 +305,78 @@ export function hydrateTabs(
     }
   }
   return out;
+}
+
+/** A group reaches the file only through a persisted member, so a group of
+ *  private tabs alone leaves no trace, name included. */
+export function serializeSpace(
+  tabs: Tab[],
+  groups: TabGroup[],
+): { tabs: SerializedTab[]; groups?: SerializedGroup[] } {
+  const byId = new Map(groups.map((g) => [g.id, g]));
+  const position = new Map<string, number>();
+  const outGroups: SerializedGroup[] = [];
+  const outTabs: SerializedTab[] = [];
+  for (const tab of tabs) {
+    const [s] = serializeTabs([tab]);
+    if (!s) continue;
+    const g = tab.groupId === undefined ? undefined : byId.get(tab.groupId);
+    if (!g || g.spaceId !== tab.spaceId) {
+      outTabs.push(s);
+      continue;
+    }
+    let at = position.get(g.id);
+    if (at === undefined) {
+      at = outGroups.length;
+      position.set(g.id, at);
+      outGroups.push({
+        ...(g.name !== "" && { name: g.name }),
+        color: g.color,
+        ...(g.collapsed && { collapsed: true }),
+      });
+    }
+    outTabs.push({ ...s, group: at });
+  }
+  return outGroups.length > 0
+    ? { tabs: outTabs, groups: outGroups }
+    : { tabs: outTabs };
+}
+
+/** Lenient on group data: a broken entry or ref leaves the tab loose, never
+ *  drops it. */
+export function hydrateSpace(
+  state: SpaceState,
+  spaceId: string,
+  allocId: () => number,
+): GroupState {
+  const entries = readGroupEntries(state.groups);
+  const made = new Map<number, TabGroup>();
+  const tabs: Tab[] = [];
+  const serialized: unknown[] = Array.isArray(state.tabs) ? state.tabs : [];
+  for (const s of serialized) {
+    const [tab] = hydrateTabs([s as SerializedTab], spaceId, allocId);
+    if (!tab) continue;
+    const ref = readGroupRef((s as { group?: unknown }).group, entries);
+    const entry = ref === null ? null : entries[ref];
+    if (ref === null || !entry) {
+      tabs.push(tab);
+      continue;
+    }
+    let group = made.get(ref);
+    if (!group) {
+      group = {
+        id: newGroupId(allocId),
+        spaceId,
+        name: entry.name ?? "",
+        color: entry.color,
+        collapsed: entry.collapsed === true,
+      };
+      made.set(ref, group);
+    }
+    tabs.push({ ...tab, groupId: group.id });
+  }
+  const groups = [...made.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([, g]) => g);
+  return normalizeGroups({ tabs, groups });
 }

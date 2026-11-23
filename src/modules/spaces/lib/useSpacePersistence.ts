@@ -1,17 +1,21 @@
 import { useCallback, useEffect, useRef } from "react";
 import { subscribeWindowHidden } from "@/lib/windowVisibility";
 import type { Tab, TabGroup } from "@/modules/tabs";
-import { isSerializableTab, serializeTabs } from "./serialize";
+import { isSerializableTab, serializeSpace } from "./serialize";
 import { saveState } from "./store";
 import { useSpaces } from "./useSpaces";
 
 const DEBOUNCE_MS = 3000;
 
-type Snapshot = { tabs: Tab[]; activeId: number; activeSpaceId: string };
-
-type Params = Snapshot & {
+type Snapshot = {
+  tabs: Tab[];
   /** Every space's groups. */
   groups: TabGroup[];
+  activeId: number;
+  activeSpaceId: string;
+};
+
+type Params = Snapshot & {
   /** Gate writes until boot hydration finished, so restore never round-trips. */
   enabled: boolean;
 };
@@ -20,6 +24,7 @@ type LastWrite = { json: string; activeTabIndex: number };
 
 export function useSpacePersistence({
   tabs,
+  groups,
   activeId,
   activeSpaceId,
   enabled,
@@ -27,8 +32,8 @@ export function useSpacePersistence({
   const last = useRef<Map<string, LastWrite>>(new Map());
   const seeded = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const latest = useRef<Snapshot>({ tabs, activeId, activeSpaceId });
-  latest.current = { tabs, activeId, activeSpaceId };
+  const latest = useRef<Snapshot>({ tabs, groups, activeId, activeSpaceId });
+  latest.current = { tabs, groups, activeId, activeSpaceId };
 
   // Seed each space's last-known active index from disk so the first flush
   // preserves it for spaces the user never opens (empty json forces one write
@@ -43,19 +48,19 @@ export function useSpacePersistence({
   }
 
   const flush = useCallback((snap: Snapshot) => {
-    const groups = new Map<string, Tab[]>();
+    const bySpace = new Map<string, Tab[]>();
     for (const t of snap.tabs) {
-      const arr = groups.get(t.spaceId);
+      const arr = bySpace.get(t.spaceId);
       if (arr) arr.push(t);
-      else groups.set(t.spaceId, [t]);
+      else bySpace.set(t.spaceId, [t]);
     }
 
-    for (const [spaceId, group] of groups) {
-      const serialized = serializeTabs(group);
+    for (const [spaceId, spaceTabs] of bySpace) {
+      const serialized = serializeSpace(spaceTabs, snap.groups);
       const prev = last.current.get(spaceId);
       let activeTabIndex = prev?.activeTabIndex ?? 0;
       if (spaceId === snap.activeSpaceId) {
-        const idx = group
+        const idx = spaceTabs
           .filter(isSerializableTab)
           .findIndex((t) => t.id === snap.activeId);
         if (idx >= 0) activeTabIndex = idx;
@@ -69,13 +74,13 @@ export function useSpacePersistence({
         continue;
       }
       last.current.set(spaceId, { json, activeTabIndex });
-      void saveState(spaceId, { tabs: serialized, activeTabIndex });
+      void saveState(spaceId, { ...serialized, activeTabIndex });
     }
   }, []);
 
   useEffect(() => {
     if (!enabled) return;
-    const snap: Snapshot = { tabs, activeId, activeSpaceId };
+    const snap: Snapshot = { tabs, groups, activeId, activeSpaceId };
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => {
       timer.current = null;
@@ -84,7 +89,7 @@ export function useSpacePersistence({
     return () => {
       if (timer.current) clearTimeout(timer.current);
     };
-  }, [tabs, activeId, activeSpaceId, enabled, flush]);
+  }, [tabs, groups, activeId, activeSpaceId, enabled, flush]);
 
   useEffect(() => {
     if (!enabled) return;
