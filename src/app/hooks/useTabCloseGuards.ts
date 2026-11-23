@@ -1,11 +1,13 @@
 import { useCallback, useState } from "react";
-import { leafHasForegroundProcess, leafIds } from "@/modules/terminal";
+import { leafIds } from "@/modules/terminal";
+import { leafForegroundCheck } from "@/modules/terminal/lib/useTerminalSession";
 import {
   type GroupClosePlan,
   nextActiveInSpace,
   type Tab,
   type TabGroup,
 } from "@/modules/tabs";
+import { planGroupClose } from "@/modules/tabs/lib/tabGroups";
 
 type Params = {
   tabs: Tab[];
@@ -14,14 +16,30 @@ type Params = {
   disposeGroup: (groupId: string) => void;
 };
 
-const pendingGroupClose: GroupClosePlan | null = null;
+/** Why closing `tab` needs a confirmation, or null when it can close at
+ *  once. A failed process check counts as a running process. */
+export async function closeConfirmReason(
+  tab: Tab,
+): Promise<"unsaved" | "process" | null> {
+  if (tab.kind === "editor" && tab.dirty) return "unsaved";
+  if (tab.kind !== "terminal") return null;
+  const checks = await Promise.all(
+    leafIds(tab.paneTree).map(leafForegroundCheck),
+  );
+  return checks.some((c) => c !== "idle") ? "process" : null;
+}
 
 /**
  * Guards tab closing: dirty editors and terminals with a live foreground
  * process route through a confirmation dialog instead of closing immediately.
- * Owns the three pending-close states the dialogs render from.
+ * Owns the pending-close states the dialogs render from.
  */
-export function useTabCloseGuards({ tabs, disposeTab }: Params) {
+export function useTabCloseGuards({
+  tabs,
+  groups,
+  disposeTab,
+  disposeGroup,
+}: Params) {
   const [pendingCloseTab, setPendingCloseTab] = useState<number | null>(null);
   const [pendingTerminalCloseTab, setPendingTerminalCloseTab] = useState<
     number | null
@@ -29,28 +47,27 @@ export function useTabCloseGuards({ tabs, disposeTab }: Params) {
   const [pendingDeleteTabs, setPendingDeleteTabs] = useState<number[] | null>(
     null,
   );
+  const [pendingGroupClose, setPendingGroupClose] =
+    useState<GroupClosePlan | null>(null);
 
   const handleClose = useCallback(
     async (id: number) => {
       // Last tab in its space can't be closed (closeTab refuses). Skip the
       // dialog entirely so confirming it doesn't appear to silently fail.
-      if (nextActiveInSpace(tabs, id) === null) return;
+      if (nextActiveInSpace(tabs, id, groups) === null) return;
       const t = tabs.find((x) => x.id === id);
-      if (t?.kind === "editor" && t.dirty) {
+      const reason = t ? await closeConfirmReason(t) : null;
+      if (reason === "unsaved") {
         setPendingCloseTab(id);
         return;
       }
-      if (t?.kind === "terminal") {
-        const leaves = leafIds(t.paneTree);
-        const checks = await Promise.all(leaves.map(leafHasForegroundProcess));
-        if (checks.some(Boolean)) {
-          setPendingTerminalCloseTab(id);
-          return;
-        }
+      if (reason === "process") {
+        setPendingTerminalCloseTab(id);
+        return;
       }
       disposeTab(id);
     },
-    [tabs, disposeTab],
+    [tabs, groups, disposeTab],
   );
 
   const confirmClose = useCallback(() => {
@@ -84,11 +101,32 @@ export function useTabCloseGuards({ tabs, disposeTab }: Params) {
     setPendingDeleteTabs(null);
   }, []);
 
-  const requestCloseGroup = useCallback(async (_groupId: string) => {}, []);
+  const requestCloseGroup = useCallback(
+    async (groupId: string) => {
+      const members = tabs.filter((t) => t.groupId === groupId);
+      const reasons = await Promise.all(members.map(closeConfirmReason));
+      const confirmIds = new Set(
+        members.filter((_, i) => reasons[i] !== null).map((t) => t.id),
+      );
+      const plan = planGroupClose(tabs, groupId, confirmIds);
+      if (plan === null) return;
+      if (plan.m === 0) {
+        disposeGroup(groupId);
+        return;
+      }
+      setPendingGroupClose(plan);
+    },
+    [tabs, disposeGroup],
+  );
 
-  const confirmGroupClose = useCallback(() => {}, []);
+  const confirmGroupClose = useCallback(() => {
+    if (pendingGroupClose !== null) disposeGroup(pendingGroupClose.groupId);
+    setPendingGroupClose(null);
+  }, [pendingGroupClose, disposeGroup]);
 
-  const cancelGroupClose = useCallback(() => {}, []);
+  const cancelGroupClose = useCallback(() => {
+    setPendingGroupClose(null);
+  }, []);
 
   const handlePathDeleted = useCallback(
     (path: string) => {
