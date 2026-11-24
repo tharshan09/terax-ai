@@ -71,3 +71,15 @@
 {"v": 2, "ts": "2026-11-23T23:53:13+00:00", "kind": "gate", "gate": "slice_merge", "slice": "slice-05-close-and-palette", "result": "PASSED", "attempt": 1, "findings_count": 0, "merge_commit": "5e6067e", "rebase_attempts": 0}
 {"v": 2, "ts": "2026-11-23T23:53:13+00:00", "kind": "gate", "gate": "typecheck", "slice": "slice-05-close-and-palette", "result": "PASSED", "attempt": 1, "findings_count": 0, "scope": "feature_after_merge"}
 {"v": 2, "ts": "2026-11-23T23:53:13+00:00", "kind": "marker", "gate": "slice_complete", "slice": "slice-05-close-and-palette"}
+{"v": 2, "ts": "2026-11-23T23:59:45+00:00", "kind": "fix", "gate": "marker_scrub", "slice": "slice-02-tab-state", "class": "hygiene", "removed": 0}
+{"v": 2, "ts": "2026-11-23T23:59:45+00:00", "kind": "gate", "gate": "lint", "slice": "slice-02-tab-state", "result": "PASSED", "attempt": 1, "findings_count": 0}
+{"v": 2, "ts": "2026-11-23T23:59:45+00:00", "kind": "gate", "gate": "typecheck", "slice": "slice-02-tab-state", "result": "PASSED", "attempt": 1, "findings_count": 0}
+{"v": 2, "ts": "2026-11-23T23:59:45+00:00", "kind": "gate", "gate": "tests", "slice": "slice-02-tab-state", "result": "PASSED", "attempt": 1, "findings_count": 0, "suite": "guarantee", "note": "volle Suite, 2 Worker: 125 Dateien, 1419 Tests"}
+{"v": 2, "ts": "2026-11-24T00:00:13+00:00", "kind": "fix", "gate": "marker_scrub", "slice": "slice-04-tab-strip", "class": "hygiene", "removed": 0}
+{"v": 2, "ts": "2026-11-24T00:00:13+00:00", "kind": "gate", "gate": "lint", "slice": "slice-04-tab-strip", "result": "PASSED", "attempt": 1, "findings_count": 0}
+{"v": 2, "ts": "2026-11-24T00:00:13+00:00", "kind": "gate", "gate": "typecheck", "slice": "slice-04-tab-strip", "result": "PASSED", "attempt": 1, "findings_count": 0}
+{"v": 2, "ts": "2026-11-24T00:00:13+00:00", "kind": "gate", "gate": "tests", "slice": "slice-04-tab-strip", "result": "PASSED", "attempt": 1, "findings_count": 0, "suite": "guarantee", "note": "volle Suite, 2 Worker: 127 Dateien, 1409 Tests"}
+{"v": 2, "ts": "2026-11-24T00:03:05+00:00", "kind": "gate", "gate": "code_review", "slice": "slice-02-tab-state", "result": "PASSED", "attempt": 1, "findings_count": 0, "parts": ["useTabs.ts", "useTabs.groups.test.tsx"]}
+{"v": 2, "ts": "2026-11-24T00:03:05+00:00", "kind": "gate", "gate": "slice_merge", "slice": "slice-02-tab-state", "result": "PASSED", "attempt": 1, "findings_count": 0, "merge_commit": "d715658", "rebase_attempts": 0}
+{"v": 2, "ts": "2026-11-24T00:03:05+00:00", "kind": "gate", "gate": "typecheck", "slice": "slice-02-tab-state", "result": "PASSED", "attempt": 1, "findings_count": 0, "scope": "feature_after_merge"}
+{"v": 2, "ts": "2026-11-24T00:03:05+00:00", "kind": "marker", "gate": "slice_complete", "slice": "slice-02-tab-state"}

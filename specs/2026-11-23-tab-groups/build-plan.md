@@ -763,7 +763,10 @@ Schreibweise: Leiste eines Space von links; `G1(t2, t3)` ist Gruppe G1 mit den M
 
 **Wie gebaut**
 
-_(leer bis zum Merge)_
+- Merge-Commit: `d715658` (Implementierung `800b20c`)
+- Review: 0 Befunde, davon 0 blockierend bestätigt; Ergebnis APPROVED (zwei Teile)
+- Prüfungen: Lint, Typprüfung und Test-Suite grün (125 Dateien, 1419 Tests, 2 Worker)
+- Abweichungen vom Plan: keine am Vertrag; useTabs hält Tabs, Gruppen und aktiven Tab jetzt in einem gemeinsamen Zustand, mehrere bestehende Aktionen wurden dafür umgebaut (Verhalten ohne Gruppen laut Review und bestehenden Tests unverändert); Import-Block von useTabs.ts durch den Linter neu sortiert
 
 ### slice-03-persistence: Gruppen über den Neustart
 
