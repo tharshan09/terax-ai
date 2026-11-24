@@ -135,4 +135,21 @@ describe("useTabs groups: reorder in the space overview", () => {
     expect(find(s, t(2))).toMatchObject({ spaceId: "b", groupId: "G2" });
     expect(s.activeId).toBe(t(1));
   });
+
+  it("across spaces, expands the collapsed group its successor lies in", () => {
+    const h = setup(
+      [term(2, "G1"), term(3, "G1"), term(4), term(7, undefined, "b")],
+      [group("G1", { collapsed: true })],
+      t(4),
+    );
+    const before = h.now().tabs.length;
+    h.run(() => {
+      h.api().reorderTab(t(4), t(7), "bottom");
+    });
+    const s = h.now();
+    expect(strip(s, "a")).toBe("G1(t2,t3)");
+    expect(s.activeId).toBe(t(3));
+    expect(s.tabs).toHaveLength(before);
+    expect(find(s, t(4)).spaceId).toBe("b");
+  });
 });

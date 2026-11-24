@@ -53,7 +53,7 @@ describe("group close dialog", () => {
     expect(screen.getByText("Close 3 tabs?")).toBeTruthy();
     expect(
       screen.getByText(
-        "2 of them still have a running process or unsaved changes.",
+        "2 of them still have a running process or unsaved changes, or are bound to a tmux session.",
       ),
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
@@ -65,7 +65,7 @@ describe("group close dialog", () => {
     expect(screen.getByText("Close 1 tab?")).toBeTruthy();
     expect(
       screen.getByText(
-        "1 of them still has a running process or unsaved changes.",
+        "1 of them still has a running process or unsaved changes, or is bound to a tmux session.",
       ),
     ).toBeTruthy();
   });

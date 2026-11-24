@@ -50,8 +50,8 @@ function groupCloseTitle(plan: GroupClosePlan): string {
 
 function groupCloseMessage(plan: GroupClosePlan): string {
   return plan.m === 1
-    ? "1 of them still has a running process or unsaved changes."
-    : `${plan.m} of them still have a running process or unsaved changes.`;
+    ? "1 of them still has a running process or unsaved changes, or is bound to a tmux session."
+    : `${plan.m} of them still have a running process or unsaved changes, or are bound to a tmux session.`;
 }
 
 /** Confirmation dialogs for closing dirty editors and terminals with live processes. */

@@ -875,10 +875,14 @@ export function useTabs(initial?: Partial<TerminalTab>) {
             from.spaceId !== onto.spaceId && s.activeId === tabId
               ? nextActiveInSpace(s.tabs, tabId, s.groups)
               : null;
-          return keepActiveVisible(
-            { ...s, tabs: without, activeId: fallback ?? s.activeId },
-            spawn,
-          );
+          const next = {
+            ...s,
+            tabs: without,
+            activeId: fallback ?? s.activeId,
+          };
+          return next.activeId === tabId
+            ? keepActiveVisible(next, spawn)
+            : next;
         }),
       );
       return (
