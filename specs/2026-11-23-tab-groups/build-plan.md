@@ -755,6 +755,11 @@ Schreibweise: Leiste eines Space von links; `G1(t2, t3)` ist Gruppe G1 mit den M
     THEN entstehen [t1, G1(t4, t2, t3)] und [t1, G1(t3), t4, t2]
     [Source: --]
 
+30) GIVEN [G1(t2, t3), t4] in Space a, G1 eingeklappt, t4 aktiv, und t7 lose in Space b (Space-Überblick)
+    WHEN `reorderTab(t4, t7, "bottom")` aufgerufen wird
+    THEN liegt t4 lose in Space b hinter t7; in Space a ist t3 aktiv und G1 aufgeklappt; es entsteht kein neues Terminal; die Rückgabe ist `false`. Dasselbe Ergebnis liefert `moveTabToSpace(t4, b)` in derselben Lage. Unverändert bleiben AC 29 (gleicher Space: eingeklappte Zielgruppe bleibt zu, sichtbarer Nachbar oder neues Terminal wird aktiv) und der Fall, dass t4 der letzte Tab seines Space war (Rückgabe `true`, Ansicht folgt in den Ziel-Space)
+    [Source: SVC-7, SVC-9, BR-24, EP-8; Nachtrag aus gates/DECISION-end-review-korrekturen.md, Anforderungen 4 bis 6]
+
 **Nicht in diesem Slice**
 
 - Keine Oberfläche, keine Speicherung, keine Rückfrage: `closeGroup` schließt ohne Rückfrage, die Rückfrage baut slice-05.
@@ -1042,6 +1047,11 @@ Schreibweise: Leiste des aktiven Space a von links; `G1(t2, t3)` ist Gruppe G1 m
     THEN tritt t4 G1 an dieser Stelle bei, t1 wird letztes Mitglied von G2 und G2 bleibt eingeklappt, G1 steht als Block hinter G2
     [Source: FL-4, TG-10, TG-11] [Prüfweg: QA]
 
+25) GIVEN die laufende App ohne Gruppen, „Rename“ an Tab t1 ist offen und „foo“ eingetippt; danach dasselbe ohne Eingabe
+    WHEN der aktive Space wechselt (Kürzel `space.next`) und wieder zurück
+    THEN heißt t1 im ersten Fall „foo“, im zweiten unverändert; bei der Rückkehr ist in beiden Fällen kein Umbenennen-Feld offen (Space-Wechsel wirkt wie Fokusverlust; weicht ab von NFR-5, auf `main` ging der Entwurf verloren und das Feld erschien wieder)
+    [Source: MIG-3; Nachtrag aus gates/DECISION-end-review-korrekturen.md, Anforderung 7] [Prüfweg: QA]
+
 **Nicht in diesem Slice**
 
 - Kein Doppelklick am Kopf (Architecture Q&A 8): Umbenennen nur über „Rename group“ und von selbst nach dem Anlegen.
@@ -1089,12 +1099,12 @@ Schreibweise: Leiste des aktiven Space a von links; `G1(t2, t3)` ist Gruppe G1 m
 
 Schreibweise: `G1(t2, t3)` ist Gruppe G1 mit den Mitgliedern t2, t3; Tabs ohne Klammer sind lose.
 
-1) GIVEN G1(t2, t3, t4), t2 ein Editor mit ungespeicherten Änderungen, t3 ein Terminal mit Vordergrundprozess, t4 ein ruhiges Terminal
+1) GIVEN G1(t2, t3, t4), t2 ein Editor mit ungespeicherten Änderungen, t3 ein Terminal mit Vordergrundprozess, t4 ein ruhiges Terminal; keines tmux-gebunden
    WHEN `requestCloseGroup(G1)` aufgerufen wird
    THEN ist `pendingGroupClose` `{ groupId: G1, memberIds: [t2, t3, t4], n: 3, m: 2 }`, `disposeGroup` wird nicht gerufen und weder `pendingCloseTab` noch `pendingTerminalCloseTab` ist gesetzt (eine Rückfrage, nicht drei)
    [Source: MIG-6, BR-15, TR-11, API-11]
 
-2) GIVEN G1(t3, t4), beide ruhige Terminals
+2) GIVEN G1(t3, t4), beide ruhige Terminals ohne tmux-Bindung
    WHEN `requestCloseGroup(G1)` aufgerufen wird
    THEN wird `disposeGroup(G1)` sofort einmal gerufen und `pendingGroupClose` bleibt `null`
    [Source: TR-10, FL-11]
@@ -1111,8 +1121,8 @@ Schreibweise: `G1(t2, t3)` ist Gruppe G1 mit den Mitgliedern t2, t3; Tabs ohne K
 
 5) GIVEN `pendingGroupClose` mit `n` 3 und `m` 2, danach mit `n` 1 und `m` 1
    WHEN `CloseDialogs` zeichnet und „Cancel“, Esc bzw. „Close group“ bedient wird
-   THEN zeigt der Dialog im Stil der bestehenden Schließen-Dialoge den Titel „Close 3 tabs?“, den Text „2 of them still have a running process or unsaved changes.“ und die Knöpfe „Cancel“ und „Close group“; im zweiten Fall „Close 1 tab?“ und „1 of them still has a running process or unsaved changes.“; „Cancel“ und Esc rufen `onCancelGroupClose`, „Close group“ ruft `onConfirmGroupClose`
-   [Source: UI-8, ST-5, TG-9, MIG-7]
+   THEN zeigt der Dialog im Stil der bestehenden Schließen-Dialoge den Titel „Close 3 tabs?“, den Text „2 of them still have a running process or unsaved changes, or are bound to a tmux session.“ und die Knöpfe „Cancel“ und „Close group“; im zweiten Fall „Close 1 tab?“ und „1 of them still has a running process or unsaved changes, or is bound to a tmux session.“; „Cancel“ und Esc rufen `onCancelGroupClose`, „Close group“ ruft `onConfirmGroupClose`
+   [Source: UI-8, ST-5, TG-9, MIG-7; Text geändert nach gates/DECISION-end-review-korrekturen.md, Anforderung 1 · weicht ab: UI-8]
 
 6) GIVEN G1(t3), die Prozess-Abfrage für t3 scheitert (abgelehntes Promise)
    WHEN `requestCloseGroup(G1)` aufgerufen wird
@@ -1138,6 +1148,11 @@ Schreibweise: `G1(t2, t3)` ist Gruppe G1 mit den Mitgliedern t2, t3; Tabs ohne K
     WHEN in der Befehlspalette „Add tab to new group“ gewählt wird
     THEN steht t1 in einer neuen Gruppe und deren Namensfeld ist offen
     [Source: API-13] [Prüfweg: QA]
+
+11) GIVEN G1(t2, t3, t4): t2 ein untätiges Terminal, dessen Tab eine tmux-Session trägt; t3 ein Terminal, dessen eines Pane eine tmux-Session trägt und dessen Prozess-Prüfung „running“ meldet; t4 ein untätiges Terminal ohne tmux-Bindung
+    WHEN `requestCloseGroup(G1)` aufgerufen wird, danach `handleClose(t2)`
+    THEN ist `pendingGroupClose` `{ groupId: G1, memberIds: [t2, t3, t4], n: 3, m: 2 }` (t2 und t3 zählen je einmal, t4 nicht), `disposeGroup` wird nicht gerufen, und der Dialog zu diesem Plan zeigt „2 of them still have a running process or unsaved changes, or are bound to a tmux session.“; `handleClose(t2)` ruft dagegen `disposeTab(t2)` ohne Rückfrage
+    [Source: BR-15, SVC-13, MIG-6; Entscheidung E2 (Gate-Log) und gates/DECISION-end-review-korrekturen.md, Anforderungen 2 und 3 · weicht ab: BR-15]
 
 **Nicht in diesem Slice**
 

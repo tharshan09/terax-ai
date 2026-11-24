@@ -1,0 +1,4 @@
+tab-groups ist fertig: 12 Aufgaben offen: 12 offene Punkte. PR: https://github.com/tharshan09/terax-ai/pull/96
+
+Bericht: https://github.com/tharshan09/terax-ai/blob/tab-groups/specs/2026-11-23-tab-groups/report/final/comment.md
+• 9 Abweichungen von der Discovery, siehe Issue

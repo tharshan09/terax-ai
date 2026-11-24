@@ -1,0 +1,647 @@
+{
+  "version": 1,
+  "generated_at": "2026-11-24T00:57:04.385Z",
+  "run": {
+    "spec_path": "specs/2026-11-23-tab-groups",
+    "feature": "2026-11-23-tab-groups",
+    "state_file": ".build-state.json",
+    "status": "completed",
+    "current_state": "feature_complete",
+    "started_at": "2026-11-23T13:40:00+01:00",
+    "ended_at": "2026-11-24T00:57:04+00:00",
+    "duration_min": 737
+  },
+  "timeline": {
+    "created_at": "2026-11-23T16:35:55Z",
+    "phases": [
+      {
+        "phase": "discovery",
+        "status": "completed",
+        "started_at": "2026-11-23T16:35:55Z",
+        "ended_at": "2026-11-23T20:57:01Z",
+        "duration_min": 261,
+        "nested": false
+      },
+      {
+        "phase": "architecture",
+        "status": "failed",
+        "started_at": "2026-11-23T21:20:26Z",
+        "ended_at": "2026-11-23T22:17:36Z",
+        "duration_min": 57,
+        "nested": true
+      },
+      {
+        "phase": "build",
+        "status": "in_progress",
+        "started_at": "2026-11-23T22:30:25Z",
+        "ended_at": "2026-11-24T00:57:04.385Z",
+        "duration_min": 147,
+        "end_provisional": true,
+        "nested": false
+      }
+    ],
+    "active_min": 408,
+    "lead_time_min": 501,
+    "waiting_min": 93
+  },
+  "slices": [
+    {
+      "id": "slice-00-contracts",
+      "status": "merged",
+      "started_at": "2026-11-23T14:20:00+01:00",
+      "merged_at": "2026-11-23T23:12:58+00:00",
+      "duration_min": 593
+    },
+    {
+      "id": "slice-01-group-rules",
+      "status": "merged",
+      "started_at": "2026-11-23T23:13:28+00:00",
+      "merged_at": "2026-11-23T23:39:55+00:00",
+      "duration_min": 26
+    },
+    {
+      "id": "slice-02-tab-state",
+      "status": "merged",
+      "started_at": "2026-11-23T23:40:21+00:00",
+      "merged_at": "2026-11-24T00:03:05+00:00",
+      "duration_min": 23
+    },
+    {
+      "id": "slice-03-persistence",
+      "status": "merged",
+      "started_at": "2026-11-23T23:40:24+00:00",
+      "merged_at": "2026-11-23T23:50:30+00:00",
+      "duration_min": 10
+    },
+    {
+      "id": "slice-04-tab-strip",
+      "status": "merged",
+      "started_at": "2026-11-23T23:40:27+00:00",
+      "merged_at": "2026-11-24T00:04:15+00:00",
+      "duration_min": 24
+    },
+    {
+      "id": "slice-05-close-and-palette",
+      "status": "merged",
+      "started_at": "2026-11-23T23:40:30+00:00",
+      "merged_at": "2026-11-23T23:53:13+00:00",
+      "duration_min": 13
+    }
+  ],
+  "gates": {
+    "arch_precheck": {
+      "passed": 3,
+      "failed": 1,
+      "skipped": 0,
+      "attempts_max": 4,
+      "findings": 7
+    },
+    "citation_precheck": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 1,
+      "attempts_max": 1,
+      "findings": 0
+    },
+    "architecture_compliance": {
+      "passed": 0,
+      "failed": 2,
+      "skipped": 0,
+      "attempts_max": 2,
+      "findings": 47
+    },
+    "worktree_bootstrap": {
+      "passed": 7,
+      "failed": 0,
+      "skipped": 0,
+      "attempts_max": 1,
+      "findings": 0
+    },
+    "build_plan_precheck": {
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "attempts_max": 2,
+      "findings": 0
+    },
+    "lint": {
+      "passed": 11,
+      "failed": 0,
+      "skipped": 0,
+      "attempts_max": 4,
+      "findings": 0
+    },
+    "typecheck": {
+      "passed": 16,
+      "failed": 0,
+      "skipped": 0,
+      "attempts_max": 3,
+      "findings": 0
+    },
+    "tests": {
+      "passed": 10,
+      "failed": 1,
+      "skipped": 0,
+      "attempts_max": 3,
+      "findings": 33
+    },
+    "code_review": {
+      "passed": 6,
+      "failed": 1,
+      "skipped": 0,
+      "attempts_max": 2,
+      "findings": 1
+    },
+    "slice_merge": {
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0,
+      "attempts_max": 1,
+      "findings": 0
+    },
+    "final_validation": {
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "attempts_max": 1,
+      "findings": 0
+    },
+    "malicious_intent_scan": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 2,
+      "attempts_max": 2,
+      "findings": 0
+    },
+    "systemic_review": {
+      "passed": 1,
+      "failed": 2,
+      "skipped": 0,
+      "attempts_max": 3,
+      "findings": 15
+    },
+    "design_conformance": {
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "attempts_max": 2,
+      "findings": 11
+    }
+  },
+  "findings": {
+    "total": 60,
+    "by_class": {
+      "fix": 29,
+      "note": 19,
+      "decision": 7,
+      "refuted": 3,
+      "obligation": 2
+    },
+    "confirmed": 10,
+    "rejected": 0,
+    "unverifiable": 0
+  },
+  "decisions": [
+    {
+      "ts": "2026-11-23T12:55:00+01:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "Beim Wechsel in einen Space wird der letzte sichtbare Tab aktiv; gibt es keinen, der letzte Tab des Space, dessen Gruppe aufklappt.",
+      "decision_doc": null,
+      "actor": "agent",
+      "impact": "business",
+      "req_ids": [
+        "BR-9",
+        "BR-10",
+        "BR-24"
+      ],
+      "deviates": [],
+      "gap": false
+    },
+    {
+      "ts": "2026-11-23T12:55:00+01:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "Der Gruppen-Kopf reagiert nur auf den einfachen Klick (umklappen); Umbenennen ueber Rename group im Menue und von selbst nach dem Anlegen.",
+      "decision_doc": null,
+      "actor": "agent",
+      "impact": "business",
+      "req_ids": [
+        "UI-1",
+        "TR-7"
+      ],
+      "deviates": [
+        "UI-1",
+        "TR-7"
+      ],
+      "gap": false
+    },
+    {
+      "ts": "2026-11-23T13:20:00+01:00",
+      "gate": "architecture",
+      "slice": "feature",
+      "choice": "Berichtigen und weiter: D-R1, D-F1 bis D-F3 eingearbeitet, D-O1 als OB-15, ohne weiteren Prueflauf.",
+      "decision_doc": null,
+      "actor": "human",
+      "impact": "technical",
+      "req_ids": [],
+      "deviates": [],
+      "gap": false
+    },
+    {
+      "ts": "2026-11-23T23:00:29+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "im selben Ordner wie ein neuer Tab über den Plus-Knopf (Ordner des bisher aktiven Tabs, sonst des Space), am Ende der Leiste und außerhalb jeder Gruppe",
+      "decision_doc": null,
+      "actor": "agent",
+      "impact": "business",
+      "req_ids": [
+        "EP-1",
+        "EP-5",
+        "EP-9",
+        "BR-25"
+      ],
+      "deviates": [],
+      "gap": false
+    },
+    {
+      "ts": "2026-11-23T23:00:29+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "wie beim Schließen eines einzelnen Tabs: der nächste sichtbare Tab links der Gruppe, sonst rechts; gibt es keinen sichtbaren, der nächstgelegene Tab einer eingeklappten Gruppe, die dabei aufklappt",
+      "decision_doc": null,
+      "actor": "agent",
+      "impact": "business",
+      "req_ids": [
+        "BR-24",
+        "BR-25"
+      ],
+      "deviates": [],
+      "gap": false
+    },
+    {
+      "ts": "2026-11-23T23:00:29+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "so, wie das Eingabefeld der Web-Ansicht von sich aus zählt (ein Emoji zählt meist als 2); beim Kürzen einer gespeicherten Datei wird nie ein Zeichen halbiert",
+      "decision_doc": null,
+      "actor": "agent",
+      "impact": "business",
+      "req_ids": [
+        "BR-6",
+        "VAL-1",
+        "OB-4"
+      ],
+      "deviates": [],
+      "gap": false
+    },
+    {
+      "ts": "2026-11-23T23:00:29+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "der Kopf ist dafür kein Ziel; der Pane wird nach der Halbbreiten-Regel ein loser Tab direkt vor bzw. hinter der Gruppe",
+      "decision_doc": null,
+      "actor": "agent",
+      "impact": "business",
+      "req_ids": [
+        "BR-11",
+        "BR-12",
+        "UI-9",
+        "SVC-10"
+      ],
+      "deviates": [],
+      "gap": false
+    },
+    {
+      "ts": "2026-11-23T23:00:29+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "die innere Hälfte des Kopfs ist das Ziel „in die Gruppe“; die äußeren Viertel ergeben die Lücke vor bzw. hinter der Gruppe",
+      "decision_doc": null,
+      "actor": "agent",
+      "impact": "business",
+      "req_ids": [
+        "BR-12",
+        "UI-9",
+        "SVC-10"
+      ],
+      "deviates": [],
+      "gap": false
+    },
+    {
+      "ts": "2026-11-23T23:00:29+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "die Lücke zählt als Lücke direkt hinter der anderen Gruppe; die Einfüge-Marke steht dort",
+      "decision_doc": null,
+      "actor": "agent",
+      "impact": "business",
+      "req_ids": [
+        "BR-14",
+        "SVC-11",
+        "UI-9"
+      ],
+      "deviates": [],
+      "gap": false
+    },
+    {
+      "ts": "2026-11-23T23:00:29+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "er übernimmt die Zugehörigkeit des Tabs, an dem er abgelegt wird (dessen Gruppe oder lose); war er aktiv und ist diese Gruppe eingeklappt, wird ein Nachbar aktiv wie beim Ablegen auf einem eingeklappten Kopf",
+      "decision_doc": null,
+      "actor": "agent",
+      "impact": "business",
+      "req_ids": [],
+      "deviates": [],
+      "gap": true
+    },
+    {
+      "ts": "2026-11-23T23:00:29+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "„1 tab“, „Close 1 tab?“ und „1 of them still has a running process or unsaved changes.“ statt der Mehrzahl-Vorlage",
+      "decision_doc": null,
+      "actor": "agent",
+      "impact": "business",
+      "req_ids": [
+        "UI-1",
+        "UI-8",
+        "BR-23"
+      ],
+      "deviates": [
+        "UI-1",
+        "UI-8"
+      ],
+      "gap": false
+    },
+    {
+      "ts": "2026-11-23T23:00:29+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "Gruppen in Leisten-Reihenfolge, Spaces in der Reihenfolge des Space-Umschalters",
+      "decision_doc": null,
+      "actor": "agent",
+      "impact": "business",
+      "req_ids": [
+        "UI-4",
+        "UI-5"
+      ],
+      "deviates": [],
+      "gap": false
+    },
+    {
+      "ts": "2026-11-23T23:00:29+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "newGroupId(allocId) aus dem Id-Zähler von useTabs, auch beim Laden",
+      "decision_doc": null,
+      "actor": "agent",
+      "impact": "technical",
+      "req_ids": [
+        "OB-7"
+      ],
+      "deviates": [],
+      "gap": false
+    },
+    {
+      "ts": "2026-11-23T23:00:29+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "Gruppen kommen als optionaler letzter Parameter, das Ziehziel als zusätzliche Variante neben der heutigen Zahl, die neuen Felder des Paletten-Kontexts sind optional",
+      "decision_doc": null,
+      "actor": "agent",
+      "impact": "technical",
+      "req_ids": [
+        "NFR-5",
+        "MIG-1"
+      ],
+      "deviates": [],
+      "gap": false
+    },
+    {
+      "ts": "2026-11-23T23:00:29+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "App.tsx hält die Id der Gruppe im Umbenennen und setzt sie nach jedem createGroupFromTab",
+      "decision_doc": null,
+      "actor": "agent",
+      "impact": "technical",
+      "req_ids": [
+        "API-1",
+        "API-13",
+        "UI-7"
+      ],
+      "deviates": [],
+      "gap": false
+    },
+    {
+      "ts": "2026-11-23T23:00:29+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "der reine Plan mit n und m als planGroupClose in tabGroups.ts, die herausgelöste Einzel-Regel als closeConfirmReason in useTabCloseGuards.ts",
+      "decision_doc": null,
+      "actor": "agent",
+      "impact": "technical",
+      "req_ids": [
+        "SVC-13",
+        "MIG-6"
+      ],
+      "deviates": [],
+      "gap": false
+    },
+    {
+      "ts": "2026-11-23T23:00:29+00:00",
+      "gate": "build_plan",
+      "slice": "feature",
+      "choice": "nein, das Feld fehlt dann wie andere optionale Felder",
+      "decision_doc": null,
+      "actor": "agent",
+      "impact": "technical",
+      "req_ids": [
+        "DB-1"
+      ],
+      "deviates": [],
+      "gap": false
+    },
+    {
+      "ts": "2026-11-23T23:01:09+00:00",
+      "gate": "run_mechanics",
+      "slice": "run",
+      "choice": "Slice-Worktrees liegen im Scratch-Verzeichnis der Sitzung statt unter .claude/worktrees des Haupt-Checkouts.",
+      "decision_doc": null,
+      "actor": "agent",
+      "impact": "technical",
+      "req_ids": [],
+      "deviates": [],
+      "gap": false
+    },
+    {
+      "ts": "2026-11-23T23:49:06+00:00",
+      "gate": "decision",
+      "slice": "slice-05-close-and-palette",
+      "choice": "Scheitert die Abfrage, ob in einem Terminal noch etwas laeuft, erscheint beim Schliessen eines Tabs oder einer Gruppe die Rueckfrage; dafuer bekommt die Terminal-Schicht eine zweite Abfrage, die das Scheitern meldet.",
+      "decision_doc": null,
+      "actor": "agent",
+      "impact": "business",
+      "req_ids": [
+        "BR-15",
+        "INV-14",
+        "SVC-13"
+      ],
+      "deviates": [],
+      "gap": false
+    },
+    {
+      "ts": "2026-11-24T00:22:09+00:00",
+      "gate": "decision",
+      "slice": "feature",
+      "choice": "Im Space-Ueberblick bleibt eine eingeklappte Gruppe eingeklappt, wenn der aktive Tab auf eines ihrer Mitglieder gezogen wird; ein sichtbarer Nachbar wird aktiv.",
+      "decision_doc": null,
+      "actor": "agent",
+      "impact": "business",
+      "req_ids": [
+        "BR-12",
+        "TR-3",
+        "API-2"
+      ],
+      "deviates": [],
+      "gap": false
+    },
+    {
+      "ts": "2026-11-24T00:22:09+00:00",
+      "gate": "decision",
+      "slice": "feature",
+      "choice": "Close group fragt immer nach, wenn die Gruppe ein Terminal mit tmux-Bindung enthaelt, auch wenn sich nicht feststellen laesst, ob dort etwas laeuft. Das Schliessen eines einzelnen Tabs bleibt wie heute.",
+      "decision_doc": null,
+      "actor": "agent",
+      "impact": "business",
+      "req_ids": [
+        "BR-15",
+        "SVC-13",
+        "UI-8"
+      ],
+      "deviates": [
+        "BR-15"
+      ],
+      "gap": false
+    },
+    {
+      "ts": "2026-11-24T00:22:09+00:00",
+      "gate": "decision",
+      "slice": "feature",
+      "choice": "Scheitert die Abfrage, ob in einem Terminal etwas laeuft, fragen das Schliessen eines Tabs und einer Gruppe nach; App beenden behandelt den Fehler weiter als laeuft nicht.",
+      "decision_doc": null,
+      "actor": "agent",
+      "impact": "business",
+      "req_ids": [
+        "INV-14",
+        "BR-15"
+      ],
+      "deviates": [
+        "INV-14"
+      ],
+      "gap": false
+    },
+    {
+      "ts": "2026-11-24T00:52:08+00:00",
+      "gate": "resolver",
+      "slice": "feature",
+      "choice": "Der Dialog Close group nennt jeden Grund, aus dem ein Mitglied zählt (running process, unsaved changes, tmux-Bindung); m bleibt die Anzahl der Mitglieder, die eine Rückfrage auslösen.",
+      "decision_doc": "gates/DECISION-end-review-korrekturen.md",
+      "actor": "agent",
+      "impact": "business",
+      "req_ids": [
+        "BR-15",
+        "UI-8",
+        "SVC-13",
+        "BR-23"
+      ],
+      "deviates": [
+        "BR-15",
+        "UI-8"
+      ],
+      "gap": false
+    },
+    {
+      "ts": "2026-11-24T00:52:08+00:00",
+      "gate": "resolver",
+      "slice": "feature",
+      "choice": "Beim Ziehen des aktiven Tabs in einen anderen Space gilt im verlassenen Space die Nachfolger- und Aufklapp-Regel wie bei moveTabToSpace; der Ersatz-Terminal-Weg aus E1 gilt nur, wenn der gezogene Tab selbst aktiv bleibt.",
+      "decision_doc": "gates/DECISION-end-review-korrekturen.md",
+      "actor": "agent",
+      "impact": "business",
+      "req_ids": [
+        "SVC-7",
+        "SVC-9",
+        "BR-24",
+        "EP-8"
+      ],
+      "deviates": [],
+      "gap": false
+    },
+    {
+      "ts": "2026-11-24T00:52:08+00:00",
+      "gate": "resolver",
+      "slice": "feature",
+      "choice": "Ein angefangenes Umbenennen eines Tabs endet beim Space-Wechsel wie bei Fokusverlust (geänderter Name gespeichert, unveränderter nicht); kein Code-Eingriff.",
+      "decision_doc": "gates/DECISION-end-review-korrekturen.md",
+      "actor": "agent",
+      "impact": "business",
+      "req_ids": [
+        "NFR-5",
+        "MIG-3"
+      ],
+      "deviates": [
+        "NFR-5"
+      ],
+      "gap": false
+    }
+  ],
+  "fixes": {
+    "hygiene": 6,
+    "bug": 3
+  },
+  "free_zone": {
+    "starts": 0,
+    "by_type": {},
+    "briefs": []
+  },
+  "bindings_exceptions": 0,
+  "skipped_helpers": [
+    {
+      "helper": "citation_precheck",
+      "slice": "feature",
+      "reason": "Kein bindings.md, kein Reconcile-Report."
+    },
+    {
+      "helper": "malicious_intent_scan",
+      "slice": "feature",
+      "reason": "mi-trigger: no hot path and no dynamic execution in 52 changed files (Stand vor dem End-Review)"
+    },
+    {
+      "helper": "malicious_intent_scan",
+      "slice": "feature",
+      "reason": "mi-trigger nach dem letzten Code-Commit: no hot path and no dynamic execution in 57 changed files"
+    }
+  ],
+  "auffaelligkeiten": [
+    "Gate arch_precheck brauchte 4 Anläufe",
+    "Gate citation_precheck 1× übersprungen",
+    "Gate architecture_compliance brauchte 2 Anläufe",
+    "Gate architecture_compliance 2× rot ohne grünen Anlauf",
+    "Gate build_plan_precheck brauchte 2 Anläufe",
+    "Gate lint brauchte 4 Anläufe",
+    "Gate typecheck brauchte 3 Anläufe",
+    "Gate tests brauchte 3 Anläufe",
+    "Gate code_review brauchte 2 Anläufe",
+    "Gate malicious_intent_scan brauchte 2 Anläufe",
+    "Gate malicious_intent_scan 2× übersprungen",
+    "Gate systemic_review brauchte 3 Anläufe",
+    "Gate design_conformance brauchte 2 Anläufe",
+    "25 Entscheidung(en) ohne Mensch: architecture, build_plan, run_mechanics, decision, resolver",
+    "6 Abweichung(en) von der Discovery: UI-1, TR-7, UI-8, BR-15, INV-14, NFR-5",
+    "Slice slice-00-contracts brauchte 593 min (Median 24)"
+  ]
+}
