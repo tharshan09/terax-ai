@@ -49,6 +49,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
+  type CSSProperties,
   Fragment,
   type PointerEvent,
   type ReactNode,
@@ -811,20 +812,16 @@ export function TabBar({
     const color = groupColor(group.color);
     return (
       <div
-        className="flex shrink-0 items-center gap-0.5"
-        // A background, not a border or a positioned child: the line must not
-        // change the strip's height or become the tabs' offsetParent, which
-        // would throw the active-tab pill off.
-        style={
-          group.collapsed
-            ? undefined
-            : {
-                backgroundImage: `linear-gradient(${color}, ${color})`,
-                backgroundSize: "calc(100% - 8px) 2px",
-                backgroundPosition: "center bottom",
-                backgroundRepeat: "no-repeat",
-              }
-        }
+        // A tinted surface behind header and members, slightly stronger in
+        // dark themes. Only a background: no border, padding or positioning,
+        // so the strip keeps its height and the tabs keep the list as their
+        // offsetParent, which the active-tab pill is measured against.
+        className={cn(
+          "flex shrink-0 items-center gap-0.5 rounded-[10px]",
+          !group.collapsed &&
+            "bg-[color-mix(in_oklch,var(--group-color)_10%,transparent)] dark:bg-[color-mix(in_oklch,var(--group-color)_13%,transparent)]",
+        )}
+        style={{ "--group-color": color } as CSSProperties}
       >
         <TabGroupHeader
           item={item}

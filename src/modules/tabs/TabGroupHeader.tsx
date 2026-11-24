@@ -25,7 +25,7 @@ import {
   Unlink01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { type PointerEvent, useMemo } from "react";
+import { type CSSProperties, type PointerEvent, useMemo } from "react";
 import { groupAggregateStatus } from "./lib/selectTabAgentStatus";
 import { GROUP_NAME_MAX, type StripItem } from "./lib/tabGroups";
 import { GROUP_COLLAPSED_ATTR, GROUP_HEADER_ATTR } from "./lib/tabStripGap";
@@ -62,6 +62,9 @@ const COLOR_NAMES = [
 
 const MENU_ITEM = "gap-2 rounded-xl px-2.5 py-1.5 text-[13px]";
 
+/** Text colour on a solid group header. */
+export const GROUP_HEADER_INK = "oklch(0.16 0.01 240)";
+
 export function groupColor(color: number): string {
   return SPACE_COLORS[color] ?? SPACE_COLORS[0];
 }
@@ -96,26 +99,27 @@ export function TabGroupHeader({
     [GROUP_HEADER_ATTR]: group.id,
     ...(group.collapsed ? { [GROUP_COLLAPSED_ATTR]: "" } : {}),
     className: cn(
-      "relative z-[1] flex h-7 shrink-0 select-none items-center gap-1.5 rounded-md text-xs font-medium text-foreground/85 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/40",
+      "relative z-[1] flex h-7 min-w-4 shrink-0 select-none items-center gap-1.5 rounded-md text-xs font-semibold outline-none transition-colors focus-visible:ring-2 focus-visible:ring-foreground/40 focus-visible:ring-offset-1 focus-visible:ring-offset-background",
       compact ? "px-1.5" : "px-2",
       !renaming && "cursor-pointer",
       dragging && "opacity-50",
     ),
+    // The header is a solid label in the group colour; members sit on a
+    // tinted surface drawn by the strip around them. Dark ink reads on every
+    // palette colour in both themes. `--primary` is re-pointed so the agent
+    // badge (text-primary / bg-primary) draws in that ink too.
     style: {
-      backgroundColor: `color-mix(in oklch, ${color} ${dropHighlight ? 28 : 14}%, transparent)`,
+      backgroundColor: color,
+      color: GROUP_HEADER_INK,
+      "--primary": GROUP_HEADER_INK,
       boxShadow: dropHighlight
-        ? `inset 0 0 0 1px color-mix(in oklch, ${color} 70%, transparent)`
+        ? `0 0 0 2px color-mix(in oklch, ${color} 45%, transparent)`
         : undefined,
-    },
+    } as CSSProperties,
   };
 
   const content = (
     <>
-      <span
-        aria-hidden
-        className="size-2 shrink-0 rounded-full"
-        style={{ backgroundColor: color }}
-      />
       {renaming ? (
         <InlineRename
           initial={group.name}
@@ -137,7 +141,12 @@ export function TabGroupHeader({
       )}
       {group.collapsed && (
         <>
-          <span className="shrink-0 rounded-sm bg-foreground/[0.08] px-1 text-[10px] leading-4 tabular-nums text-muted-foreground">
+          <span
+            className="shrink-0 rounded-sm px-1 text-[10px] leading-4 tabular-nums"
+            style={{
+              backgroundColor: `color-mix(in oklch, ${GROUP_HEADER_INK} 18%, transparent)`,
+            }}
+          >
             {count}
           </span>
           <GroupAggregateIndicator members={members} />

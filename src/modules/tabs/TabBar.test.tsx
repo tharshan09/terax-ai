@@ -251,24 +251,28 @@ afterEach(() => {
 const t1g1t4 = () => [term(1), term(2, "G1"), term(3, "G1"), term(4)];
 
 describe("TabBar with groups: drawing", () => {
-  it("draws the header, the members and the colour line, and only the header when collapsed", () => {
+  it("draws the header, the members on a tinted surface, and only the header when collapsed", () => {
     const g = group("G1", { name: "Messungen", color: 4 });
     const { rerender } = bar(t1g1t4(), [g]);
 
     expect(drawnOrder()).toEqual(["t1", "G1", "t2", "t3", "t4"]);
     const h = header("G1");
     expect(h.textContent).toBe("Messungen");
-    const line = h.parentElement as HTMLElement;
-    expect(line.style.backgroundImage).toContain(css(SPACE_COLORS[4]));
-    expect(line.contains(tabEl(3))).toBe(true);
-    expect(line.contains(tabEl(4))).toBe(false);
+    expect(h.style.backgroundColor).toBe(css(SPACE_COLORS[4]));
+    const surface = h.parentElement as HTMLElement;
+    expect(surface.style.getPropertyValue("--group-color")).toBe(
+      SPACE_COLORS[4],
+    );
+    expect(surface.className).toContain("bg-[color-mix(");
+    expect(surface.contains(tabEl(3))).toBe(true);
+    expect(surface.contains(tabEl(4))).toBe(false);
 
     rerender(t1g1t4(), [{ ...g, collapsed: true }]);
     expect(drawnOrder()).toEqual(["t1", "G1", "t4"]);
     expect(header("G1").textContent).toBe("Messungen2");
-    expect(
-      (header("G1").parentElement as HTMLElement).style.backgroundImage,
-    ).toBe("");
+    expect((header("G1").parentElement as HTMLElement).className).not.toContain(
+      "bg-[color-mix(",
+    );
     const tip = header("G1").getAttribute("title") ?? "";
     expect(tip).toContain("Messungen");
     expect(tip).toContain("2 tabs");
@@ -581,11 +585,12 @@ describe("TabBar with groups: header menu", () => {
     expect(gp.onSetGroupColor).toHaveBeenCalledWith("G1", 2);
 
     rerender(tabs, [group("G1", { color: 2 })]);
-    const dot = header("G1").querySelector<HTMLElement>("span[aria-hidden]");
-    expect(dot?.style.backgroundColor).toBe(css(SPACE_COLORS[2]));
+    expect(header("G1").style.backgroundColor).toBe(css(SPACE_COLORS[2]));
     expect(
-      (header("G1").parentElement as HTMLElement).style.backgroundImage,
-    ).toContain(css(SPACE_COLORS[2]));
+      (header("G1").parentElement as HTMLElement).style.getPropertyValue(
+        "--group-color",
+      ),
+    ).toBe(SPACE_COLORS[2]);
   });
 });
 
