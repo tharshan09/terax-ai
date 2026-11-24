@@ -83,3 +83,8 @@
 {"v": 2, "ts": "2026-11-24T00:03:05+00:00", "kind": "gate", "gate": "slice_merge", "slice": "slice-02-tab-state", "result": "PASSED", "attempt": 1, "findings_count": 0, "merge_commit": "d715658", "rebase_attempts": 0}
 {"v": 2, "ts": "2026-11-24T00:03:05+00:00", "kind": "gate", "gate": "typecheck", "slice": "slice-02-tab-state", "result": "PASSED", "attempt": 1, "findings_count": 0, "scope": "feature_after_merge"}
 {"v": 2, "ts": "2026-11-24T00:03:05+00:00", "kind": "marker", "gate": "slice_complete", "slice": "slice-02-tab-state"}
+{"v": 2, "ts": "2026-11-24T00:04:15+00:00", "kind": "gate", "gate": "code_review", "slice": "slice-04-tab-strip", "result": "PASSED", "attempt": 1, "findings_count": 0, "parts": ["TabBar.tsx", "TabGroupHeader.tsx, TabActivityIndicator.tsx, InlineRename.tsx, Tests"]}
+{"v": 2, "ts": "2026-11-24T00:04:15+00:00", "kind": "gate", "gate": "slice_merge", "slice": "slice-04-tab-strip", "result": "PASSED", "attempt": 1, "findings_count": 0, "merge_commit": "934291f", "rebase_attempts": 0}
+{"v": 2, "ts": "2026-11-24T00:04:15+00:00", "kind": "gate", "gate": "typecheck", "slice": "slice-04-tab-strip", "result": "PASSED", "attempt": 1, "findings_count": 0, "scope": "feature_after_merge"}
+{"v": 2, "ts": "2026-11-24T00:04:15+00:00", "kind": "marker", "gate": "slice_complete", "slice": "slice-04-tab-strip"}
+{"v": 2, "ts": "2026-11-24T00:04:15+00:00", "kind": "marker", "gate": "all_slices_complete", "slice": "feature"}

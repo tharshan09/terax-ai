@@ -1050,7 +1050,10 @@ Schreibweise: Leiste des aktiven Space a von links; `G1(t2, t3)` ist Gruppe G1 m
 
 **Wie gebaut**
 
-_(leer bis zum Merge)_
+- Merge-Commit: `934291f` (Implementierung `6e02412`)
+- Review: 0 Befunde, davon 0 blockierend bestätigt; Ergebnis APPROVED (zwei Teile)
+- Prüfungen: Lint, Typprüfung und Test-Suite grün (127 Dateien, 1409 Tests, 2 Worker)
+- Abweichungen vom Plan: keine am Vertrag; „Move group to space" liest die Space-Liste direkt aus dem Space-Speicher, weil der Vertrag der Leiste keine Space-Liste trägt
 
 ### slice-05-close-and-palette: Gruppe schließen und Befehlspalette
 
