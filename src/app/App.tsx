@@ -78,8 +78,12 @@ import {
   enableClaudeStatusline,
 } from "@/modules/statusbar/lib/claudeStatusline";
 import {
+  type GapTarget,
   MAX_PANES_PER_TAB,
+  type TabBarGroupProps,
   TabSwitcherHud,
+  tabForSpaceSwitch,
+  visibleTabsInSpace,
   useTabs,
   useTabSwipe,
   useTabSwitcher,
@@ -165,6 +169,7 @@ function tmuxTargetForTab(tab: {
 export default function App() {
   const {
     tabs,
+    groups,
     activeId,
     setActiveId,
     allocId,
@@ -172,6 +177,16 @@ export default function App() {
     moveTabToSpace,
     reorderTab,
     reorderTabByGap,
+    createGroupFromTab,
+    addTabToGroup,
+    removeTabFromGroup,
+    ungroup,
+    renameGroup,
+    setGroupColor,
+    toggleGroupCollapsed,
+    moveGroupByGap,
+    moveGroupToSpace,
+    closeGroup,
     mergeTabInto,
     newTabInSpace,
     removeTabsForSpace,
@@ -217,6 +232,8 @@ export default function App() {
   // (e.g. cdInNewTab) read the latest pane state instead of a stale closure.
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
+  const groupsRef = useRef(groups);
+  groupsRef.current = groups;
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
 
@@ -315,6 +332,7 @@ export default function App() {
 
   useSpacePersistence({
     tabs,
+    groups,
     activeId,
     activeSpaceId: activeSpaceId ?? DEFAULT_SPACE_ID,
     enabled: spacesHydrated,
@@ -331,12 +349,14 @@ export default function App() {
       .getState()
       .spaces.find((s) => s.id === activeSpaceId);
     if (meta) void adoptWorkspaceEnv(meta.env);
-    const inSpace = tabsRef.current.filter((t) => t.spaceId === activeSpaceId);
-    if (inSpace.length === 0) return;
-    // Keep the active tab if it already belongs to the newly active space (a
-    // cross-space jump set it explicitly); else fall to the space's last tab.
-    if (inSpace.some((t) => t.id === activeId)) return;
-    setActiveId(inSpace[inSpace.length - 1].id);
+    // Keeps the active tab when a cross-space jump already set it explicitly.
+    const next = tabForSpaceSwitch(
+      { tabs: tabsRef.current, groups: groupsRef.current },
+      activeSpaceId,
+      activeId,
+    );
+    if (next === null || next === activeId) return;
+    setActiveId(next);
   }, [
     activeSpaceId,
     activeId,
@@ -349,10 +369,16 @@ export default function App() {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [tmuxTarget, setTmuxTarget] = useState<TmuxPickerTarget | null>(null);
 
-  const spaceTabs = useMemo(
-    () => tabs.filter((t) => t.spaceId === (activeSpaceId ?? DEFAULT_SPACE_ID)),
-    [tabs, activeSpaceId],
+  const stripSpaceId = activeSpaceId ?? DEFAULT_SPACE_ID;
+  const stripTabs = useMemo(
+    () => visibleTabsInSpace({ tabs, groups }, stripSpaceId, { all: true }),
+    [tabs, groups, stripSpaceId],
   );
+  const visibleTabs = useMemo(
+    () => visibleTabsInSpace({ tabs, groups }, stripSpaceId),
+    [tabs, groups, stripSpaceId],
+  );
+  const [renamingGroupId, setRenamingGroupId] = useState<string | null>(null);
 
   const {
     sidebarRef,
@@ -403,7 +429,7 @@ export default function App() {
 
   const { explorerRoot, inheritedCwdForNewTab } = useWorkspaceCwd(
     activeTab,
-    spaceTabs,
+    stripTabs,
     launchCwd ?? home,
     workspaceEnv,
     activeSpaceId,
@@ -591,6 +617,18 @@ export default function App() {
     [closeTab],
   );
 
+  const disposeGroup = useCallback(
+    (groupId: string) => {
+      for (const t of tabsRef.current) {
+        if (t.groupId !== groupId) continue;
+        editorRefs.current.delete(t.id);
+        previewRefs.current.delete(t.id);
+      }
+      closeGroup(groupId, inheritedCwdForNewTab());
+    },
+    [closeGroup, inheritedCwdForNewTab],
+  );
+
   const {
     pendingCloseTab,
     pendingTerminalCloseTab,
@@ -603,7 +641,63 @@ export default function App() {
     confirmDeleteClose,
     cancelDeleteClose,
     handlePathDeleted,
-  } = useTabCloseGuards({ tabs, disposeTab });
+    pendingGroupClose,
+    requestCloseGroup,
+    confirmGroupClose,
+    cancelGroupClose,
+  } = useTabCloseGuards({ tabs, groups, disposeTab, disposeGroup });
+
+  const handleCreateGroup = useCallback(
+    (tabId: number) => {
+      const groupId = createGroupFromTab(tabId);
+      if (groupId !== null) setRenamingGroupId(groupId);
+    },
+    [createGroupFromTab],
+  );
+
+  const groupProps = useMemo<TabBarGroupProps>(
+    () => ({
+      spaceId: stripSpaceId,
+      groups,
+      renamingGroupId,
+      onRenamingGroupChange: setRenamingGroupId,
+      onCreateGroup: handleCreateGroup,
+      onAddToGroup: (tabId, groupId) =>
+        addTabToGroup(tabId, groupId, inheritedCwdForNewTab()),
+      onRemoveFromGroup: removeTabFromGroup,
+      onUngroup: ungroup,
+      onRenameGroup: renameGroup,
+      onSetGroupColor: setGroupColor,
+      onToggleGroup: (groupId) =>
+        toggleGroupCollapsed(groupId, inheritedCwdForNewTab()),
+      onMoveGroup: moveGroupByGap,
+      onMoveGroupToSpace: (groupId, spaceId) =>
+        moveGroupToSpace(groupId, spaceId, inheritedCwdForNewTab()),
+      onCloseGroup: (groupId) => void requestCloseGroup(groupId),
+    }),
+    [
+      stripSpaceId,
+      groups,
+      renamingGroupId,
+      handleCreateGroup,
+      addTabToGroup,
+      inheritedCwdForNewTab,
+      removeTabFromGroup,
+      ungroup,
+      renameGroup,
+      setGroupColor,
+      toggleGroupCollapsed,
+      moveGroupByGap,
+      moveGroupToSpace,
+      requestCloseGroup,
+    ],
+  );
+
+  const handleReorderByGap = useCallback(
+    (fromId: number, target: GapTarget) =>
+      reorderTabByGap(fromId, target, inheritedCwdForNewTab()),
+    [reorderTabByGap, inheritedCwdForNewTab],
+  );
 
   const { pendingAppClose, confirmAppClose, cancelAppClose } =
     useAppCloseGuard(tabsRef);
@@ -641,9 +735,10 @@ export default function App() {
 
   const getSwitcherOrder = useCallback(() => {
     const space = activeSpaceId ?? DEFAULT_SPACE_ID;
-    const inSpace = tabsRef.current
-      .filter((t) => t.spaceId === space)
-      .map((t) => t.id);
+    const inSpace = visibleTabsInSpace(
+      { tabs: tabsRef.current, groups: groupsRef.current },
+      space,
+    ).map((t) => t.id);
     const present = new Set(inSpace);
     const ordered = mruRef.current.filter((id) => present.has(id));
     for (const id of inSpace) if (!ordered.includes(id)) ordered.push(id);
@@ -1077,7 +1172,7 @@ export default function App() {
   const swipeTab = useCallback(
     (dir: -1 | 1) => {
       if (!trackpadTabSwipe) return; // gesture disabled in settings
-      const ids = spaceTabs.map((t) => t.id);
+      const ids = visibleTabs.map((t) => t.id);
       if (ids.length < 2) return;
       const i = ids.indexOf(activeId);
       if (i < 0) return;
@@ -1085,7 +1180,7 @@ export default function App() {
       if (next === i) return; // already at the edge tab in this direction
       setActiveId(ids[next]); // no swipe animation - the tab strip is the feedback
     },
-    [trackpadTabSwipe, spaceTabs, activeId, setActiveId],
+    [trackpadTabSwipe, visibleTabs, activeId, setActiveId],
   );
   useTabSwipe(appRootRef, swipeTab);
 
@@ -1184,8 +1279,8 @@ export default function App() {
   // as long as the toast stands. Agent sessions and their notifications are
   // keyed by tab, so they have to follow the leaf both ways.
   const handleBreakOutPane = useCallback(
-    (leafId: number, gapIndex: number) => {
-      const undo = breakOutPane(leafId, gapIndex);
+    (leafId: number, target: GapTarget) => {
+      const undo = breakOutPane(leafId, target);
       // Both refusals come from the ground moving under a drag that lasts as
       // long as the user holds the button. The ghost and the insertion
       // indicator have already promised a new tab, so say what happened rather
@@ -1334,12 +1429,12 @@ export default function App() {
 
   const handleReorderTab = useCallback(
     (tabId: number, targetTabId: number, edge: "top" | "bottom") => {
-      if (reorderTab(tabId, targetTabId, edge)) {
+      if (reorderTab(tabId, targetTabId, edge, inheritedCwdForNewTab())) {
         const target = tabsRef.current.find((x) => x.id === targetTabId);
         if (target) useSpaces.getState().setActive(target.spaceId);
       }
     },
-    [reorderTab],
+    [reorderTab, inheritedCwdForNewTab],
   );
 
   const handleNewTabInSpace = useCallback(
@@ -1423,6 +1518,10 @@ export default function App() {
             openSpacesOverview: () => setSwitcherOpen(true),
             newSpace: () => void handleNewSpace(),
             switchSpace: (id) => useSpaces.getState().setActive(id),
+            createGroupFromTab: handleCreateGroup,
+            removeTabFromGroup,
+            toggleGroupCollapsed: (groupId) =>
+              toggleGroupCollapsed(groupId, inheritedCwdForNewTab()),
           })
         : [],
     [
@@ -1447,6 +1546,10 @@ export default function App() {
       askFromSelection,
       activeSpaceId,
       handleNewSpace,
+      handleCreateGroup,
+      removeTabFromGroup,
+      toggleGroupCollapsed,
+      inheritedCwdForNewTab,
     ],
   );
 
@@ -1530,7 +1633,7 @@ export default function App() {
         >
           {!zenMode && (
             <Header
-              tabs={spaceTabs}
+              tabs={stripTabs}
               activeId={activeId}
               onSelect={setActiveId}
               onNew={openNewTab}
@@ -1544,7 +1647,8 @@ export default function App() {
               onClose={handleClose}
               onPin={pinTab}
               onRename={handleRenameTab}
-              onReorder={reorderTabByGap}
+              onReorder={handleReorderByGap}
+              groupProps={groupProps}
               onMergeInto={(fromId, intoId) => {
                 const source = tabsRef.current.find((t) => t.id === fromId);
                 const movedLeaves =
@@ -1741,7 +1845,7 @@ export default function App() {
           ) : null}
 
           {switcherState && (
-            <TabSwitcherHud tabs={spaceTabs} state={switcherState} />
+            <TabSwitcherHud tabs={visibleTabs} state={switcherState} />
           )}
 
           <CommandPalette
@@ -1833,6 +1937,9 @@ export default function App() {
             pendingDeleteTabs={pendingDeleteTabs}
             onCancelDeleteClose={cancelDeleteClose}
             onConfirmDeleteClose={confirmDeleteClose}
+            pendingGroupClose={pendingGroupClose}
+            onCancelGroupClose={cancelGroupClose}
+            onConfirmGroupClose={confirmGroupClose}
             pendingAppClose={pendingAppClose}
             onCancelAppClose={cancelAppClose}
             onConfirmAppClose={confirmAppClose}

@@ -1,3 +1,5 @@
+import type { GapTarget } from "./tabGroups";
+
 /** Marks the scroll container that holds the tab buttons. Both drags hit-test
  *  against it: a tab drag to place the insertion line, a pane drag to decide
  *  that the drop means "break this pane out into a tab here". */
@@ -50,4 +52,56 @@ export function gapIndexAt(strip: Element, clientX: number): number {
     if (clientX < r.left + r.width / 2) return i;
   }
   return els.length;
+}
+
+/** On a group header element; the value is the group id. */
+export const GROUP_HEADER_ATTR = "data-group-header";
+
+/** On a group header element while the group is collapsed. */
+export const GROUP_COLLAPSED_ATTR = "data-group-collapsed";
+
+/** On the tab element of a group member; the value is the group id. */
+export const TAB_GROUP_ATTR = "data-tab-group";
+
+function memberGroupOf(el: HTMLElement | undefined): string | null {
+  return el?.getAttribute(TAB_GROUP_ATTR) ?? null;
+}
+
+/** The insertion gap under `clientX` together with its group context, by the
+ *  same half-width rule as `gapIndexAt` but over headers and tabs alike. With
+ *  `headerDrop`, the inner half of a collapsed header is a target of its own. */
+export function gapTargetAt(
+  strip: Element,
+  clientX: number,
+  opts?: { headerDrop?: boolean },
+): GapTarget {
+  const els = strip.querySelectorAll<HTMLElement>(
+    `[data-tab-id], [${GROUP_HEADER_ATTR}]`,
+  );
+  let index = els.length;
+  for (let i = 0; i < els.length; i++) {
+    const el = els[i];
+    const r = el.getBoundingClientRect();
+    const header = el.getAttribute(GROUP_HEADER_ATTR);
+    if (
+      opts?.headerDrop &&
+      header !== null &&
+      el.hasAttribute(GROUP_COLLAPSED_ATTR) &&
+      clientX >= r.left + r.width / 4 &&
+      clientX < r.left + (r.width * 3) / 4
+    ) {
+      return { index: i, groupId: header, onCollapsedHeader: true };
+    }
+    if (clientX < r.left + r.width / 2) {
+      index = i;
+      break;
+    }
+  }
+  const next = memberGroupOf(els[index]);
+  const prev = els[index - 1];
+  const prevGroup = prev
+    ? (prev.getAttribute(GROUP_HEADER_ATTR) ?? memberGroupOf(prev))
+    : null;
+  const groupId = next !== null && next === prevGroup ? next : null;
+  return { index, groupId, onCollapsedHeader: false };
 }

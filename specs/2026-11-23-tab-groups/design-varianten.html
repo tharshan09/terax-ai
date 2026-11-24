@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tab-Gruppen Varianten</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap">
+<style>
+  :root {
+    --page: oklch(0.115 0.004 228.8);
+    --bg: oklch(0.148 0.004 228.8);
+    --term: oklch(0.135 0.004 228.8);
+    --fg: oklch(0.987 0.002 197.1);
+    --muted: oklch(0.723 0.014 214.4);
+    --border: oklch(1 0 0 / 10%);
+    --chip: oklch(1 0 0 / 7%);
+    --pill-bg: color-mix(in oklch, var(--fg) 7%, transparent);
+    --pill-shadow: 0 1px 2px rgba(0,0,0,0.12), inset 0 0 0 1px color-mix(in oklch, var(--fg) 5%, transparent);
+  }
+  :root[data-theme="light"] {
+    --page: oklch(0.965 0.003 214);
+    --bg: oklch(1 0 0);
+    --term: oklch(0.985 0.002 214);
+    --fg: oklch(0.148 0.004 228.8);
+    --muted: oklch(0.56 0.021 213.5);
+    --border: oklch(0.925 0.005 214.3);
+    --chip: oklch(0.148 0.004 228.8 / 6%);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--page); color: var(--fg);
+    font-family: 'Inter', system-ui, sans-serif; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 48px 24px 64px; display: flex; flex-direction: column; gap: 32px; }
+  header { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+  h1 { margin: 0 0 6px; font-size: 26px; font-weight: 600; letter-spacing: -0.01em; }
+  .lead { margin: 0; font-size: 14px; line-height: 1.5; color: var(--muted); max-width: 680px; }
+  .seg { display: flex; gap: 2px; padding: 2px; border-radius: 9px; background: var(--chip); }
+  .seg button { height: 28px; padding: 0 12px; border-radius: 7px; font-size: 12px; font-weight: 500; background: transparent; color: var(--muted); }
+  .seg button[aria-pressed="true"] { background: var(--bg); color: var(--fg); }
+  button { border: 0; margin: 0; font: inherit; cursor: pointer; outline: none; }
+  button:focus-visible { box-shadow: 0 0 0 2px oklch(0.62 0.17 254 / 60%) !important; }
+
+  section { display: flex; flex-direction: column; gap: 10px; }
+  .vhead { display: flex; align-items: baseline; gap: 10px; }
+  .letter { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; color: var(--muted); }
+  h2 { margin: 0; font-size: 16px; font-weight: 600; }
+  .badge { font-size: 11px; font-weight: 500; padding: 1px 6px; border-radius: 4px; background: var(--chip); color: var(--muted); }
+  .desc { margin: 0; font-size: 13px; line-height: 1.5; color: var(--muted); max-width: 760px; }
+
+  .win { border-radius: 12px; overflow: hidden; border: 1px solid var(--border); background: var(--bg); box-shadow: 0 8px 24px -12px rgba(0,0,0,0.35); }
+  .bar { height: 40px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid var(--border); }
+  .lights { display: flex; gap: 7px; padding: 0 6px 0 4px; }
+  .lights span { width: 12px; height: 12px; border-radius: 50%; }
+  .avatar { width: 20px; height: 20px; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; color: #fff; background: oklch(0.60 0.18 296); flex-shrink: 0; }
+  .sep { width: 1px; height: 100%; background: var(--border); flex-shrink: 0; }
+  .strip { display: flex; align-items: center; gap: 2px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  .strip::-webkit-scrollbar { display: none; }
+  .plus { width: 28px; height: 28px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); }
+
+  .tab, .ghead {
+    height: 28px; display: flex; align-items: center; gap: 6px; padding: 0 8px;
+    border-radius: 8px; font-size: 12px; white-space: nowrap; flex-shrink: 0;
+  }
+  .tab { background: transparent; color: var(--muted); }
+  .tab:hover { color: color-mix(in oklch, var(--fg) 80%, transparent); }
+  .tab.active { color: var(--fg); background: var(--pill-bg); box-shadow: var(--pill-shadow); }
+  .ghead { font-weight: 500; }
+  .group { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .mdot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .count { font-size: 10px; line-height: 16px; padding: 0 4px; border-radius: 4px; font-variant-numeric: tabular-nums; }
+  .spin { animation: spin 0.9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+
+  .term { height: 64px; padding: 12px 16px; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; line-height: 20px; color: var(--muted); background: var(--term); }
+  .term b { font-weight: 400; color: var(--fg); }
+  .cursor { display: inline-block; width: 7px; height: 14px; vertical-align: -2px; background: var(--fg); opacity: 0.7; }
+
+  /* ---- Varianten. --c ist die Gruppenfarbe. ---- */
+  .v-current .group:not(.collapsed) {
+    background-image: linear-gradient(var(--c), var(--c));
+    background-size: calc(100% - 8px) 2px; background-position: center bottom; background-repeat: no-repeat;
+  }
+  .v-current .ghead { background: color-mix(in oklch, var(--c) 14%, transparent); color: color-mix(in oklch, var(--fg) 85%, transparent); }
+  .v-current .count { background: color-mix(in oklch, var(--fg) 8%, transparent); color: var(--muted); }
+
+  .v-fill .group { background: color-mix(in oklch, var(--c) 13%, transparent); border-radius: 10px; }
+  :root[data-theme="light"] .v-fill .group { background: color-mix(in oklch, var(--c) 10%, transparent); }
+  .v-fill .ghead { color: color-mix(in oklch, var(--c) 55%, var(--fg)); }
+  .v-fill .dot { display: none; }
+  .v-fill .count { background: color-mix(in oklch, var(--c) 22%, transparent); color: color-mix(in oklch, var(--c) 60%, var(--fg)); }
+
+  .v-outline .group { box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--c) 55%, transparent); border-radius: 10px; }
+  .v-outline .ghead { color: color-mix(in oklch, var(--c) 55%, var(--fg)); }
+  .v-outline .count { background: color-mix(in oklch, var(--c) 18%, transparent); color: color-mix(in oklch, var(--c) 60%, var(--fg)); }
+
+  .v-dots .strip { gap: 4px; }
+  .v-dots .group { margin: 0 6px; }
+  .v-dots .ghead { color: var(--muted); }
+  .v-dots .count { background: color-mix(in oklch, var(--fg) 8%, transparent); color: var(--muted); }
+
+  .v-label .ghead { background: var(--c); color: oklch(0.16 0.01 240); }
+  .v-label .ghead .name { font-weight: 600; }
+  .v-label .dot { display: none; }
+  .v-label .count { background: oklch(0.16 0.01 240 / 18%); color: oklch(0.16 0.01 240); }
+
+  .v-divider .group { border-left: 1px solid var(--border); border-right: 1px solid var(--border); padding: 0 6px; margin: 0 4px; }
+  .v-divider .ghead { color: color-mix(in oklch, var(--c) 55%, var(--fg)); padding-left: 4px; }
+  .v-divider .ghead .name { font-weight: 600; }
+  .v-divider .dot { display: none; }
+  .v-divider .count { background: color-mix(in oklch, var(--c) 18%, transparent); color: color-mix(in oklch, var(--c) 60%, var(--fg)); }
+
+  /* ---- B-Abwandlungen: alle bauen auf .v-fill auf ---- */
+  /* B1: Kopf als kräftigerer Chip auf der Fläche */
+  .b-chip .ghead { background: color-mix(in oklch, var(--c) 30%, transparent); color: color-mix(in oklch, var(--c) 30%, var(--fg)); }
+  :root[data-theme="light"] .b-chip .ghead { background: color-mix(in oklch, var(--c) 24%, transparent); color: color-mix(in oklch, var(--c) 55%, var(--fg)); }
+  .b-chip .ghead .name { font-weight: 600; }
+  .b-chip .count { background: color-mix(in oklch, var(--c) 30%, transparent); color: var(--fg); }
+
+  /* B2: Kopf voll in Gruppenfarbe */
+  .b-solid .ghead { background: var(--c); color: oklch(0.16 0.01 240); }
+  .b-solid .ghead .name { font-weight: 600; }
+  .b-solid .count { background: oklch(0.16 0.01 240 / 18%); color: oklch(0.16 0.01 240); }
+
+  /* B3: Punkt zurück, Name fett in voller Textfarbe */
+  .b-bold .dot { display: block; width: 9px; height: 9px; }
+  .b-bold .ghead { color: var(--fg); }
+  .b-bold .ghead .name { font-weight: 600; }
+
+  /* B4: wie B1, dazu hebt sich der aktive Tab als Kachel von der Fläche ab */
+  .b-raised .group .tab.active { background: var(--bg); box-shadow: 0 1px 3px rgba(0,0,0,0.25), inset 0 0 0 1px color-mix(in oklch, var(--c) 35%, transparent); }
+  .b-raised .group .tab:not(.active) { color: color-mix(in oklch, var(--fg) 70%, transparent); }
+
+  /* Getönter aktiver Tab in einer Gruppe */
+  .tint .group .tab.active { background: color-mix(in oklch, var(--c) 20%, transparent); box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--c) 35%, transparent); }
+  :root[data-theme="light"] .tint .group .tab.active { background: color-mix(in oklch, var(--c) 15%, transparent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Tab-Gruppen in der Leiste</h1>
+      <p class="lead">Variante B mit deutlicherem Gruppenkopf. Klick auf einen Tab wählt ihn, Klick auf einen Gruppenkopf klappt ein und aus. Klapp auch „Messungen“ ein, um den Kopf allein zu sehen.</p>
+    </div>
+    <div class="seg" role="group" aria-label="Farbschema">
+      <button type="button" id="btn-dark" aria-pressed="true">Dunkel</button>
+      <button type="button" id="btn-light" aria-pressed="false">Hell</button>
+    </div>
+  </header>
+  <div id="variants"></div>
+</div>
+
+<script>
+const BLUE = 'oklch(0.62 0.17 254)';
+const AMBER = 'oklch(0.74 0.16 78)';
+
+const ITEMS = [
+  { kind: 'tab', id: 't1', label: 'zsh', icon: 'term' },
+  { kind: 'group', id: 'g1', name: 'Messungen', color: BLUE, members: [
+    { id: 't2', label: 'bench-api' }, { id: 't3', label: 'profiler' }, { id: 't4', label: 'logs' } ] },
+  { kind: 'tab', id: 't5', label: 'README.md', icon: 'file' },
+  { kind: 'group', id: 'g2', name: 'Agent', color: AMBER, working: true, members: [
+    { id: 't6', label: 'claude' }, { id: 't7', label: 'review' } ] },
+  { kind: 'tab', id: 't8', label: 'terax-ai', icon: 'term' },
+];
+
+const VARIANTS = [
+  { key: 'fill', letter: 'B', title: 'Fläche (wie vorher)', current: true, badge: 'Ausgangspunkt',
+    desc: 'Getönte Fläche, Name in Gruppenfarbe, kein Kopf-Hintergrund. Zum Vergleich.' },
+  { key: 'fill', extra: 'b-chip', letter: 'B1', title: 'Fläche mit kräftigem Kopf-Chip',
+    desc: 'Der Kopf bekommt einen eigenen, dichteren Chip auf der Fläche, der Name wird fett. Kopf und Tabs sind klar getrennt, alles bleibt im Farbton.' },
+  { key: 'fill', extra: 'b-solid', letter: 'B2', title: 'Fläche mit vollem Kopf',
+    desc: 'Der Kopf ist voll in der Gruppenfarbe gefüllt, die Tabs liegen auf der hellen Fläche daneben. Am deutlichsten, eingeklappt bleibt ein farbiges Etikett.' },
+  { key: 'fill', extra: 'b-bold', letter: 'B3', title: 'Fläche mit Punkt und fettem Namen',
+    desc: 'Der Farbpunkt kommt zurück, der Name steht fett in normaler Textfarbe. Deutlicher, ohne mehr Farbe ins Bild zu bringen.' },
+  { key: 'fill', extra: 'b-chip b-raised', letter: 'B4', title: 'B1 plus abgehobener aktiver Tab',
+    desc: 'Wie B1. Zusätzlich hebt sich der aktive Tab als eigene Kachel von der Fläche ab, die übrigen Tabs der Gruppe sind etwas heller. Man sieht sofort, wo man ist.' },
+];
+
+const ICON_TERM = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2"/><path d="M4.5 6.5 6.5 8l-2 1.5M8 10h3.5"/></svg>';
+const ICON_FILE = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M4 1.75h5l3 3v9.5H4z"/><path d="M9 1.75v3h3"/></svg>';
+const ICON_SPIN = '<svg class="spin" width="12" height="12" viewBox="0 0 16 16" fill="none" role="img" aria-label="Agent arbeitet"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-opacity="0.25" stroke-width="2"/><path d="M8 2a6 6 0 0 1 6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+const ICON_PLUS = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9"/></svg>';
+
+// Zustand je Variante: aktiver Tab und Klappzustand der Gruppen.
+const state = VARIANTS.map(() => ({ active: 't3', collapsed: { g1: false, g2: true } }));
+
+function visibleIds(collapsed) {
+  const out = [];
+  for (const it of ITEMS) {
+    if (it.kind === 'tab') out.push(it.id);
+    else if (!collapsed[it.id]) for (const m of it.members) out.push(m.id);
+  }
+  return out;
+}
+
+function tabHtml(vi, t, icon, memberDot) {
+  const active = state[vi].active === t.id;
+  return `<button type="button" class="tab${active ? ' active' : ''}" data-v="${vi}" data-tab="${t.id}">`
+    + (memberDot ? '<span class="mdot" style="background: var(--c)" aria-hidden="true"></span>' : '')
+    + (icon === 'file' ? ICON_FILE : ICON_TERM)
+    + `<span>${t.label}</span></button>`;
+}
+
+function render() {
+  const root = document.getElementById('variants');
+  root.style.display = 'flex';
+  root.style.flexDirection = 'column';
+  root.style.gap = '32px';
+  root.innerHTML = VARIANTS.map((v, vi) => {
+    const st = state[vi];
+    const strip = ITEMS.map((it) => {
+      if (it.kind === 'tab') return tabHtml(vi, it, it.icon, false);
+      const collapsed = !!st.collapsed[it.id];
+      const n = it.members.length;
+      const head = `<button type="button" class="ghead" data-v="${vi}" data-group="${it.id}" aria-expanded="${!collapsed}" title="${it.name} · ${n} Tabs">`
+        + '<span class="dot" style="background: var(--c)" aria-hidden="true"></span>'
+        + `<span class="name">${it.name}</span>`
+        + (collapsed ? `<span class="count">${n}</span>` : '')
+        + (collapsed && it.working ? ICON_SPIN : '')
+        + '</button>';
+      const members = collapsed ? '' : it.members.map((m) => tabHtml(vi, m, 'term', !!v.memberDot)).join('');
+      return `<div class="group${collapsed ? ' collapsed' : ''}" style="--c: ${it.color}">${head}${members}</div>`;
+    }).join('');
+    return `<section class="v-${v.key}${v.extra ? ' ' + v.extra : ''}${v.tint ? ' tint' : ''}">
+      <div class="vhead"><span class="letter">${v.letter}</span><h2>${v.title}</h2>${v.current ? `<span class="badge">${v.badge || 'gebaut'}</span>` : ''}</div>
+      <p class="desc">${v.desc}</p>
+      <div class="win">
+        <div class="bar">
+          <div class="lights" aria-hidden="true"><span style="background:#ff5f57"></span><span style="background:#febc2e"></span><span style="background:#28c840"></span></div>
+          <span class="avatar">D</span>
+          <span class="sep"></span>
+          <div class="strip">${strip}<span class="plus">${ICON_PLUS}</span></div>
+        </div>
+        <div class="term"><div><b>~/projects/terax-ai</b> on main</div><div>❯ <span class="cursor"></span></div></div>
+      </div>
+    </section>`;
+  }).join('');
+}
+
+document.getElementById('variants').addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  const vi = Number(btn.dataset.v);
+  const st = state[vi];
+  if (btn.dataset.tab) {
+    st.active = btn.dataset.tab;
+  } else if (btn.dataset.group) {
+    const g = ITEMS.find((x) => x.id === btn.dataset.group);
+    const wasCollapsed = !!st.collapsed[g.id];
+    const next = { ...st.collapsed, [g.id]: !wasCollapsed };
+    if (!wasCollapsed && g.members.some((m) => m.id === st.active)) {
+      // Wie in der App: rechter sichtbarer Nachbar, sonst linker.
+      const before = visibleIds(st.collapsed);
+      const after = visibleIds(next);
+      const at = before.indexOf(st.active);
+      const right = before.slice(at + 1).find((id) => after.includes(id));
+      const left = before.slice(0, at).reverse().find((id) => after.includes(id));
+      st.active = right || left || st.active;
+    }
+    st.collapsed = next;
+  }
+  render();
+  const again = document.querySelector(`button[data-v="${vi}"][data-${btn.dataset.tab ? 'tab' : 'group'}="${btn.dataset.tab || btn.dataset.group}"]`);
+  if (again) again.focus();
+});
+
+function setTheme(dark) {
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  document.getElementById('btn-dark').setAttribute('aria-pressed', String(dark));
+  document.getElementById('btn-light').setAttribute('aria-pressed', String(!dark));
+}
+document.getElementById('btn-dark').addEventListener('click', () => setTheme(true));
+document.getElementById('btn-light').addEventListener('click', () => setTheme(false));
+
+setTheme(true);
+render();
+</script>
+</body>
+</html>

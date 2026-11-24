@@ -2,10 +2,13 @@ import type { SearchTarget } from "@/modules/header";
 import { MAX_PANES_PER_TAB, type Tab } from "@/modules/tabs";
 import { leafIds } from "@/modules/terminal";
 import {
+  ArrowShrinkIcon,
   Cancel01Icon,
   DashboardSquare01Icon,
   FileEditIcon,
   FileSearchIcon,
+  FolderAddIcon,
+  FolderRemoveIcon,
   Globe02Icon,
   IncognitoIcon,
   KeyboardIcon,
@@ -68,6 +71,9 @@ export type CommandPaletteActionContext = {
   openSpacesOverview: () => void;
   newSpace: () => void;
   switchSpace: (id: string) => void;
+  createGroupFromTab: (tabId: number) => void;
+  removeTabFromGroup: (tabId: number) => void;
+  toggleGroupCollapsed: (groupId: string) => void;
 };
 
 const noop = () => {};
@@ -89,6 +95,7 @@ export function createCommandItems(
       : undefined;
   const closeDisabled =
     onlyOneTab && activePaneCount < 2 ? "Last tab" : undefined;
+  const activeGroupId = activeTab?.groupId;
 
   return [
     {
@@ -234,6 +241,37 @@ export function createCommandItems(
       disabledReason: closeDisabled,
       run: ctx.closeActiveTabOrPane,
     },
+    {
+      id: "tab.group.new",
+      title: "Add tab to new group",
+      group: "Tabs",
+      keywords: ["group", "tab group", "create", "organize"],
+      icon: FolderAddIcon,
+      disabledReason: activeTab ? undefined : "No active tab",
+      run: () => {
+        if (activeTab) ctx.createGroupFromTab(activeTab.id);
+      },
+    },
+    ...(activeTab && activeGroupId
+      ? [
+          {
+            id: "tab.group.remove",
+            title: "Remove tab from group",
+            group: "Tabs" as const,
+            keywords: ["group", "tab group", "ungroup", "remove"],
+            icon: FolderRemoveIcon,
+            run: () => ctx.removeTabFromGroup(activeTab.id),
+          },
+          {
+            id: "tab.group.toggle",
+            title: "Collapse/expand group",
+            group: "Tabs" as const,
+            keywords: ["group", "tab group", "collapse", "expand", "fold"],
+            icon: ArrowShrinkIcon,
+            run: () => ctx.toggleGroupCollapsed(activeGroupId),
+          },
+        ]
+      : []),
     {
       id: "pane.splitRight",
       title: "Split pane right",

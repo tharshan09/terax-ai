@@ -1,4 +1,4 @@
-import type { Tab, TerminalTab } from "@/modules/tabs";
+import type { GapTarget, Tab, TerminalTab } from "@/modules/tabs";
 import type { SearchAddon } from "@xterm/addon-search";
 import {
   memo,
@@ -31,8 +31,8 @@ type Props = {
   ) => void;
   /** A pane dropped in the middle of another one trades places with it. */
   swapPanes: (a: number, b: number) => void;
-  /** A pane dropped on the tab strip becomes a tab of its own at `gapIndex`. */
-  breakOutPane: (sourceLeafId: number, gapIndex: number) => void;
+  /** A pane dropped on the tab strip becomes a tab of its own at `target`. */
+  breakOutPane: (sourceLeafId: number, target: GapTarget) => void;
 };
 
 type Bundle = {

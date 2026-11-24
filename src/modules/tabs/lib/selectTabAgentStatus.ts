@@ -28,3 +28,19 @@ export function selectTabAgentStatus(
   }
   return waiting ? "waiting" : null;
 }
+
+/** A collapsed group's badge: "waiting" wins over "working", the reverse of
+ *  the tab badge, because the header should say whether the user is needed.
+ *  Allocation-free for the same reason as `selectTabAgentStatus`. */
+export function groupAggregateStatus(
+  sessions: Record<number, AgentSession>,
+  leafIds: readonly number[],
+): "working" | "waiting" | null {
+  let working = false;
+  for (const id of leafIds) {
+    const status = sessions[id]?.status;
+    if (status === "waiting") return "waiting";
+    if (status === "working") working = true;
+  }
+  return working ? "working" : null;
+}

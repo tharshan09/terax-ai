@@ -2,7 +2,7 @@ import { Button } from "@/components/ui/button";
 import { WindowControls } from "@/components/WindowControls";
 import { IS_MAC, USE_CUSTOM_WINDOW_CONTROLS } from "@/lib/platform";
 import { NotificationBell } from "@/modules/agents";
-import type { Tab } from "@/modules/tabs";
+import type { GapTarget, Tab, TabBarGroupProps } from "@/modules/tabs";
 import { TabBar } from "@/modules/tabs";
 import { TAB_STRIP_ZONE_ATTR } from "@/modules/tabs/lib/tabStripGap";
 import type { SshHost } from "@/modules/workspace/sshHosts";
@@ -43,8 +43,9 @@ type Props = {
   onPin: (id: number) => void;
   /** Set a terminal tab's custom label; empty string resets to default. */
   onRename: (id: number, title: string) => void;
-  /** Move a dragged tab to a new position (insertion gap index). */
-  onReorder: (fromId: number, toGapIndex: number) => void;
+  /** Move a dragged tab to the insertion gap it was dropped on. */
+  onReorder: (fromId: number, target: GapTarget) => void;
+  groupProps: TabBarGroupProps;
   /** Drop a terminal tab onto another terminal tab to merge it in as a split. */
   onMergeInto?: (fromId: number, intoId: number) => void;
   onOverrideLanguage?: (id: number, lang: string | null) => void;
@@ -76,6 +77,7 @@ export function Header({
   onPin,
   onRename,
   onReorder,
+  groupProps,
   onMergeInto,
   onOverrideLanguage,
   onToggleSidebar,
@@ -203,6 +205,7 @@ export function Header({
           onPin={onPin}
           onRename={onRename}
           onReorder={onReorder}
+          groupProps={groupProps}
           onMergeInto={onMergeInto}
           onOverrideLanguage={onOverrideLanguage}
           compact={compact}

@@ -1,3 +1,4 @@
+import type { GapTarget } from "@/modules/tabs/lib/tabGroups";
 import { create } from "zustand";
 import type { DropEdge } from "./panes";
 
@@ -14,7 +15,7 @@ export type SwapAxis = "horizontal" | "vertical";
  *  new tab at an insertion gap in the tab strip. */
 export type PaneDropTarget =
   | { kind: "pane"; leafId: number; spot: PaneDropSpot; axis?: SwapAxis }
-  | { kind: "newTab"; gapIndex: number };
+  | { kind: "newTab"; gap: GapTarget };
 
 // Drop-target state for pane drag & drop, mirrored into the pane overlays and
 // the tab strip so a drag re-renders only the surface whose highlight changes
@@ -40,7 +41,11 @@ function sameTarget(
   if (a.kind === "pane" && b.kind === "pane")
     return a.leafId === b.leafId && a.spot === b.spot && a.axis === b.axis;
   if (a.kind === "newTab" && b.kind === "newTab")
-    return a.gapIndex === b.gapIndex;
+    return (
+      a.gap.index === b.gap.index &&
+      a.gap.groupId === b.gap.groupId &&
+      a.gap.onCollapsedHeader === b.gap.onCollapsedHeader
+    );
   return false;
 }
 

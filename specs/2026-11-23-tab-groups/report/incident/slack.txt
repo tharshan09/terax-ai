@@ -1,0 +1,2 @@
+tab-groups: Störung, Lauf läuft weiter. End-Review: nach einem Fix und dem Delta-Lauf blieb ein bestaetigter Befund (Dialog-Text bei tmux-gebundenen Terminals); der Resolver hat entschieden
+Bericht: {comment_url}

@@ -1,6 +1,6 @@
 import { LazyStore } from "@tauri-apps/plugin-store";
 import type { WorkspaceEnv } from "@/modules/workspace";
-import type { SerializedTab } from "./serialize";
+import type { SerializedGroup, SerializedTab } from "./serialize";
 import { isSpaceMeta, isSpaceState } from "./validate";
 
 export type SpaceMeta = {
@@ -16,6 +16,8 @@ export type SpaceMeta = {
 
 export type SpaceState = {
   tabs: SerializedTab[];
+  /** Absent == no groups (files from before tab groups). */
+  groups?: SerializedGroup[];
   activeTabIndex: number;
 };
 

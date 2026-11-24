@@ -1,0 +1,38 @@
+{
+  "feature": "tab-groups",
+  "slice": "slice-04-tab-strip",
+  "timestamp": "2026-11-24T00:04:15+00:00",
+  "status": "merged",
+  "implementation": {
+    "commit": "6e02412",
+    "fix_commits": []
+  },
+  "review": {
+    "verdict": "APPROVED (zwei Teile)",
+    "findings": 0,
+    "confirmed_blocking": 0
+  },
+  "deterministic_gate": {
+    "marker_scrub": "PASSED",
+    "lint": "PASSED",
+    "typecheck": "PASSED",
+    "typecheck_after_merge": "PASSED"
+  },
+  "tests": {
+    "suite": "full (no guarantee suite configured)",
+    "result": "PASSED",
+    "summary": "127 Dateien, 1409 Tests, 2 Worker"
+  },
+  "obligations": [],
+  "notes": [
+    "AC 8, 19, 20, 24 Prüfweg QA (Fokus im Namensfeld, Markierung des aktiven Tabs, Farblinie)",
+    "AC 23: die Testumgebung erzwingt die Höchstlänge nicht; geprüft ist nur, dass sie gesetzt ist",
+    "Tooltip und Name für Hilfstechnik am Kopf: Name und Anzahl, ohne Namen nur die Anzahl",
+    "Farbwahl: 8 Punkte mit englischen Farbnamen",
+    "Gruppe in andere Gruppe gezogen: neutrale Marke hinter der Zielgruppe",
+    "jede Tab-Art hat jetzt ein Rechtsklick-Menü",
+    "Kopf reagiert auf Klick, Enter und Leertaste, nicht auf Doppelklick",
+    "Einfüge-Marke trägt ein eigenes Kennzeichen für Tests"
+  ],
+  "merge_commit": "934291f"
+}

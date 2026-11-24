@@ -956,24 +956,32 @@ export function setLeafTmuxBinding(leafId: number, session: string): void {
   if (s && !s.disposed) s.tmuxSession = session;
 }
 
-export async function leafHasForegroundProcess(
+export type ForegroundCheck = "running" | "idle" | "failed";
+
+export async function leafForegroundCheck(
   leafId: number,
-): Promise<boolean> {
+): Promise<ForegroundCheck> {
   const s = sessions.get(leafId);
-  if (!s?.pty || s.shellExited) return false;
+  if (!s?.pty || s.shellExited) return "idle";
   try {
     const result = await invoke<boolean>("pty_has_foreground_process", {
       id: s.pty.id,
     });
-    return result;
+    return result ? "running" : "idle";
   } catch (e) {
     console.error(
       "[terax] pty_has_foreground_process failed for leaf",
       leafId,
       e,
     );
-    return false;
+    return "failed";
   }
+}
+
+export async function leafHasForegroundProcess(
+  leafId: number,
+): Promise<boolean> {
+  return (await leafForegroundCheck(leafId)) === "running";
 }
 
 export function disposeSession(leafId: number): void {

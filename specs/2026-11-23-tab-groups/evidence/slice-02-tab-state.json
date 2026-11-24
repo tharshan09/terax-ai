@@ -1,0 +1,36 @@
+{
+  "feature": "tab-groups",
+  "slice": "slice-02-tab-state",
+  "timestamp": "2026-11-24T00:03:05+00:00",
+  "status": "merged",
+  "implementation": {
+    "commit": "800b20c",
+    "fix_commits": []
+  },
+  "review": {
+    "verdict": "APPROVED (zwei Teile)",
+    "findings": 0,
+    "confirmed_blocking": 0
+  },
+  "deterministic_gate": {
+    "marker_scrub": "PASSED",
+    "lint": "PASSED",
+    "typecheck": "PASSED",
+    "typecheck_after_merge": "PASSED"
+  },
+  "tests": {
+    "suite": "full (no guarantee suite configured)",
+    "result": "PASSED",
+    "summary": "125 Dateien, 1419 Tests, 2 Worker"
+  },
+  "obligations": [],
+  "notes": [
+    "AC 17 Prüfweg QA",
+    "Space-Überblick: ein dort umsortierter Tab übernimmt Space und Gruppe des Ziel-Tabs, auch über Spaces hinweg",
+    "Pane auf eingeklappten Kopf: der neue Tab wird nicht aktiv",
+    "Gruppe in anderen Space: liefert die Nachfolger-Regel neues Terminal, entsteht es auch, wenn im Herkunfts-Space noch eingeklappte Tabs stehen",
+    "closeGroup und createGroupFromTab nutzen flushSync wie das Pane-Ausbrechen",
+    "Nebenbefund am Bestand (nicht geändert): closeTab, closeActivePane und removeTabsForSpace beenden Sessions über Variablen, die nur in der Aktualisierungs-Funktion gesetzt werden; läuft diese nicht sofort, bleiben Sessions offen. Im Hook-Test bei closeGroup beobachtet, für closeTab nicht nachgewiesen"
+  ],
+  "merge_commit": "d715658"
+}

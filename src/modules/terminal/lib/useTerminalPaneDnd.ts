@@ -1,6 +1,7 @@
 import { getResizeZoomFactor } from "@/lib/zoomResizeFix";
+import type { GapTarget } from "@/modules/tabs/lib/tabGroups";
 import {
-  gapIndexAt,
+  gapTargetAt,
   stripHasTab,
   tabStripAt,
 } from "@/modules/tabs/lib/tabStripGap";
@@ -101,8 +102,8 @@ type Handlers = {
    *  keeps the sizes an insert would rebuild. */
   onSwap: (sourceLeafId: number, targetLeafId: number) => void;
   /** Drop landed on the tab strip: the leaf becomes a tab of its own at
-   *  `gapIndex` (the same insertion gaps a tab reorder uses). */
-  onBreakOut: (sourceLeafId: number, gapIndex: number) => void;
+   *  `target` (the same insertion gaps a tab reorder uses). */
+  onBreakOut: (sourceLeafId: number, target: GapTarget) => void;
 };
 
 /** Pointer-based pane drag & drop (HTML5 DnD is intercepted by Tauri). A drag
@@ -206,7 +207,7 @@ export function useTerminalPaneDnd({ onMove, onSwap, onBreakOut }: Handlers) {
           // would only be refused.
           target =
             strip && sourceLayer !== null && stripHasTab(strip, sourceLayer)
-              ? { kind: "newTab", gapIndex: gapIndexAt(strip, ev.clientX) }
+              ? { kind: "newTab", gap: gapTargetAt(strip, ev.clientX) }
               : null;
         }
         store.setTarget(target);
@@ -223,7 +224,7 @@ export function useTerminalPaneDnd({ onMove, onSwap, onBreakOut }: Handlers) {
         setDragging(false);
         if (!active || !commit || !target) return;
         if (target.kind !== "pane") {
-          onBreakOutRef.current(sourceLeafId, target.gapIndex);
+          onBreakOutRef.current(sourceLeafId, target.gap);
         } else if (target.spot === "center") {
           onSwapRef.current(sourceLeafId, target.leafId);
         } else {

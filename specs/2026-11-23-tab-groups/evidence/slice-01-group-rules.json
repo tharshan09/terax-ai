@@ -1,0 +1,36 @@
+{
+  "feature": "tab-groups",
+  "slice": "slice-01-group-rules",
+  "timestamp": "2026-11-23T23:39:55+00:00",
+  "status": "merged",
+  "implementation": {
+    "commit": "1f56669",
+    "fix_commits": []
+  },
+  "review": {
+    "verdict": "APPROVED",
+    "findings": 0,
+    "confirmed_blocking": 0
+  },
+  "deterministic_gate": {
+    "marker_scrub": "PASSED",
+    "lint": "PASSED",
+    "typecheck": "PASSED",
+    "typecheck_after_merge": "PASSED"
+  },
+  "tests": {
+    "suite": "full (no guarantee suite configured)",
+    "result": "PASSED",
+    "summary": "124 Dateien, 1381 Tests, 2 Worker; erster Lauf unter Speicherdruck rot, Wiederholung ohne Code-Änderung grün"
+  },
+  "obligations": [],
+  "notes": [
+    "AC 2 Prüfweg QA",
+    "gapTargetAt auf eingeklapptem Kopf liefert als Index die Lücke vor dem Kopf",
+    "applyGapTarget: Verweis auf eingeklappte Gruppe ohne Kopf-Ziel oder auf Gruppe eines anderen Space legt den Tab lose ab",
+    "moveGroupBlock in eigene Gruppe: unverändert; in fremde Gruppe: direkt dahinter",
+    "normalizeGroupName kürzt auf 32 UTF-16-Einheiten und verwirft ein halbes Zeichenpaar",
+    "activeAfterHide liefert für unbekannte Gruppe neues Terminal"
+  ],
+  "merge_commit": "adce15d"
+}
