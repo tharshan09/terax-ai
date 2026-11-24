@@ -1,4 +1,4 @@
-# Offene Themen (Stand 2026-11-22; Abschnitte 1 bis 4 vom 2026-09-06)
+# Offene Themen (Stand 2026-11-24; Abschnitte 1 bis 4 vom 2026-09-06)
 
 `main` = `e41418a`, Version 0.8.6. Upstream-Sync Runde 3 und beide Follow-up-Runden sind
 abgeschlossen. Diese Datei ist der Einstieg für die nächste Session.
@@ -10,6 +10,12 @@ Als Nächstes steht Welle C an (Pane von Tab A nach Tab B).
 ---
 
 ## 0. Reihenfolge ab 27.10.2026 (vom User so bestätigt)
+
+**Stand 24.11.2026: Tab-Gruppen (F2) gemergt.** PR #96, `main` = `691b6b4`, Version bleibt 0.8.7. Release aus genau diesem Commit gebaut; der Tausch von `/Applications/Terax.app` läuft über `~/.terax/app-backup/install-terax.sh` (wartet auf Cmd+Q, Sicherung der alten App `98ee853` als Zip, Log `install.log`). Nächste Session: im About-Tab prüfen, dass `691b6b4` läuft.
+
+- **Geprüft:** alle Prüfungen auf dem Mac grün (1504 Frontend-Tests), die 30 Punkte aus `specs/2026-11-23-tab-groups/mac-handover.md` in einer Debug-Instanz über die Test-Bridge ohne Fund. Das Aussehen (voller Kopf in Gruppenfarbe, Mitglieder auf getönter Fläche) hat der User aus sechs Varianten gewählt, `specs/2026-11-23-tab-groups/design-varianten.html`.
+- **Folgepunkte:** angefangenes Umbenennen einer Gruppe geht bei einem Space-Wechsel verloren; „Close group“ fragt bei tmux-gebundenen Terminals immer (genauer nur mit Rust-Änderung). Weitere Grenzen in PR #96.
+- **Panes-Welle C** ändert dieselben Dateien (`TabBar.tsx`, `useTabs.ts`) und muss jetzt auf den Gruppen-Stand aufsetzen.
 
 **Stand 22.11.2026: SSH-Remote-Workflow gemergt und installiert.** Drei Wellen aus `specs/2026-11-20-ssh-remote-workflow/`: PR #93 Upload von Bildern und Dateien in SSH-Terminals, PR #94 Port-Freigaben, PR #95 Browser-Ansicht eines Chrome auf dem Server. `main` = `98ee853`, Version bleibt 0.8.7, am 22.11. aus genau diesem Commit installiert (alte App als Zip in `~/.terax/app-backup/`).
 
@@ -44,8 +50,7 @@ Als Nächstes steht Welle C an (Pane von Tab A nach Tab B).
      stehen? (Heute folgt er immer, die Suche ist auf diese Wurzel begrenzt.)
    - **F3** Theme und Hintergrund pro Space (privat vs. Arbeit). Heute global, ein Space
      hat nur eine Akzentfarbe.
-   - **F2** Tab-Gruppen, ein- und ausklappbar. Groß, berührt dieselben Stellen wie die
-     Panes-Wellen C bis E, deshalb zuletzt.
+   - ~~**F2** Tab-Gruppen, ein- und ausklappbar.~~ Erledigt mit PR #96 (24.11.2026).
    - **F4** tmux und Claude allgemein verbessern: Der User sammelt konkrete Punkte.
 
 ---
