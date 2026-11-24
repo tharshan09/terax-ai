@@ -1,4 +1,7 @@
 import { basename, titleFromUrl } from "@/lib/utils";
+import { usePreferencesStore } from "@/modules/settings/preferences";
+import { SPACE_COLORS } from "@/modules/spaces/lib/spaceColor";
+import { useSpaces } from "@/modules/spaces/lib/useSpaces";
 import {
   collectManagedSessions,
   newManagedSession,
@@ -7,12 +10,15 @@ import {
 import {
   attachSubtree,
   countLeaves,
+  type DropEdge,
   findLeafNode,
   hasLeaf,
   leafIds,
   moveLeaf,
   nextLeafId,
+  type PaneNode,
   removeLeaf,
+  type SplitDir,
   sameLayout,
   setLeafCwd as setLeafCwdInTree,
   setLeafTmuxSession as setLeafTmuxSessionInTree,
@@ -20,24 +26,42 @@ import {
   splitLeaf,
   swapLeaves,
   withLeavesFrom,
-  type DropEdge,
-  type PaneNode,
-  type SplitDir,
 } from "@/modules/terminal/lib/panes";
-import { useSpaces } from "@/modules/spaces/lib/useSpaces";
 import { killTmuxSession } from "@/modules/terminal/lib/tmux";
 import { disposeSession } from "@/modules/terminal/lib/useTerminalSession";
-import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
   currentWorkspaceEnv,
   LOCAL_WORKSPACE,
   type WorkspaceEnv,
 } from "@/modules/workspace";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  type SetStateAction,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { flushSync } from "react-dom";
 import { applyDocView } from "./applyDocView";
 import { resolveFileTabOpen } from "./resolveFileTabOpen";
-import type { GapTarget, TabGroup } from "./tabGroups";
+import {
+  activeAfterHide,
+  applyGapTarget,
+  assignToGroup,
+  dissolveGroup,
+  type GapTarget,
+  type GroupState,
+  groupFromTab,
+  moveGroupAcrossSpaces,
+  moveGroupBlock,
+  newGroupId,
+  normalizeGroupName,
+  normalizeGroups,
+  removeFromGroup,
+  type TabGroup,
+  tabForSpaceSwitch,
+  visibleTabsInSpace,
+} from "./tabGroups";
 
 // Matches the renderer slot pool size — over this we'd evict an active leaf.
 export const MAX_PANES_PER_TAB = 4;
@@ -223,16 +247,45 @@ function gapIndexOf(target: number | GapTarget): number {
   return typeof target === "number" ? target : target.index;
 }
 
-// Returns the tab at position `idx` within the given space, or undefined when
-// idx is out of range or no matching space tab exists.
+// Returns the tab at position `idx` among the visible tabs of the given space,
+// or undefined when idx is out of range.
 export function pickTabBySpaceIndex(
   tabs: Tab[],
   idx: number,
   spaceId: string,
-  _groups?: TabGroup[],
+  groups: TabGroup[] = NO_GROUPS,
 ): Tab | undefined {
-  const pool = tabs.filter((t) => t.spaceId === spaceId);
-  return pool[idx];
+  return visibleTabsInSpace({ tabs, groups }, spaceId)[idx];
+}
+
+/** The one place a single tab changes space; it leaves its group on the way. */
+export function changeTabSpace(
+  tabs: Tab[],
+  tabId: number,
+  targetSpaceId: string,
+): Tab[] {
+  const tab = tabs.find((t) => t.id === tabId);
+  if (!tab || tab.spaceId === targetSpaceId) return tabs;
+  const { groupId: _left, ...rest } = tab;
+  const moved = { ...rest, spaceId: targetSpaceId } as Tab;
+  return tabs.map((t) => (t.id === tabId ? moved : t));
+}
+
+function withGroupId(tab: Tab, groupId: string | undefined): Tab {
+  if (tab.groupId === groupId) return tab;
+  const { groupId: _old, ...rest } = tab;
+  return (groupId === undefined ? rest : { ...rest, groupId }) as Tab;
+}
+
+/** Places `tab` behind the last tab of its space, or at the end. */
+function appendToSpace(tabs: Tab[], tab: Tab): Tab[] {
+  const inSpace = visibleTabsInSpace({ tabs, groups: NO_GROUPS }, tab.spaceId, {
+    all: true,
+  });
+  const last = inSpace[inSpace.length - 1];
+  if (!last) return [...tabs, tab];
+  const at = tabs.indexOf(last) + 1;
+  return [...tabs.slice(0, at), tab, ...tabs.slice(at)];
 }
 
 // Next active after close, scoped to the closing tab's space. null = last tab of
@@ -326,7 +379,11 @@ export function insertTabAtSpaceGap(
   tab: Tab,
   gapIndex: number,
 ): Tab[] {
-  const sameSpace = tabs.filter((t) => t.spaceId === tab.spaceId);
+  const sameSpace = visibleTabsInSpace(
+    { tabs, groups: NO_GROUPS },
+    tab.spaceId,
+    { all: true },
+  );
   const at = Math.max(0, Math.min(gapIndex, sameSpace.length));
   const past = at === sameSpace.length;
   const anchor = past ? sameSpace[at - 1] : sameSpace[at];
@@ -353,13 +410,15 @@ export function canBreakOutPane(tabs: Tab[], leafId: number): boolean {
  *  so its PTY and any managed tmux session travel with it: the caller must NOT
  *  dispose it and must NOT reap its managed session (`removedManagedSessions`
  *  compares one tab's tree and would report the still-live pane as gone).
+ *  A `GapTarget` is placed with `groups`, so the new tab joins the gap's group;
+ *  a bare number counts plain tabs of the space.
  *  Null when the leaf is unknown or already alone in its tab. */
 export function breakOutPaneFromTabs(
   tabs: Tab[],
   leafId: number,
   newTabId: number,
   target: number | GapTarget,
-  _groups?: TabGroup[],
+  groups?: TabGroup[],
 ): { tabs: Tab[]; undo: BrokenOutPane } | null {
   const src = tabs.find(
     (t) => t.kind === "terminal" && hasLeaf(t.paneTree, leafId),
@@ -396,8 +455,12 @@ export function breakOutPaneFromTabs(
         )
       : t,
   );
+  const placed =
+    groups && typeof target !== "number"
+      ? applyGapTarget({ tabs: without, groups }, born, target).tabs
+      : insertTabAtSpaceGap(without, born, gapIndexOf(target));
   return {
-    tabs: insertTabAtSpaceGap(without, born, gapIndexOf(target)),
+    tabs: placed,
     undo: {
       tabId: newTabId,
       leafId,
@@ -437,7 +500,9 @@ export function undoBreakOut(
   // while the toast stood, and the born tab is all its own space has left.
   if (
     src.spaceId !== born.spaceId &&
-    tabs.filter((t) => t.spaceId === born.spaceId).length === 1
+    visibleTabsInSpace({ tabs, groups: NO_GROUPS }, born.spaceId, {
+      all: true,
+    }).length === 1
   )
     return "invalid";
   const restored = withLeavesFrom(undo.prevTree, [src.paneTree, born.paneTree]);
@@ -468,38 +533,51 @@ function visibleSpaceId(fallback: string): string {
   return useSpaces.getState().activeId ?? fallback;
 }
 
+/** Next active tab after `closingId` leaves its space: the nearest visible tab
+ *  to the left, else to the right; with none visible, the nearest tab of a
+ *  collapsed group (left first), whose group then expands. Null only when the
+ *  tab is the last of its space. */
 export function nextActiveInSpace(
   tabs: Tab[],
   closingId: number,
-  _groups?: TabGroup[],
+  groups: TabGroup[] = NO_GROUPS,
 ): number | null {
   const closing = tabs.find((t) => t.id === closingId);
   if (!closing) return null;
-  const sameSpace = tabs.filter((t) => t.spaceId === closing.spaceId);
+  const state = { tabs, groups };
+  const sameSpace = visibleTabsInSpace(state, closing.spaceId, { all: true });
   if (sameSpace.length <= 1) return null;
+  const shown = new Set(
+    visibleTabsInSpace(state, closing.spaceId).map((t) => t.id),
+  );
   const idx = sameSpace.findIndex((t) => t.id === closingId);
-  return (sameSpace[idx - 1] ?? sameSpace[idx + 1]).id;
+  for (let i = idx - 1; i >= 0; i--) {
+    if (shown.has(sameSpace[i].id)) return sameSpace[i].id;
+  }
+  for (let i = idx + 1; i < sameSpace.length; i++) {
+    if (shown.has(sameSpace[i].id)) return sameSpace[i].id;
+  }
+  for (let d = 1; ; d++) {
+    const near = sameSpace[idx - d] ?? sameSpace[idx + d];
+    if (near) return near.id;
+  }
 }
 
 // Gap index is relative to the space's own strip, including the dragged tab.
+// Tabs that carry a `groupId` need their `groups`, or they come back loose.
 export function reorderTabsByGap(
   tabs: Tab[],
   fromId: number,
   toGapIndex: number,
+  groups: TabGroup[] = NO_GROUPS,
 ): Tab[] {
   const moved = tabs.find((t) => t.id === fromId);
   if (!moved) return tabs;
-  const sameSpace = tabs.filter((t) => t.spaceId === moved.spaceId);
-  const spaceFrom = sameSpace.findIndex((t) => t.id === fromId);
-  let spaceTarget = toGapIndex > spaceFrom ? toGapIndex - 1 : toGapIndex;
-  spaceTarget = Math.max(0, Math.min(spaceTarget, sameSpace.length - 1));
-  if (spaceTarget === spaceFrom) return tabs;
-  const anchor = sameSpace[spaceTarget];
-  const next = tabs.filter((t) => t.id !== fromId);
-  const anchorIdx = next.findIndex((t) => t.id === anchor.id);
-  const insertIdx = spaceTarget > spaceFrom ? anchorIdx + 1 : anchorIdx;
-  next.splice(insertIdx, 0, moved);
-  return next;
+  return applyGapTarget({ tabs, groups }, moved, {
+    index: toGapIndex,
+    groupId: null,
+    onCollapsedHeader: false,
+  }).tabs;
 }
 
 function coldTerminalTab(
@@ -530,15 +608,22 @@ export function planSpaceRemoval(
   fallbackSpaceId: string,
   fallbackCwd: string | undefined,
   allocId: () => number,
+  groups: TabGroup[] = NO_GROUPS,
 ): { tabs: Tab[]; disposeLeafIds: number[]; activeId: number } | null {
-  const removed = tabs.filter((t) => t.spaceId === spaceId);
+  const removed = visibleTabsInSpace({ tabs, groups }, spaceId, { all: true });
   if (removed.length === 0) return null;
   const disposeLeafIds = removed
     .filter((t) => t.kind === "terminal")
     .flatMap((t) => leafIds((t as TerminalTab).paneTree));
-  let next = tabs.filter((t) => t.spaceId !== spaceId);
+  const gone = new Set(removed.map((t) => t.id));
+  let next = tabs.filter((t) => !gone.has(t.id));
   let activeId = currentActiveId;
-  if (!next.some((t) => t.spaceId === fallbackSpaceId)) {
+  const pick = tabForSpaceSwitch(
+    { tabs: next, groups },
+    fallbackSpaceId,
+    currentActiveId,
+  );
+  if (pick === null) {
     const tabId = allocId();
     next = [
       ...next,
@@ -546,40 +631,158 @@ export function planSpaceRemoval(
     ];
     activeId = tabId;
   } else if (!next.some((t) => t.id === currentActiveId)) {
-    const inFallback = next.filter((t) => t.spaceId === fallbackSpaceId);
-    activeId = inFallback[inFallback.length - 1].id;
+    activeId = pick;
   }
   return { tabs: next, disposeLeafIds, activeId };
 }
 
+/** Tabs, group metadata and the active tab live in one state, so every update
+ *  sees the collapse state that belongs to its tabs. */
+type TabsState = GroupState & { activeId: number };
+
+/** The active tab never sits in a collapsed group: its group expands. */
+function expandActiveGroup(state: GroupState, activeId: number): TabGroup[] {
+  const active = state.tabs.find((t) => t.id === activeId);
+  if (active?.groupId === undefined) return state.groups;
+  const group = state.groups.find((g) => g.id === active.groupId);
+  if (!group?.collapsed) return state.groups;
+  return state.groups.map((g) =>
+    g === group ? { ...g, collapsed: false } : g,
+  );
+}
+
+/** Every state change ends here: groups normalized, then the expand rule. */
+function settle(prev: TabsState, next: TabsState): TabsState {
+  if (next === prev) return prev;
+  const ungrouped =
+    next.groups.length === 0 && next.tabs.every((t) => t.groupId === undefined);
+  const norm = ungrouped ? next : normalizeGroups(next);
+  const groups = expandActiveGroup(norm, next.activeId);
+  if (
+    norm.tabs === prev.tabs &&
+    groups === prev.groups &&
+    next.activeId === prev.activeId
+  )
+    return prev;
+  return { tabs: norm.tabs, groups, activeId: next.activeId };
+}
+
+function via(fn: (s: TabsState) => TabsState) {
+  return (prev: TabsState) => settle(prev, fn(prev));
+}
+
+function onTabs(fn: (tabs: Tab[]) => Tab[]) {
+  return via((s) => {
+    const tabs = fn(s.tabs);
+    return tabs === s.tabs ? s : { ...s, tabs };
+  });
+}
+
+function activate(value: SetStateAction<number>) {
+  return via((s) => {
+    const id = typeof value === "function" ? value(s.activeId) : value;
+    return id === s.activeId ? s : { ...s, activeId: id };
+  });
+}
+
+/** A new terminal tab whose ids are minted once, however often the updater
+ *  that places it runs. */
+function lazyTerminal(alloc: () => number, cwd: string | undefined) {
+  let minted: { tabId: number; leafId: number; tmuxSession?: string } | null =
+    null;
+  return (spaceId: string, cold: boolean): TerminalTab => {
+    minted ??= {
+      tabId: alloc(),
+      leafId: alloc(),
+      tmuxSession: managedSessionForNewLocalTab(),
+    };
+    const { tabId, leafId, tmuxSession } = minted;
+    return {
+      id: tabId,
+      kind: "terminal",
+      spaceId,
+      ...(cold && { cold: true }),
+      title: cwd ? basename(cwd) : "shell",
+      cwd,
+      tmuxSession,
+      ...(tmuxSession && { workspace: LOCAL_WORKSPACE }),
+      paneTree: { kind: "leaf", id: leafId, cwd, tmuxSession },
+      activeLeafId: leafId,
+    };
+  };
+}
+
+/** When the active tab just landed in a collapsed group (collapsing it, or a
+ *  drop onto its header), the active tab moves on before the expand rule could
+ *  undo the collapse; a new terminal when nothing else is visible. */
+function keepActiveVisible(
+  s: TabsState,
+  spawn: (spaceId: string, cold: boolean) => TerminalTab,
+): TabsState {
+  const active = s.tabs.find((t) => t.id === s.activeId);
+  if (active?.groupId === undefined) return s;
+  const group = s.groups.find((g) => g.id === active.groupId);
+  if (!group?.collapsed) return s;
+  const pick = activeAfterHide(s, group.id);
+  if (pick !== "new-terminal") return { ...s, activeId: pick };
+  const fresh = spawn(group.spaceId, false);
+  return { ...s, tabs: appendToSpace(s.tabs, fresh), activeId: fresh.id };
+}
+
+function terminalLeaves(tabs: Tab[]): {
+  leaves: number[];
+  managed: string[];
+} {
+  const terms = tabs.filter((t): t is TerminalTab => t.kind === "terminal");
+  return {
+    leaves: terms.flatMap((t) => leafIds(t.paneTree)),
+    managed: terms.flatMap((t) => collectManagedSessions(t.paneTree)),
+  };
+}
+
+function validGroupColor(color: number): number {
+  return Number.isInteger(color) && color >= 0 && color < SPACE_COLORS.length
+    ? color
+    : 0;
+}
+
 export function useTabs(initial?: Partial<TerminalTab>) {
-  const [tabs, setTabs] = useState<Tab[]>(() => {
+  const [state, setState] = useState<TabsState>(() => {
     const tabId = 1;
     const leafId = 2;
-    return [
-      {
-        id: tabId,
-        kind: "terminal",
-        spaceId: DEFAULT_SPACE_ID,
-        cold: true,
-        title: initial?.title ?? "shell",
-        cwd: initial?.cwd,
-        paneTree: { kind: "leaf", id: leafId, cwd: initial?.cwd },
-        activeLeafId: leafId,
-      },
-    ];
+    return {
+      tabs: [
+        {
+          id: tabId,
+          kind: "terminal",
+          spaceId: DEFAULT_SPACE_ID,
+          cold: true,
+          title: initial?.title ?? "shell",
+          cwd: initial?.cwd,
+          paneTree: { kind: "leaf", id: leafId, cwd: initial?.cwd },
+          activeLeafId: leafId,
+        },
+      ],
+      groups: NO_GROUPS,
+      activeId: tabId,
+    };
   });
-  const [activeId, setActiveId] = useState(1);
+  const { tabs, groups, activeId } = state;
   // Gates warming until boot resolves the restore, so no shell spawns before it.
   const [booted, setBooted] = useState(false);
   const nextIdRef = useRef(3);
   const activeSpaceIdRef = useRef(DEFAULT_SPACE_ID);
   const tabsRef = useRef(tabs);
+  const groupsRef = useRef(groups);
   const activeIdRef = useRef(activeId);
 
   useEffect(() => {
     tabsRef.current = tabs;
   }, [tabs]);
+
+  useEffect(() => {
+    groupsRef.current = groups;
+  }, [groups]);
 
   useEffect(() => {
     activeIdRef.current = activeId;
@@ -588,12 +791,19 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   // Activating a cold tab warms it: one choke point for every activation path.
   useEffect(() => {
     if (!booted) return;
-    setTabs((curr) => {
-      const t = curr.find((x) => x.id === activeId);
-      if (!t?.cold) return curr;
-      return curr.map((x) => (x.id === activeId ? { ...x, cold: false } : x));
-    });
+    setState(
+      onTabs((curr) => {
+        const t = curr.find((x) => x.id === activeId);
+        if (!t?.cold) return curr;
+        return curr.map((x) => (x.id === activeId ? { ...x, cold: false } : x));
+      }),
+    );
   }, [activeId, booted]);
+
+  const setActiveId = useCallback(
+    (value: SetStateAction<number>) => setState(activate(value)),
+    [],
+  );
 
   const allocId = useCallback(() => nextIdRef.current++, []);
 
@@ -604,10 +814,15 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   }, []);
 
   const replaceTabs = useCallback(
-    (next: Tab[], nextActiveId: number, _groups?: TabGroup[]) => {
+    (next: Tab[], nextActiveId: number, nextGroups?: TabGroup[]) => {
       if (next.length === 0) return;
-      setTabs(next);
-      setActiveId(nextActiveId);
+      setState(
+        via(() => ({
+          tabs: next,
+          groups: nextGroups ?? NO_GROUPS,
+          activeId: nextActiveId,
+        })),
+      );
     },
     [],
   );
@@ -618,21 +833,23 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     const tabId = nextIdRef.current++;
     const leafId = nextIdRef.current++;
     const tmuxSession = managedSessionForNewLocalTab();
-    setTabs((curr) => [
-      ...curr,
-      {
-        id: tabId,
-        kind: "terminal",
-        spaceId,
-        cold: true,
-        title: cwd ? basename(cwd) : "shell",
-        cwd,
-        tmuxSession,
-        ...(tmuxSession && { workspace: LOCAL_WORKSPACE }),
-        paneTree: { kind: "leaf", id: leafId, cwd, tmuxSession },
-        activeLeafId: leafId,
-      },
-    ]);
+    setState(
+      onTabs((curr) => [
+        ...curr,
+        {
+          id: tabId,
+          kind: "terminal",
+          spaceId,
+          cold: true,
+          title: cwd ? basename(cwd) : "shell",
+          cwd,
+          tmuxSession,
+          ...(tmuxSession && { workspace: LOCAL_WORKSPACE }),
+          paneTree: { kind: "leaf", id: leafId, cwd, tmuxSession },
+          activeLeafId: leafId,
+        },
+      ]),
+    );
     return tabId;
   }, []);
 
@@ -643,25 +860,28 @@ export function useTabs(initial?: Partial<TerminalTab>) {
       const curr = tabsRef.current;
       const tab = curr.find((t) => t.id === tabId);
       if (!tab || tab.spaceId === targetSpaceId) return false;
-      setTabs((prev) =>
-        prev.map((t) =>
-          t.id === tabId ? ({ ...t, spaceId: targetSpaceId } as Tab) : t,
-        ),
+      setState(
+        via((s) => {
+          const next = changeTabSpace(s.tabs, tabId, targetSpaceId);
+          if (next === s.tabs) return s;
+          const fallback =
+            s.activeId === tabId
+              ? nextActiveInSpace(s.tabs, tabId, s.groups)
+              : null;
+          return { ...s, tabs: next, activeId: fallback ?? s.activeId };
+        }),
       );
-      if (activeIdRef.current !== tabId) return false;
-      const fallback = nextActiveInSpace(curr, tabId);
-      if (fallback !== null) {
-        setActiveId(fallback);
-        return false;
-      }
-      return true;
+      return (
+        activeIdRef.current === tabId &&
+        nextActiveInSpace(curr, tabId, groupsRef.current) === null
+      );
     },
     [],
   );
 
-  // Positions a tab next to a target tab, inheriting the target's space. Returns
-  // true when the active tab crossed into the target space and emptied its
-  // source, so the caller should follow it.
+  // Positions a tab next to a target tab, inheriting the target's space and
+  // group. Returns true when the active tab crossed into the target space and
+  // emptied its source, so the caller should follow it.
   const reorderTab = useCallback(
     (tabId: number, targetTabId: number, edge: "top" | "bottom"): boolean => {
       if (tabId === targetTabId) return false;
@@ -670,24 +890,32 @@ export function useTabs(initial?: Partial<TerminalTab>) {
       const target = curr.find((t) => t.id === targetTabId);
       if (!moved || !target) return false;
       const crossSpace = moved.spaceId !== target.spaceId;
-      setTabs((prev) => {
-        const without = prev.filter((t) => t.id !== tabId);
-        let idx = without.findIndex((t) => t.id === targetTabId);
-        if (idx < 0) return prev;
-        if (edge === "bottom") idx += 1;
-        const next: Tab = crossSpace
-          ? ({ ...moved, spaceId: target.spaceId } as Tab)
-          : moved;
-        without.splice(idx, 0, next);
-        return without;
-      });
-      if (!crossSpace || activeIdRef.current !== tabId) return false;
-      const fallback = nextActiveInSpace(curr, tabId);
-      if (fallback !== null) {
-        setActiveId(fallback);
-        return false;
-      }
-      return true;
+      setState(
+        via((s) => {
+          const from = s.tabs.find((t) => t.id === tabId);
+          const onto = s.tabs.find((t) => t.id === targetTabId);
+          if (!from || !onto) return s;
+          const spaced = changeTabSpace(s.tabs, tabId, onto.spaceId);
+          const placed = withGroupId(
+            spaced.find((t) => t.id === tabId) as Tab,
+            onto.groupId,
+          );
+          const without = spaced.filter((t) => t.id !== tabId);
+          let idx = without.findIndex((t) => t.id === targetTabId);
+          if (edge === "bottom") idx += 1;
+          without.splice(idx, 0, placed);
+          const fallback =
+            from.spaceId !== onto.spaceId && s.activeId === tabId
+              ? nextActiveInSpace(s.tabs, tabId, s.groups)
+              : null;
+          return { ...s, tabs: without, activeId: fallback ?? s.activeId };
+        }),
+      );
+      return (
+        crossSpace &&
+        activeIdRef.current === tabId &&
+        nextActiveInSpace(curr, tabId, groupsRef.current) === null
+      );
     },
     [],
   );
@@ -696,25 +924,33 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     (spaceId: string, fallbackSpaceId: string, fallbackCwd?: string) => {
       let toDispose: number[] = [];
       let managed: string[] = [];
-      setTabs((curr) => {
-        const plan = planSpaceRemoval(
-          curr,
-          activeIdRef.current,
-          spaceId,
-          fallbackSpaceId,
-          fallbackCwd,
-          () => nextIdRef.current++,
-        );
-        if (!plan) return curr;
-        toDispose = plan.disposeLeafIds;
-        managed = curr
-          .filter((t) => !plan.tabs.some((p) => p.id === t.id))
-          .flatMap((t) =>
-            t.kind === "terminal" ? collectManagedSessions(t.paneTree) : [],
+      const minted: number[] = [];
+      setState(
+        via((s) => {
+          let k = 0;
+          const alloc = () => {
+            if (k === minted.length) minted.push(nextIdRef.current++);
+            return minted[k++];
+          };
+          const plan = planSpaceRemoval(
+            s.tabs,
+            s.activeId,
+            spaceId,
+            fallbackSpaceId,
+            fallbackCwd,
+            alloc,
+            s.groups,
           );
-        setActiveId(plan.activeId);
-        return plan.tabs;
-      });
+          if (!plan) return s;
+          toDispose = plan.disposeLeafIds;
+          managed = s.tabs
+            .filter((t) => !plan.tabs.some((p) => p.id === t.id))
+            .flatMap((t) =>
+              t.kind === "terminal" ? collectManagedSessions(t.paneTree) : [],
+            );
+          return { ...s, tabs: plan.tabs, activeId: plan.activeId };
+        }),
+      );
       for (const lid of toDispose) disposeSession(lid);
       killManagedSessions(managed);
     },
@@ -725,46 +961,50 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     const tabId = nextIdRef.current++;
     const leafId = nextIdRef.current++;
     const tmuxSession = managedSessionForNewLocalTab();
-    setTabs((t) => [
-      ...t,
-      {
-        id: tabId,
-        kind: "terminal",
-        spaceId: activeSpaceIdRef.current,
-        title: "shell",
-        cwd,
-        // The tab-level binding marks it as a real tmux tab so the session
-        // switcher / picker treat it like one (the label stays cwd-derived:
-        // labelFor skips managed names). The leaf drives the spawn. The pinned
-        // local workspace keeps a later ambient-env switch from spawning the
-        // managed session on a remote host.
-        tmuxSession,
-        ...(tmuxSession && { workspace: LOCAL_WORKSPACE }),
-        paneTree: { kind: "leaf", id: leafId, cwd, tmuxSession },
-        activeLeafId: leafId,
-      },
-    ]);
-    setActiveId(tabId);
+    setState(
+      onTabs((t) => [
+        ...t,
+        {
+          id: tabId,
+          kind: "terminal",
+          spaceId: activeSpaceIdRef.current,
+          title: "shell",
+          cwd,
+          // The tab-level binding marks it as a real tmux tab so the session
+          // switcher / picker treat it like one (the label stays cwd-derived:
+          // labelFor skips managed names). The leaf drives the spawn. The pinned
+          // local workspace keeps a later ambient-env switch from spawning the
+          // managed session on a remote host.
+          tmuxSession,
+          ...(tmuxSession && { workspace: LOCAL_WORKSPACE }),
+          paneTree: { kind: "leaf", id: leafId, cwd, tmuxSession },
+          activeLeafId: leafId,
+        },
+      ]),
+    );
+    setState(activate(tabId));
     return tabId;
   }, []);
 
   const newBlockTab = useCallback((cwd?: string) => {
     const tabId = nextIdRef.current++;
     const leafId = nextIdRef.current++;
-    setTabs((t) => [
-      ...t,
-      {
-        id: tabId,
-        kind: "terminal",
-        spaceId: activeSpaceIdRef.current,
-        title: "blocks",
-        cwd,
-        paneTree: { kind: "leaf", id: leafId, cwd },
-        activeLeafId: leafId,
-        blocks: true,
-      },
-    ]);
-    setActiveId(tabId);
+    setState(
+      onTabs((t) => [
+        ...t,
+        {
+          id: tabId,
+          kind: "terminal",
+          spaceId: activeSpaceIdRef.current,
+          title: "blocks",
+          cwd,
+          paneTree: { kind: "leaf", id: leafId, cwd },
+          activeLeafId: leafId,
+          blocks: true,
+        },
+      ]),
+    );
+    setState(activate(tabId));
     return tabId;
   }, []);
 
@@ -779,21 +1019,23 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     const tabId = nextIdRef.current++;
     const leafId = nextIdRef.current++;
     const workspace: WorkspaceEnv = { kind: "ssh", host };
-    setTabs((t) => [
-      ...t,
-      {
-        id: tabId,
-        kind: "terminal",
-        spaceId: activeSpaceIdRef.current,
-        title: host,
-        cwd: "~",
-        paneTree: { kind: "leaf", id: leafId, cwd: "~" },
-        activeLeafId: leafId,
-        workspace,
-        pickTmuxOnConnect: true,
-      },
-    ]);
-    setActiveId(tabId);
+    setState(
+      onTabs((t) => [
+        ...t,
+        {
+          id: tabId,
+          kind: "terminal",
+          spaceId: activeSpaceIdRef.current,
+          title: host,
+          cwd: "~",
+          paneTree: { kind: "leaf", id: leafId, cwd: "~" },
+          activeLeafId: leafId,
+          workspace,
+          pickTmuxOnConnect: true,
+        },
+      ]),
+    );
+    setState(activate(tabId));
     return tabId;
   }, []);
 
@@ -807,21 +1049,23 @@ export function useTabs(initial?: Partial<TerminalTab>) {
       const tabId = nextIdRef.current++;
       const leafId = nextIdRef.current++;
       const cwd = workspace.kind === "ssh" ? "~" : undefined;
-      setTabs((t) => [
-        ...t,
-        {
-          id: tabId,
-          kind: "terminal",
-          spaceId: activeSpaceIdRef.current,
-          title: session,
-          cwd,
-          paneTree: { kind: "leaf", id: leafId, cwd, tmuxSession: session },
-          activeLeafId: leafId,
-          workspace,
-          tmuxSession: session,
-        },
-      ]);
-      setActiveId(tabId);
+      setState(
+        onTabs((t) => [
+          ...t,
+          {
+            id: tabId,
+            kind: "terminal",
+            spaceId: activeSpaceIdRef.current,
+            title: session,
+            cwd,
+            paneTree: { kind: "leaf", id: leafId, cwd, tmuxSession: session },
+            activeLeafId: leafId,
+            workspace,
+            tmuxSession: session,
+          },
+        ]),
+      );
+      setState(activate(tabId));
       return tabId;
     },
     [],
@@ -835,27 +1079,31 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     // session may hold live work (a Claude agent), and surviving detached is
     // exactly the restart-safe promise. Managed sessions are killed only on an
     // explicit tab/pane close, not on a view switch.
-    setTabs((ts) =>
-      ts.map((t) => {
-        if (t.id !== tabId || t.kind !== "terminal") return t;
-        const paneTree = setLeafTmuxSessionInTree(
-          t.paneTree,
-          t.activeLeafId,
-          session,
-        );
-        return { ...t, tmuxSession: session, title: session, paneTree };
-      }),
+    setState(
+      onTabs((ts) =>
+        ts.map((t) => {
+          if (t.id !== tabId || t.kind !== "terminal") return t;
+          const paneTree = setLeafTmuxSessionInTree(
+            t.paneTree,
+            t.activeLeafId,
+            session,
+          );
+          return { ...t, tmuxSession: session, title: session, paneTree };
+        }),
+      ),
     );
   }, []);
 
   // Clears the one-shot "pop the tmux picker on connect" flag for an SSH tab
   // once it has fired, so a later `cd` does not re-open the picker.
   const consumeTmuxPick = useCallback((tabId: number) => {
-    setTabs((ts) =>
-      ts.map((t) =>
-        t.id === tabId && t.kind === "terminal" && t.pickTmuxOnConnect
-          ? { ...t, pickTmuxOnConnect: false }
-          : t,
+    setState(
+      onTabs((ts) =>
+        ts.map((t) =>
+          t.id === tabId && t.kind === "terminal" && t.pickTmuxOnConnect
+            ? { ...t, pickTmuxOnConnect: false }
+            : t,
+        ),
       ),
     );
   }, []);
@@ -870,39 +1118,43 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   const newAgentTab = useCallback((cwd: string | undefined, title: string) => {
     const tabId = nextIdRef.current++;
     const leafId = nextIdRef.current++;
-    setTabs((t) => [
-      ...t,
-      {
-        id: tabId,
-        kind: "terminal",
-        spaceId: activeSpaceIdRef.current,
-        title,
-        cwd,
-        paneTree: { kind: "leaf", id: leafId, cwd },
-        activeLeafId: leafId,
-      },
-    ]);
-    setActiveId(tabId);
+    setState(
+      onTabs((t) => [
+        ...t,
+        {
+          id: tabId,
+          kind: "terminal",
+          spaceId: activeSpaceIdRef.current,
+          title,
+          cwd,
+          paneTree: { kind: "leaf", id: leafId, cwd },
+          activeLeafId: leafId,
+        },
+      ]),
+    );
+    setState(activate(tabId));
     return { tabId, leafId };
   }, []);
 
   const newPrivateTab = useCallback((cwd?: string) => {
     const tabId = nextIdRef.current++;
     const leafId = nextIdRef.current++;
-    setTabs((t) => [
-      ...t,
-      {
-        id: tabId,
-        kind: "terminal",
-        spaceId: activeSpaceIdRef.current,
-        title: "private",
-        cwd,
-        paneTree: { kind: "leaf", id: leafId, cwd },
-        activeLeafId: leafId,
-        private: true,
-      },
-    ]);
-    setActiveId(tabId);
+    setState(
+      onTabs((t) => [
+        ...t,
+        {
+          id: tabId,
+          kind: "terminal",
+          spaceId: activeSpaceIdRef.current,
+          title: "private",
+          cwd,
+          paneTree: { kind: "leaf", id: leafId, cwd },
+          activeLeafId: leafId,
+          private: true,
+        },
+      ]),
+    );
+    setState(activate(tabId));
     return tabId;
   }, []);
 
@@ -918,17 +1170,45 @@ export function useTabs(initial?: Partial<TerminalTab>) {
    */
   const openFileTab = useCallback((path: string, pin = true) => {
     let targetId: number | null = null;
-    setTabs((curr) => {
-      const res = resolveFileTabOpen(curr, path, pin, {
-        makeId: () => nextIdRef.current++,
-        spaceId: activeSpaceIdRef.current,
-        workspace: currentWorkspaceEnv(),
-        title: basename(path),
-      });
-      targetId = res.targetId;
-      return res.tabs;
-    });
-    if (targetId !== null) setActiveId(targetId);
+    let madeId: number | null = null;
+    const spaceId = activeSpaceIdRef.current;
+    const workspace = currentWorkspaceEnv();
+    setState(
+      via((s) => {
+        const res = resolveFileTabOpen(s.tabs, path, pin, {
+          makeId: () => {
+            madeId ??= nextIdRef.current++;
+            return madeId;
+          },
+          spaceId,
+          workspace,
+          title: basename(path),
+        });
+        targetId = res.targetId;
+        // A replaced preview's slot counts as inside its group, so the new
+        // preview is placed right behind that group, loose.
+        const slot = s.tabs.findIndex((t) => t.kind === "editor" && t.preview);
+        const old = s.tabs[slot];
+        const replaced =
+          old !== undefined &&
+          old.groupId !== undefined &&
+          old.id !== res.targetId &&
+          res.tabs[slot]?.id === res.targetId &&
+          res.tabs[slot].spaceId === old.spaceId;
+        const placed = replaced
+          ? removeFromGroup(
+              {
+                tabs: res.tabs.map((t, i) =>
+                  i === slot ? withGroupId(t, old.groupId) : t,
+                ),
+                groups: s.groups,
+              },
+              res.targetId,
+            )
+          : { tabs: res.tabs, groups: s.groups };
+        return { ...placed, activeId: res.targetId };
+      }),
+    );
     return targetId as number | null;
   }, []);
 
@@ -937,9 +1217,11 @@ export function useTabs(initial?: Partial<TerminalTab>) {
    * tab title in the tab bar. Dirty edits also auto-promote (see `updateTab`).
    */
   const pinTab = useCallback((id: number) => {
-    setTabs((curr) =>
-      curr.map((t) =>
-        t.id === id && t.kind === "editor" ? { ...t, preview: false } : t,
+    setState(
+      onTabs((curr) =>
+        curr.map((t) =>
+          t.id === id && t.kind === "editor" ? { ...t, preview: false } : t,
+        ),
       ),
     );
   }, []);
@@ -953,9 +1235,92 @@ export function useTabs(initial?: Partial<TerminalTab>) {
       isNewFile: boolean;
     }) => {
       let targetId: number | null = null;
-      setTabs((curr) => {
+      setState(
+        onTabs((curr) => {
+          const existing = curr.find(
+            (t) => t.kind === "ai-diff" && t.approvalId === input.approvalId,
+          );
+          if (existing) {
+            targetId = existing.id;
+            return curr;
+          }
+          const id = nextIdRef.current++;
+          targetId = id;
+          const title = `${basename(input.path)} (AI diff)`;
+          return [
+            ...curr,
+            {
+              id,
+              kind: "ai-diff",
+              spaceId: activeSpaceIdRef.current,
+              title,
+              path: input.path,
+              originalContent: input.originalContent,
+              proposedContent: input.proposedContent,
+              approvalId: input.approvalId,
+              status: "pending",
+              isNewFile: input.isNewFile,
+            },
+          ];
+        }),
+      );
+      if (targetId !== null) setState(activate(targetId));
+      return targetId as number | null;
+    },
+    [],
+  );
+
+  const closeAiDiffTab = useCallback((approvalId: string) => {
+    setState(
+      via((s) => {
+        const target = s.tabs.find(
+          (t) => t.kind === "ai-diff" && t.approvalId === approvalId,
+        );
+        if (!target) return s;
+        const fallback = nextActiveInSpace(s.tabs, target.id, s.groups);
+        if (fallback === null) {
+          return {
+            ...s,
+            tabs: s.tabs.map((t) =>
+              t.kind === "ai-diff" && t.approvalId === approvalId
+                ? { ...t, status: "approved" as AiDiffStatus }
+                : t,
+            ),
+          };
+        }
+        return {
+          ...s,
+          tabs: s.tabs.filter((t) => t.id !== target.id),
+          activeId: s.activeId === target.id ? fallback : s.activeId,
+        };
+      }),
+    );
+  }, []);
+
+  const newPreviewTab = useCallback((url: string) => {
+    const id = nextIdRef.current++;
+    setState(
+      onTabs((t) => [
+        ...t,
+        {
+          id,
+          kind: "preview",
+          spaceId: activeSpaceIdRef.current,
+          title: titleFromUrl(url),
+          url,
+        },
+      ]),
+    );
+    setState(activate(id));
+    return id;
+  }, []);
+
+  const newMarkdownTab = useCallback((path: string) => {
+    let targetId: number | null = null;
+    setState(
+      onTabs((curr) => {
         const existing = curr.find(
-          (t) => t.kind === "ai-diff" && t.approvalId === input.approvalId,
+          (t) => t.kind === "markdown" && t.path === path,
         );
         if (existing) {
           targetId = existing.id;
@@ -963,128 +1328,62 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         }
         const id = nextIdRef.current++;
         targetId = id;
-        const title = `${basename(input.path)} (AI diff)`;
         return [
           ...curr,
           {
             id,
-            kind: "ai-diff",
+            kind: "markdown",
             spaceId: activeSpaceIdRef.current,
-            title,
-            path: input.path,
-            originalContent: input.originalContent,
-            proposedContent: input.proposedContent,
-            approvalId: input.approvalId,
-            status: "pending",
-            isNewFile: input.isNewFile,
+            title: basename(path),
+            path,
+            workspace: currentWorkspaceEnv(),
           },
         ];
-      });
-      if (targetId !== null) setActiveId(targetId);
-      return targetId as number | null;
-    },
-    [],
-  );
-
-  const closeAiDiffTab = useCallback((approvalId: string) => {
-    setTabs((curr) => {
-      const target = curr.find(
-        (t) => t.kind === "ai-diff" && t.approvalId === approvalId,
-      );
-      if (!target) return curr;
-      const fallback = nextActiveInSpace(curr, target.id);
-      if (fallback === null) {
-        return curr.map((t) =>
-          t.kind === "ai-diff" && t.approvalId === approvalId
-            ? { ...t, status: "approved" as AiDiffStatus }
-            : t,
-        );
-      }
-      const next = curr.filter((t) => t.id !== target.id);
-      setActiveId((active) => (target.id === active ? fallback : active));
-      return next;
-    });
-  }, []);
-
-  const newPreviewTab = useCallback((url: string) => {
-    const id = nextIdRef.current++;
-    setTabs((t) => [
-      ...t,
-      {
-        id,
-        kind: "preview",
-        spaceId: activeSpaceIdRef.current,
-        title: titleFromUrl(url),
-        url,
-      },
-    ]);
-    setActiveId(id);
-    return id;
-  }, []);
-
-  const newMarkdownTab = useCallback((path: string) => {
-    let targetId: number | null = null;
-    setTabs((curr) => {
-      const existing = curr.find(
-        (t) => t.kind === "markdown" && t.path === path,
-      );
-      if (existing) {
-        targetId = existing.id;
-        return curr;
-      }
-      const id = nextIdRef.current++;
-      targetId = id;
-      return [
-        ...curr,
-        {
-          id,
-          kind: "markdown",
-          spaceId: activeSpaceIdRef.current,
-          title: basename(path),
-          path,
-          workspace: currentWorkspaceEnv(),
-        },
-      ];
-    });
-    if (targetId !== null) setActiveId(targetId);
+      }),
+    );
+    if (targetId !== null) setState(activate(targetId));
     return targetId;
   }, []);
 
   const newHtmlTab = useCallback((path: string) => {
     let targetId: number | null = null;
-    setTabs((curr) => {
-      const existing = curr.find((t) => t.kind === "html" && t.path === path);
-      if (existing) {
-        targetId = existing.id;
-        return curr;
-      }
-      const id = nextIdRef.current++;
-      targetId = id;
-      return [
-        ...curr,
-        {
-          id,
-          kind: "html",
-          spaceId: activeSpaceIdRef.current,
-          title: basename(path),
-          path,
-          workspace: currentWorkspaceEnv(),
-        },
-      ];
-    });
-    if (targetId !== null) setActiveId(targetId);
+    setState(
+      onTabs((curr) => {
+        const existing = curr.find((t) => t.kind === "html" && t.path === path);
+        if (existing) {
+          targetId = existing.id;
+          return curr;
+        }
+        const id = nextIdRef.current++;
+        targetId = id;
+        return [
+          ...curr,
+          {
+            id,
+            kind: "html",
+            spaceId: activeSpaceIdRef.current,
+            title: basename(path),
+            path,
+            workspace: currentWorkspaceEnv(),
+          },
+        ];
+      }),
+    );
+    if (targetId !== null) setState(activate(targetId));
     return targetId;
   }, []);
 
   const setOverrideLanguage = useCallback((id: number, lang: string | null) => {
-    setTabs((curr) =>
-      curr.map((t) => {
-        if (t.id !== id || t.kind !== "editor") return t;
-        return {
-          ...t,
-          overrideLanguage: lang,
-        };
-      }),
+    setState(
+      onTabs((curr) =>
+        curr.map((t) => {
+          if (t.id !== id || t.kind !== "editor") return t;
+          return {
+            ...t,
+            overrideLanguage: lang,
+          };
+        }),
+      ),
     );
   }, []);
 
@@ -1092,7 +1391,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   // editor in place, keeping the same tab id. The toggle UI is shared, so the
   // target kind is derived from the file extension rather than passed in.
   const setDocView = useCallback((id: number, mode: "rendered" | "raw") => {
-    setTabs((curr) => curr.map((t) => applyDocView(t, id, mode)));
+    setState(onTabs((curr) => curr.map((t) => applyDocView(t, id, mode))));
   }, []);
 
   const openGitDiffTab = useCallback(
@@ -1122,8 +1421,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
             : t,
         );
         tabsRef.current = nextTabs;
-        setTabs(nextTabs);
-        setActiveId(existing.id);
+        setState(via((s) => ({ ...s, tabs: nextTabs, activeId: existing.id })));
         return existing.id;
       }
 
@@ -1142,8 +1440,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         } satisfies GitDiffTab,
       ];
       tabsRef.current = nextTabs;
-      setTabs(nextTabs);
-      setActiveId(id);
+      setState(via((s) => ({ ...s, tabs: nextTabs, activeId: id })));
       return id;
     },
     [],
@@ -1161,8 +1458,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
           t.id === existing.id ? { ...t, title } : t,
         );
         tabsRef.current = nextTabs;
-        setTabs(nextTabs);
-        setActiveId(existing.id);
+        setState(via((s) => ({ ...s, tabs: nextTabs, activeId: existing.id })));
         return existing.id;
       }
       const id = nextIdRef.current++;
@@ -1177,8 +1473,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         } satisfies GitHistoryTab,
       ];
       tabsRef.current = nextTabs;
-      setTabs(nextTabs);
-      setActiveId(id);
+      setState(via((s) => ({ ...s, tabs: nextTabs, activeId: id })));
       return id;
     },
     [],
@@ -1214,8 +1509,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
             : t,
         );
         tabsRef.current = nextTabs;
-        setTabs(nextTabs);
-        setActiveId(existing.id);
+        setState(via((s) => ({ ...s, tabs: nextTabs, activeId: existing.id })));
         return existing.id;
       }
       const id = nextIdRef.current++;
@@ -1235,8 +1529,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         } satisfies GitCommitFileDiffTab,
       ];
       tabsRef.current = nextTabs;
-      setTabs(nextTabs);
-      setActiveId(id);
+      setState(via((s) => ({ ...s, tabs: nextTabs, activeId: id })));
       return id;
     },
     [],
@@ -1245,80 +1538,89 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   const closeTab = useCallback((id: number) => {
     let toDispose: number[] = [];
     let managed: string[] = [];
-    setTabs((curr) => {
-      const fallback = nextActiveInSpace(curr, id);
-      if (fallback === null) return curr;
-      const target = curr.find((t) => t.id === id);
-      if (target?.kind === "terminal") {
-        toDispose = leafIds(target.paneTree);
-        managed = collectManagedSessions(target.paneTree);
-      }
-      const next = curr.filter((t) => t.id !== id);
-      setActiveId((active) => (id === active ? fallback : active));
-      return next;
-    });
+    setState(
+      via((s) => {
+        const fallback = nextActiveInSpace(s.tabs, id, s.groups);
+        if (fallback === null) return s;
+        const target = s.tabs.find((t) => t.id === id);
+        if (target?.kind === "terminal") {
+          toDispose = leafIds(target.paneTree);
+          managed = collectManagedSessions(target.paneTree);
+        }
+        return {
+          ...s,
+          tabs: s.tabs.filter((t) => t.id !== id),
+          activeId: s.activeId === id ? fallback : s.activeId,
+        };
+      }),
+    );
     for (const lid of toDispose) disposeSession(lid);
     killManagedSessions(managed);
   }, []);
 
   const updateTab = useCallback((id: number, patch: TabPatch) => {
-    setTabs((t) =>
-      t.map((x) => {
-        if (x.id !== id) return x;
-        if (x.kind === "terminal") {
+    setState(
+      onTabs((t) =>
+        t.map((x) => {
+          if (x.id !== id) return x;
+          if (x.kind === "terminal") {
+            return {
+              ...x,
+              ...(patch.title !== undefined && { title: patch.title }),
+              ...(patch.cwd !== undefined && { cwd: patch.cwd }),
+              ...(patch.customTitle !== undefined && {
+                customTitle:
+                  patch.customTitle === "" ? undefined : patch.customTitle,
+              }),
+            };
+          }
+          if (x.kind === "preview") {
+            return {
+              ...x,
+              ...(patch.title !== undefined && { title: patch.title }),
+              ...(patch.url !== undefined && {
+                url: patch.url,
+                title: patch.title ?? titleFromUrl(patch.url),
+              }),
+            };
+          }
+          if (x.kind === "markdown" || x.kind === "html") {
+            return {
+              ...x,
+              ...(patch.title !== undefined && { title: patch.title }),
+              ...(patch.path !== undefined && { path: patch.path }),
+            };
+          }
+          // editor tab: auto-promote from preview the moment the file becomes dirty.
+          const autoPin =
+            patch.dirty === true && (x as EditorTab).preview
+              ? { preview: false }
+              : {};
           return {
             ...x,
+            ...autoPin,
             ...(patch.title !== undefined && { title: patch.title }),
-            ...(patch.cwd !== undefined && { cwd: patch.cwd }),
-            ...(patch.customTitle !== undefined && {
-              customTitle:
-                patch.customTitle === "" ? undefined : patch.customTitle,
-            }),
-          };
-        }
-        if (x.kind === "preview") {
-          return {
-            ...x,
-            ...(patch.title !== undefined && { title: patch.title }),
-            ...(patch.url !== undefined && {
-              url: patch.url,
-              title: patch.title ?? titleFromUrl(patch.url),
-            }),
-          };
-        }
-        if (x.kind === "markdown" || x.kind === "html") {
-          return {
-            ...x,
-            ...(patch.title !== undefined && { title: patch.title }),
+            ...(patch.dirty !== undefined && { dirty: patch.dirty }),
             ...(patch.path !== undefined && { path: patch.path }),
+            ...(patch.overrideLanguage !== undefined && {
+              overrideLanguage: patch.overrideLanguage,
+            }),
           };
-        }
-        // editor tab: auto-promote from preview the moment the file becomes dirty.
-        const autoPin =
-          patch.dirty === true && (x as EditorTab).preview
-            ? { preview: false }
-            : {};
-        return {
-          ...x,
-          ...autoPin,
-          ...(patch.title !== undefined && { title: patch.title }),
-          ...(patch.dirty !== undefined && { dirty: patch.dirty }),
-          ...(patch.path !== undefined && { path: patch.path }),
-          ...(patch.overrideLanguage !== undefined && {
-            overrideLanguage: patch.overrideLanguage,
-          }),
-        };
-      }),
+        }),
+      ),
     );
   }, []);
 
-  const selectByIndex = useCallback(
-    (idx: number, spaceId?: string) => {
-      const t = spaceId ? pickTabBySpaceIndex(tabs, idx, spaceId) : tabs[idx];
-      if (t) setActiveId(t.id);
-    },
-    [tabs],
-  );
+  const selectByIndex = useCallback((idx: number, spaceId?: string) => {
+    setState(
+      via((s) => {
+        const t = spaceId
+          ? pickTabBySpaceIndex(s.tabs, idx, spaceId, s.groups)
+          : s.tabs[idx];
+        return t ? { ...s, activeId: t.id } : s;
+      }),
+    );
+  }, []);
 
   /** Update a leaf's cwd; mirror to the tab's `cwd` when the leaf is active.
    * Bails out without setTabs when nothing actually changed — shell integration
@@ -1326,40 +1628,46 @@ export function useTabs(initial?: Partial<TerminalTab>) {
    * keystroke rate. Always-setTabs there cascades a paneTree re-render across
    * every open tab. */
   const setLeafCwd = useCallback((leafId: number, cwd: string) => {
-    setTabs((curr) => {
-      let changed = false;
-      const next = curr.map((t) => {
-        if (t.kind !== "terminal" || !hasLeaf(t.paneTree, leafId)) return t;
-        const paneTree = setLeafCwdInTree(t.paneTree, leafId, cwd);
-        const isActive = t.activeLeafId === leafId;
-        const cwdChanged = isActive && t.cwd !== cwd;
-        if (paneTree === t.paneTree && !cwdChanged) return t;
-        changed = true;
-        return { ...t, paneTree, ...(cwdChanged && { cwd }) };
-      });
-      return changed ? next : curr;
-    });
-  }, []);
-
-  const focusPane = useCallback((tabId: number, leafId: number) => {
-    setTabs((curr) =>
-      curr.map((t) => {
-        if (t.id !== tabId || t.kind !== "terminal") return t;
-        if (!hasLeaf(t.paneTree, leafId)) return t;
-        if (t.activeLeafId === leafId) return t;
-        return syncTabToLeaf(t, leafId);
+    setState(
+      onTabs((curr) => {
+        let changed = false;
+        const next = curr.map((t) => {
+          if (t.kind !== "terminal" || !hasLeaf(t.paneTree, leafId)) return t;
+          const paneTree = setLeafCwdInTree(t.paneTree, leafId, cwd);
+          const isActive = t.activeLeafId === leafId;
+          const cwdChanged = isActive && t.cwd !== cwd;
+          if (paneTree === t.paneTree && !cwdChanged) return t;
+          changed = true;
+          return { ...t, paneTree, ...(cwdChanged && { cwd }) };
+        });
+        return changed ? next : curr;
       }),
     );
   }, []);
 
+  const focusPane = useCallback((tabId: number, leafId: number) => {
+    setState(
+      onTabs((curr) =>
+        curr.map((t) => {
+          if (t.id !== tabId || t.kind !== "terminal") return t;
+          if (!hasLeaf(t.paneTree, leafId)) return t;
+          if (t.activeLeafId === leafId) return t;
+          return syncTabToLeaf(t, leafId);
+        }),
+      ),
+    );
+  }, []);
+
   const focusNextPaneInTab = useCallback((tabId: number, delta: 1 | -1) => {
-    setTabs((curr) =>
-      curr.map((t) => {
-        if (t.id !== tabId || t.kind !== "terminal") return t;
-        const next = nextLeafId(t.paneTree, t.activeLeafId, delta);
-        if (next === t.activeLeafId) return t;
-        return syncTabToLeaf(t, next);
-      }),
+    setState(
+      onTabs((curr) =>
+        curr.map((t) => {
+          if (t.id !== tabId || t.kind !== "terminal") return t;
+          const next = nextLeafId(t.paneTree, t.activeLeafId, delta);
+          if (next === t.activeLeafId) return t;
+          return syncTabToLeaf(t, next);
+        }),
+      ),
     );
   }, []);
 
@@ -1367,23 +1675,25 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   const splitActivePane = useCallback(
     (tabId: number, dir: SplitDir): number | null => {
       let newLeafId: number | null = null;
-      setTabs((curr) =>
-        curr.map((t) => {
-          if (t.id !== tabId || t.kind !== "terminal" || t.blocks) return t;
-          if (leafIds(t.paneTree).length >= MAX_PANES_PER_TAB) return t;
-          const splitId = nextIdRef.current++;
-          const leafId = nextIdRef.current++;
-          newLeafId = leafId;
-          const paneTree = splitLeaf(
-            t.paneTree,
-            t.activeLeafId,
-            splitId,
-            leafId,
-            dir,
-            t.cwd,
-          );
-          return { ...t, paneTree, activeLeafId: leafId };
-        }),
+      setState(
+        onTabs((curr) =>
+          curr.map((t) => {
+            if (t.id !== tabId || t.kind !== "terminal" || t.blocks) return t;
+            if (leafIds(t.paneTree).length >= MAX_PANES_PER_TAB) return t;
+            const splitId = nextIdRef.current++;
+            const leafId = nextIdRef.current++;
+            newLeafId = leafId;
+            const paneTree = splitLeaf(
+              t.paneTree,
+              t.activeLeafId,
+              splitId,
+              leafId,
+              dir,
+              t.cwd,
+            );
+            return { ...t, paneTree, activeLeafId: leafId };
+          }),
+        ),
       );
       return newLeafId;
     },
@@ -1396,25 +1706,27 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   const movePane = useCallback(
     (sourceLeafId: number, targetLeafId: number, edge: DropEdge): void => {
       if (sourceLeafId === targetLeafId) return;
-      setTabs((curr) =>
-        curr.map((t) => {
-          if (
-            t.kind !== "terminal" ||
-            !hasLeaf(t.paneTree, sourceLeafId) ||
-            !hasLeaf(t.paneTree, targetLeafId)
-          )
-            return t;
-          const newSplitId = nextIdRef.current++;
-          const paneTree = moveLeaf(
-            t.paneTree,
-            sourceLeafId,
-            targetLeafId,
-            edge,
-            newSplitId,
-          );
-          if (paneTree === t.paneTree) return t;
-          return syncTabToLeaf({ ...t, paneTree }, sourceLeafId);
-        }),
+      setState(
+        onTabs((curr) =>
+          curr.map((t) => {
+            if (
+              t.kind !== "terminal" ||
+              !hasLeaf(t.paneTree, sourceLeafId) ||
+              !hasLeaf(t.paneTree, targetLeafId)
+            )
+              return t;
+            const newSplitId = nextIdRef.current++;
+            const paneTree = moveLeaf(
+              t.paneTree,
+              sourceLeafId,
+              targetLeafId,
+              edge,
+              newSplitId,
+            );
+            if (paneTree === t.paneTree) return t;
+            return syncTabToLeaf({ ...t, paneTree }, sourceLeafId);
+          }),
+        ),
       );
     },
     [],
@@ -1426,24 +1738,26 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   // dragged, as it does for a move.
   const swapPanes = useCallback((a: number, b: number): void => {
     if (a === b) return;
-    setTabs((curr) =>
-      curr.map((t) => {
-        // The blocks guard belongs here, next to the code that depends on it:
-        // a swapped pane keeps its mount and is handed another leaf, so any
-        // React state inside it is positional, and the blocks overlay holds
-        // exactly that. splitActivePane already refuses to split a blocks tab,
-        // which is why no such pane can be reached today.
-        if (
-          t.kind !== "terminal" ||
-          t.blocks ||
-          !hasLeaf(t.paneTree, a) ||
-          !hasLeaf(t.paneTree, b)
-        )
-          return t;
-        const paneTree = swapLeaves(t.paneTree, a, b);
-        if (paneTree === t.paneTree) return t;
-        return syncTabToLeaf({ ...t, paneTree }, a);
-      }),
+    setState(
+      onTabs((curr) =>
+        curr.map((t) => {
+          // The blocks guard belongs here, next to the code that depends on it:
+          // a swapped pane keeps its mount and is handed another leaf, so any
+          // React state inside it is positional, and the blocks overlay holds
+          // exactly that. splitActivePane already refuses to split a blocks tab,
+          // which is why no such pane can be reached today.
+          if (
+            t.kind !== "terminal" ||
+            t.blocks ||
+            !hasLeaf(t.paneTree, a) ||
+            !hasLeaf(t.paneTree, b)
+          )
+            return t;
+          const paneTree = swapLeaves(t.paneTree, a, b);
+          if (paneTree === t.paneTree) return t;
+          return syncTabToLeaf({ ...t, paneTree }, a);
+        }),
+      ),
     );
   }, []);
 
@@ -1463,36 +1777,40 @@ export function useTabs(initial?: Partial<TerminalTab>) {
       );
       if (refusal) return refusal;
       const newSplitId = nextIdRef.current++;
-      setTabs((curr) => {
-        const source = curr.find((t) => t.id === sourceTabId);
-        const target = curr.find((t) => t.id === targetTabId);
-        if (canMergeTabs(source, target) !== null) return curr;
-        if (source?.kind !== "terminal" || target?.kind !== "terminal")
-          return curr;
-        const paneTree = attachSubtree(
-          target.paneTree,
-          target.activeLeafId,
-          source.paneTree,
-          "right",
-          newSplitId,
-        );
-        if (paneTree === target.paneTree) return curr;
-        setActiveId((active) =>
-          active === sourceTabId ? targetTabId : active,
-        );
-        return curr
-          .filter((t) => t.id !== sourceTabId)
-          .map((t) => {
-            if (t.id !== targetTabId || t.kind !== "terminal") return t;
-            // A live source wakes a still-cold (restored) target.
-            const { cold: _cold, ...rest } = t;
-            const cold = t.cold && source.cold ? { cold: true } : {};
-            return syncTabToLeaf(
-              { ...rest, paneTree, ...cold },
-              source.activeLeafId,
-            );
-          });
-      });
+      setState(
+        via((s) => {
+          const source = s.tabs.find((t) => t.id === sourceTabId);
+          const target = s.tabs.find((t) => t.id === targetTabId);
+          if (canMergeTabs(source, target) !== null) return s;
+          if (source?.kind !== "terminal" || target?.kind !== "terminal")
+            return s;
+          const paneTree = attachSubtree(
+            target.paneTree,
+            target.activeLeafId,
+            source.paneTree,
+            "right",
+            newSplitId,
+          );
+          if (paneTree === target.paneTree) return s;
+          const tabs = s.tabs
+            .filter((t) => t.id !== sourceTabId)
+            .map((t) => {
+              if (t.id !== targetTabId || t.kind !== "terminal") return t;
+              // A live source wakes a still-cold (restored) target.
+              const { cold: _cold, ...rest } = t;
+              const cold = t.cold && source.cold ? { cold: true } : {};
+              return syncTabToLeaf(
+                { ...rest, paneTree, ...cold },
+                source.activeLeafId,
+              );
+            });
+          return {
+            ...s,
+            tabs,
+            activeId: s.activeId === sourceTabId ? targetTabId : s.activeId,
+          };
+        }),
+      );
       return null;
     },
     [],
@@ -1522,40 +1840,58 @@ export function useTabs(initial?: Partial<TerminalTab>) {
       // differently from the run whose verdict the caller gets.
       const visible = visibleSpaceId(activeSpaceIdRef.current);
       flushSync(() => {
-        setTabs((prev) => {
-          const src = prev.find(
-            (t) => t.kind === "terminal" && hasLeaf(t.paneTree, leafId),
-          );
-          // The gap was measured against the strip on screen, and the space
-          // shortcuts keep working during a drag (the listeners are on the
-          // window and never see the keys). If the strip has moved on to
-          // another space, it no longer describes where this pane would go.
-          // The spaces store answers this exactly; `activeSpaceIdRef` is
-          // written by an effect and so lags a switch by a commit, which is
-          // precisely the window being guarded. The ref stands in only before
-          // the store is hydrated, when it holds `null` and knows nothing.
-          // The hit-test suppresses the drop first; this is the backstop.
-          if (src && src.spaceId !== visible) {
-            result = "space-changed";
-            return prev;
-          }
-          // Past every refusal, so none of them burns an id. Cached in the
-          // closure rather than taken fresh, so a repeated run of this updater
-          // reuses the same id instead of minting another.
-          if (!canBreakOutPane(prev, leafId)) return prev;
-          if (tabId === null) tabId = nextIdRef.current++;
-          const born = tabId;
-          const out = breakOutPaneFromTabs(prev, leafId, born, target);
-          if (!out) return prev;
-          result = out.undo;
-          // Inside the success branch: outside it, a refusal would leave
-          // `activeId` naming a tab that was never created. And only when the
-          // pane's own tab is the one on screen: the tab shortcuts keep working
-          // during a drag as well, and someone who moved on to another tab
-          // should not be pulled back by a pane they stopped looking at.
-          setActiveId((active) => (active === src?.id ? born : active));
-          return out.tabs;
-        });
+        setState(
+          via((s) => {
+            const prev = s.tabs;
+            const src = prev.find(
+              (t) => t.kind === "terminal" && hasLeaf(t.paneTree, leafId),
+            );
+            // The gap was measured against the strip on screen, and the space
+            // shortcuts keep working during a drag (the listeners are on the
+            // window and never see the keys). If the strip has moved on to
+            // another space, it no longer describes where this pane would go.
+            // The spaces store answers this exactly; `activeSpaceIdRef` is
+            // written by an effect and so lags a switch by a commit, which is
+            // precisely the window being guarded. The ref stands in only before
+            // the store is hydrated, when it holds `null` and knows nothing.
+            // The hit-test suppresses the drop first; this is the backstop.
+            if (src && src.spaceId !== visible) {
+              result = "space-changed";
+              return s;
+            }
+            // Past every refusal, so none of them burns an id. Cached in the
+            // closure rather than taken fresh, so a repeated run of this updater
+            // reuses the same id instead of minting another.
+            if (!canBreakOutPane(prev, leafId)) return s;
+            if (tabId === null) tabId = nextIdRef.current++;
+            const born = tabId;
+            const out = breakOutPaneFromTabs(
+              prev,
+              leafId,
+              born,
+              target,
+              s.groups,
+            );
+            if (!out) return s;
+            result = out.undo;
+            // Inside the success branch: outside it, a refusal would leave
+            // `activeId` naming a tab that was never created. And only when the
+            // pane's own tab is the one on screen: the tab shortcuts keep working
+            // during a drag as well, and someone who moved on to another tab
+            // should not be pulled back by a pane they stopped looking at. A tab
+            // born into a collapsed group stays out of sight, so it is not
+            // activated either; activating it would expand the group.
+            const bornTab = out.tabs.find((t) => t.id === born);
+            const hidden =
+              bornTab?.groupId !== undefined &&
+              s.groups.some((g) => g.id === bornTab.groupId && g.collapsed);
+            return {
+              ...s,
+              tabs: out.tabs,
+              activeId: s.activeId === src?.id && !hidden ? born : s.activeId,
+            };
+          }),
+        );
       });
       return result;
     },
@@ -1567,33 +1903,39 @@ export function useTabs(initial?: Partial<TerminalTab>) {
       let refusal: MergeRefusal | null = null;
       const visible = visibleSpaceId(activeSpaceIdRef.current);
       flushSync(() => {
-        setTabs((prev) => {
-          const next = undoBreakOut(prev, undo);
-          if (typeof next === "string") {
-            refusal = next;
-            return prev;
-          }
-          // Functional form, like every other tab-removal path here: an
-          // `activeId` that a queued update is about to change is invisible to
-          // `activeIdRef`, which an effect writes a commit late, and this
-          // flushSync drains that update in the same pass.
-          setActiveId((active) => {
-            // Only when the tab being removed is the one on screen. The pane
-            // going home is no reason to pull the user out of a tab they
-            // switched to while the toast stood.
-            if (active !== undo.tabId) return active;
-            const back = next.find((t) => t.id === undo.sourceTabId);
-            // Following the pane into another space would be worse than
-            // staying, so hand the strip a neighbor instead. The empty-space
-            // refusal above means there is one; the source tab is the fallback
-            // that keeps `activeId` valid should that ever stop holding.
-            if (back?.spaceId === visible) {
-              return undo.sourceTabId;
+        setState(
+          via((s) => {
+            const next = undoBreakOut(s.tabs, undo);
+            if (typeof next === "string") {
+              refusal = next;
+              return s;
             }
-            return nextActiveInSpace(prev, undo.tabId) ?? undo.sourceTabId;
-          });
-          return next;
-        });
+            // Read from the same state as the tabs: an `activeId` that a
+            // queued update is about to change is invisible to `activeIdRef`,
+            // which an effect writes a commit late, and this flushSync drains
+            // that update in the same pass.
+            const pick = (active: number): number => {
+              // Only when the tab being removed is the one on screen. The pane
+              // going home is no reason to pull the user out of a tab they
+              // switched to while the toast stood.
+              if (active !== undo.tabId) return active;
+              const back = next.find((t) => t.id === undo.sourceTabId);
+              // Following the pane into another space would be worse than
+              // staying, so hand the strip a neighbor instead. The empty-space
+              // refusal above means there is one; the source tab is the
+              // fallback that keeps `activeId` valid should that ever stop
+              // holding.
+              if (back?.spaceId === visible) {
+                return undo.sourceTabId;
+              }
+              return (
+                nextActiveInSpace(s.tabs, undo.tabId, s.groups) ??
+                undo.sourceTabId
+              );
+            };
+            return { ...s, tabs: next, activeId: pick(s.activeId) };
+          }),
+        );
       });
       return refusal;
     },
@@ -1607,33 +1949,40 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   // (closeTab / closeActivePane) do the killing.
   const closePaneByLeaf = useCallback((leafId: number): void => {
     let didRemove = false;
-    setTabs((curr) => {
-      const tab = curr.find(
-        (t) => t.kind === "terminal" && hasLeaf(t.paneTree, leafId),
-      );
-      if (tab?.kind !== "terminal") return curr;
-      const newTree = removeLeaf(tab.paneTree, leafId);
-      if (newTree === null) {
-        const fallback = nextActiveInSpace(curr, tab.id);
-        if (fallback === null) return curr;
-        const next = curr.filter((x) => x.id !== tab.id);
-        setActiveId((active) => (active === tab.id ? fallback : active));
+    setState(
+      via((s) => {
+        const tab = s.tabs.find(
+          (t) => t.kind === "terminal" && hasLeaf(t.paneTree, leafId),
+        );
+        if (tab?.kind !== "terminal") return s;
+        const newTree = removeLeaf(tab.paneTree, leafId);
+        if (newTree === null) {
+          const fallback = nextActiveInSpace(s.tabs, tab.id, s.groups);
+          if (fallback === null) return s;
+          didRemove = true;
+          return {
+            ...s,
+            tabs: s.tabs.filter((x) => x.id !== tab.id),
+            activeId: s.activeId === tab.id ? fallback : s.activeId,
+          };
+        }
+        const remaining = leafIds(newTree);
+        let newActive = tab.activeLeafId;
+        if (tab.activeLeafId === leafId) {
+          const sib = siblingLeafOf(tab.paneTree, leafId);
+          newActive = sib && remaining.includes(sib) ? sib : remaining[0];
+        }
         didRemove = true;
-        return next;
-      }
-      const remaining = leafIds(newTree);
-      let newActive = tab.activeLeafId;
-      if (tab.activeLeafId === leafId) {
-        const sib = siblingLeafOf(tab.paneTree, leafId);
-        newActive = sib && remaining.includes(sib) ? sib : remaining[0];
-      }
-      didRemove = true;
-      return curr.map((x) =>
-        x.id === tab.id && x.kind === "terminal"
-          ? syncTabToLeaf({ ...x, paneTree: newTree }, newActive)
-          : x,
-      );
-    });
+        return {
+          ...s,
+          tabs: s.tabs.map((x) =>
+            x.id === tab.id && x.kind === "terminal"
+              ? syncTabToLeaf({ ...x, paneTree: newTree }, newActive)
+              : x,
+          ),
+        };
+      }),
+    );
     if (didRemove) disposeSession(leafId);
   }, []);
 
@@ -1641,31 +1990,38 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     let closedTab = false;
     let removedLeaf: number | null = null;
     let managed: string[] = [];
-    setTabs((curr) => {
-      const t = curr.find((x) => x.id === tabId);
-      if (t?.kind !== "terminal") return curr;
-      const target = t.activeLeafId;
-      const newTree = removeLeaf(t.paneTree, target);
-      managed = removedManagedSessions(t.paneTree, newTree);
-      if (newTree === null) {
-        const fallback = nextActiveInSpace(curr, tabId);
-        if (fallback === null) return curr;
-        const next = curr.filter((x) => x.id !== tabId);
-        setActiveId((active) => (active === tabId ? fallback : active));
-        closedTab = true;
+    setState(
+      via((s) => {
+        const t = s.tabs.find((x) => x.id === tabId);
+        if (t?.kind !== "terminal") return s;
+        const target = t.activeLeafId;
+        const newTree = removeLeaf(t.paneTree, target);
+        managed = removedManagedSessions(t.paneTree, newTree);
+        if (newTree === null) {
+          const fallback = nextActiveInSpace(s.tabs, tabId, s.groups);
+          if (fallback === null) return s;
+          closedTab = true;
+          removedLeaf = target;
+          return {
+            ...s,
+            tabs: s.tabs.filter((x) => x.id !== tabId),
+            activeId: s.activeId === tabId ? fallback : s.activeId,
+          };
+        }
+        const remaining = leafIds(newTree);
+        const sib = siblingLeafOf(t.paneTree, target);
+        const newActive = sib && remaining.includes(sib) ? sib : remaining[0];
         removedLeaf = target;
-        return next;
-      }
-      const remaining = leafIds(newTree);
-      const sib = siblingLeafOf(t.paneTree, target);
-      const newActive = sib && remaining.includes(sib) ? sib : remaining[0];
-      removedLeaf = target;
-      return curr.map((x) =>
-        x.id === tabId && x.kind === "terminal"
-          ? syncTabToLeaf({ ...x, paneTree: newTree }, newActive)
-          : x,
-      );
-    });
+        return {
+          ...s,
+          tabs: s.tabs.map((x) =>
+            x.id === tabId && x.kind === "terminal"
+              ? syncTabToLeaf({ ...x, paneTree: newTree }, newActive)
+              : x,
+          ),
+        };
+      }),
+    );
     if (removedLeaf !== null) {
       disposeSession(removedLeaf);
       killManagedSessions(managed);
@@ -1677,77 +2033,238 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     const tabId = nextIdRef.current++;
     const leafId = nextIdRef.current++;
     let toDispose: number[] = [];
-    setTabs((curr) => {
-      toDispose = curr.flatMap((t) =>
-        t.kind === "terminal" ? leafIds(t.paneTree) : [],
-      );
-      return [
-        {
-          id: tabId,
-          kind: "terminal",
-          spaceId: activeSpaceIdRef.current,
-          title: "shell",
-          cwd,
-          paneTree: { kind: "leaf", id: leafId, cwd },
-          activeLeafId: leafId,
-        },
-      ];
-    });
-    setActiveId(tabId);
+    const spaceId = activeSpaceIdRef.current;
+    setState(
+      via((s) => {
+        toDispose = s.tabs.flatMap((t) =>
+          t.kind === "terminal" ? leafIds(t.paneTree) : [],
+        );
+        return {
+          tabs: [
+            {
+              id: tabId,
+              kind: "terminal",
+              spaceId,
+              title: "shell",
+              cwd,
+              paneTree: { kind: "leaf", id: leafId, cwd },
+              activeLeafId: leafId,
+            },
+          ],
+          groups: NO_GROUPS,
+          activeId: tabId,
+        };
+      }),
+    );
     for (const lid of toDispose) disposeSession(lid);
   }, []);
 
   const reorderTabByGap = useCallback(
-    (fromId: number, target: GapTarget, _spawnCwd?: string) => {
-      setTabs((prev) => reorderTabsByGap(prev, fromId, target.index));
+    (fromId: number, target: GapTarget, spawnCwd?: string) => {
+      const spawn = lazyTerminal(() => nextIdRef.current++, spawnCwd);
+      setState(
+        via((s) => {
+          const tab = s.tabs.find((t) => t.id === fromId);
+          if (!tab) return s;
+          const placed = applyGapTarget(s, tab, target);
+          return keepActiveVisible({ ...placed, activeId: s.activeId }, spawn);
+        }),
+      );
     },
     [],
   );
 
-  const createGroupFromTab = useCallback(
-    (_tabId: number): string | null => null,
-    [],
-  );
+  // flushSync for the same reason as breakOutPane: the id returned must be
+  // the group the updater actually created.
+  const createGroupFromTab = useCallback((tabId: number): string | null => {
+    const groupId = newGroupId(() => nextIdRef.current++);
+    let created: string | null = null;
+    flushSync(() => {
+      setState(
+        via((s) => {
+          const next = groupFromTab(s, tabId, groupId);
+          created = next === s ? null : groupId;
+          return { ...next, activeId: s.activeId };
+        }),
+      );
+    });
+    return created;
+  }, []);
 
   const addTabToGroup = useCallback(
-    (_tabId: number, _groupId: string, _spawnCwd?: string) => {},
+    (tabId: number, groupId: string, spawnCwd?: string) => {
+      const spawn = lazyTerminal(() => nextIdRef.current++, spawnCwd);
+      setState(
+        via((s) => {
+          const next = assignToGroup(s, tabId, groupId);
+          if (next === s) return s;
+          return keepActiveVisible({ ...next, activeId: s.activeId }, spawn);
+        }),
+      );
+    },
     [],
   );
 
-  const removeTabFromGroup = useCallback((_tabId: number) => {}, []);
+  const removeTabFromGroup = useCallback((tabId: number) => {
+    setState(
+      via((s) => ({ ...removeFromGroup(s, tabId), activeId: s.activeId })),
+    );
+  }, []);
 
-  const ungroup = useCallback((_groupId: string) => {}, []);
+  const ungroup = useCallback((groupId: string) => {
+    setState(
+      via((s) => ({ ...dissolveGroup(s, groupId), activeId: s.activeId })),
+    );
+  }, []);
 
-  const renameGroup = useCallback((_groupId: string, _name: string) => {}, []);
+  const patchGroup = useCallback(
+    (groupId: string, patch: Partial<Pick<TabGroup, "name" | "color">>) => {
+      setState(
+        via((s) => {
+          const g = s.groups.find((x) => x.id === groupId);
+          if (!g) return s;
+          if (
+            (patch.name === undefined || patch.name === g.name) &&
+            (patch.color === undefined || patch.color === g.color)
+          )
+            return s;
+          return {
+            ...s,
+            groups: s.groups.map((x) => (x === g ? { ...x, ...patch } : x)),
+          };
+        }),
+      );
+    },
+    [],
+  );
+
+  const renameGroup = useCallback(
+    (groupId: string, name: string) =>
+      patchGroup(groupId, { name: normalizeGroupName(name) }),
+    [patchGroup],
+  );
 
   const setGroupColor = useCallback(
-    (_groupId: string, _color: number) => {},
-    [],
+    (groupId: string, color: number) =>
+      patchGroup(groupId, { color: validGroupColor(color) }),
+    [patchGroup],
   );
 
   const toggleGroupCollapsed = useCallback(
-    (_groupId: string, _spawnCwd?: string) => {},
+    (groupId: string, spawnCwd?: string) => {
+      const spawn = lazyTerminal(() => nextIdRef.current++, spawnCwd);
+      setState(
+        via((s) => {
+          if (!s.groups.some((g) => g.id === groupId)) return s;
+          const groups = s.groups.map((g) =>
+            g.id === groupId ? { ...g, collapsed: !g.collapsed } : g,
+          );
+          return keepActiveVisible({ ...s, groups }, spawn);
+        }),
+      );
+    },
     [],
   );
 
-  const moveGroupByGap = useCallback(
-    (_groupId: string, _target: GapTarget) => {},
-    [],
-  );
+  const moveGroupByGap = useCallback((groupId: string, target: GapTarget) => {
+    setState(
+      via((s) => ({
+        ...moveGroupBlock(s, groupId, target),
+        activeId: s.activeId,
+      })),
+    );
+  }, []);
 
+  // The active space stays: a group never pulls the view along. An emptied
+  // source space gets a new terminal, active when the active tab left with
+  // the group.
   const moveGroupToSpace = useCallback(
-    (_groupId: string, _targetSpaceId: string, _spawnCwd?: string) => {},
+    (groupId: string, targetSpaceId: string, spawnCwd?: string) => {
+      if (!useSpaces.getState().spaces.some((sp) => sp.id === targetSpaceId))
+        return;
+      const spawn = lazyTerminal(() => nextIdRef.current++, spawnCwd);
+      setState(
+        via((s) => {
+          const source = s.groups.find((g) => g.id === groupId)?.spaceId;
+          const move = moveGroupAcrossSpaces(
+            s,
+            groupId,
+            targetSpaceId,
+            s.activeId,
+          );
+          if (source === undefined || move.state === s) return s;
+          const next: TabsState = { ...move.state, activeId: s.activeId };
+          if (move.activeMoved) {
+            const pick = activeAfterHide(s, groupId);
+            if (pick !== "new-terminal") return { ...next, activeId: pick };
+          }
+          if (!move.sourceEmptied && !move.activeMoved) return next;
+          const fresh = spawn(source, !move.activeMoved);
+          return {
+            ...next,
+            tabs: appendToSpace(next.tabs, fresh),
+            activeId: move.activeMoved ? fresh.id : next.activeId,
+          };
+        }),
+      );
+    },
     [],
   );
 
-  const closeGroup = useCallback(
-    (_groupId: string, _spawnCwd?: string) => {},
-    [],
-  );
+  // Closes every member without asking (the confirmation lives with the
+  // caller). A space left empty gets a new terminal first. flushSync so the
+  // sessions disposed below are the ones the updater actually removed.
+  const closeGroup = useCallback((groupId: string, spawnCwd?: string) => {
+    let toDispose: number[] = [];
+    let managed: string[] = [];
+    const spawn = lazyTerminal(() => nextIdRef.current++, spawnCwd);
+    flushSync(() =>
+      setState(
+        via((s) => {
+          const group = s.groups.find((g) => g.id === groupId);
+          const members = s.tabs.filter((t) => t.groupId === groupId);
+          if (!group || members.length === 0) return s;
+          const gone = terminalLeaves(members);
+          toDispose = gone.leaves;
+          managed = gone.managed;
+          const rest = s.tabs.filter((t) => t.groupId !== groupId);
+          const activeLeaves = members.some((t) => t.id === s.activeId);
+          let activeId = s.activeId;
+          if (activeLeaves) {
+            const pick = nextActiveInSpace(
+              s.tabs.filter(
+                (t) => t.groupId !== groupId || t.id === s.activeId,
+              ),
+              s.activeId,
+              s.groups,
+            );
+            if (pick !== null) activeId = pick;
+          }
+          const emptied =
+            visibleTabsInSpace(
+              { tabs: rest, groups: s.groups },
+              group.spaceId,
+              {
+                all: true,
+              },
+            ).length === 0;
+          if (!emptied) return { ...s, tabs: rest, activeId };
+          const fresh = spawn(group.spaceId, !activeLeaves);
+          return {
+            ...s,
+            tabs: appendToSpace(rest, fresh),
+            activeId: activeLeaves ? fresh.id : activeId,
+          };
+        }),
+      ),
+    );
+    for (const lid of toDispose) disposeSession(lid);
+    killManagedSessions(managed);
+  }, []);
 
   return {
     tabs,
-    groups: NO_GROUPS,
+    groups,
     activeId,
     setActiveId,
     allocId,
