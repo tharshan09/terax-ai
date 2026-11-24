@@ -1,6 +1,5 @@
 import { basename, titleFromUrl } from "@/lib/utils";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import { SPACE_COLORS } from "@/modules/spaces/lib/spaceColor";
 import { useSpaces } from "@/modules/spaces/lib/useSpaces";
 import {
   collectManagedSessions,
@@ -46,6 +45,7 @@ import { applyDocView } from "./applyDocView";
 import { resolveFileTabOpen } from "./resolveFileTabOpen";
 import {
   activeAfterHide,
+  appendToSpace,
   applyGapTarget,
   assignToGroup,
   dissolveGroup,
@@ -55,12 +55,15 @@ import {
   moveGroupAcrossSpaces,
   moveGroupBlock,
   newGroupId,
+  normalizeGroupColor,
   normalizeGroupName,
   normalizeGroups,
   removeFromGroup,
   type TabGroup,
   tabForSpaceSwitch,
   visibleTabsInSpace,
+  withGroup,
+  withoutGroup,
 } from "./tabGroups";
 
 // Matches the renderer slot pool size — over this we'd evict an active leaf.
@@ -266,26 +269,8 @@ export function changeTabSpace(
 ): Tab[] {
   const tab = tabs.find((t) => t.id === tabId);
   if (!tab || tab.spaceId === targetSpaceId) return tabs;
-  const { groupId: _left, ...rest } = tab;
-  const moved = { ...rest, spaceId: targetSpaceId } as Tab;
+  const moved = { ...withoutGroup(tab), spaceId: targetSpaceId } as Tab;
   return tabs.map((t) => (t.id === tabId ? moved : t));
-}
-
-function withGroupId(tab: Tab, groupId: string | undefined): Tab {
-  if (tab.groupId === groupId) return tab;
-  const { groupId: _old, ...rest } = tab;
-  return (groupId === undefined ? rest : { ...rest, groupId }) as Tab;
-}
-
-/** Places `tab` behind the last tab of its space, or at the end. */
-function appendToSpace(tabs: Tab[], tab: Tab): Tab[] {
-  const inSpace = visibleTabsInSpace({ tabs, groups: NO_GROUPS }, tab.spaceId, {
-    all: true,
-  });
-  const last = inSpace[inSpace.length - 1];
-  if (!last) return [...tabs, tab];
-  const at = tabs.indexOf(last) + 1;
-  return [...tabs.slice(0, at), tab, ...tabs.slice(at)];
 }
 
 // Next active after close, scoped to the closing tab's space. null = last tab of
@@ -740,12 +725,6 @@ function terminalLeaves(tabs: Tab[]): {
   };
 }
 
-function validGroupColor(color: number): number {
-  return Number.isInteger(color) && color >= 0 && color < SPACE_COLORS.length
-    ? color
-    : 0;
-}
-
 export function useTabs(initial?: Partial<TerminalTab>) {
   const [state, setState] = useState<TabsState>(() => {
     const tabId = 1;
@@ -830,27 +809,9 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   // Appends a cold terminal tab to a space without stealing focus, so the
   // overview can populate a space in place; it spawns when first opened.
   const newTabInSpace = useCallback((spaceId: string, cwd?: string) => {
-    const tabId = nextIdRef.current++;
-    const leafId = nextIdRef.current++;
-    const tmuxSession = managedSessionForNewLocalTab();
-    setState(
-      onTabs((curr) => [
-        ...curr,
-        {
-          id: tabId,
-          kind: "terminal",
-          spaceId,
-          cold: true,
-          title: cwd ? basename(cwd) : "shell",
-          cwd,
-          tmuxSession,
-          ...(tmuxSession && { workspace: LOCAL_WORKSPACE }),
-          paneTree: { kind: "leaf", id: leafId, cwd, tmuxSession },
-          activeLeafId: leafId,
-        },
-      ]),
-    );
-    return tabId;
+    const tab = lazyTerminal(() => nextIdRef.current++, cwd)(spaceId, true);
+    setState(onTabs((curr) => [...curr, tab]));
+    return tab.id;
   }, []);
 
   // Reassigns a tab to another space. Returns true when the moved tab was active
@@ -883,20 +844,26 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   // group. Returns true when the active tab crossed into the target space and
   // emptied its source, so the caller should follow it.
   const reorderTab = useCallback(
-    (tabId: number, targetTabId: number, edge: "top" | "bottom"): boolean => {
+    (
+      tabId: number,
+      targetTabId: number,
+      edge: "top" | "bottom",
+      spawnCwd?: string,
+    ): boolean => {
       if (tabId === targetTabId) return false;
       const curr = tabsRef.current;
       const moved = curr.find((t) => t.id === tabId);
       const target = curr.find((t) => t.id === targetTabId);
       if (!moved || !target) return false;
       const crossSpace = moved.spaceId !== target.spaceId;
+      const spawn = lazyTerminal(() => nextIdRef.current++, spawnCwd);
       setState(
         via((s) => {
           const from = s.tabs.find((t) => t.id === tabId);
           const onto = s.tabs.find((t) => t.id === targetTabId);
           if (!from || !onto) return s;
           const spaced = changeTabSpace(s.tabs, tabId, onto.spaceId);
-          const placed = withGroupId(
+          const placed = withGroup(
             spaced.find((t) => t.id === tabId) as Tab,
             onto.groupId,
           );
@@ -908,7 +875,10 @@ export function useTabs(initial?: Partial<TerminalTab>) {
             from.spaceId !== onto.spaceId && s.activeId === tabId
               ? nextActiveInSpace(s.tabs, tabId, s.groups)
               : null;
-          return { ...s, tabs: without, activeId: fallback ?? s.activeId };
+          return keepActiveVisible(
+            { ...s, tabs: without, activeId: fallback ?? s.activeId },
+            spawn,
+          );
         }),
       );
       return (
@@ -1199,7 +1169,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
           ? removeFromGroup(
               {
                 tabs: res.tabs.map((t, i) =>
-                  i === slot ? withGroupId(t, old.groupId) : t,
+                  i === slot ? withGroup(t, old.groupId) : t,
                 ),
                 groups: s.groups,
               },
@@ -2146,7 +2116,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
 
   const setGroupColor = useCallback(
     (groupId: string, color: number) =>
-      patchGroup(groupId, { color: validGroupColor(color) }),
+      patchGroup(groupId, { color: normalizeGroupColor(color) }),
     [patchGroup],
   );
 

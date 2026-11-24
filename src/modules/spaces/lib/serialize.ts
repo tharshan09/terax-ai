@@ -21,6 +21,7 @@ import {
   newGroupId,
   normalizeGroups,
   type TabGroup,
+  validGroupOf,
 } from "@/modules/tabs/lib/tabGroups";
 import { LOCAL_WORKSPACE, type WorkspaceEnv } from "@/modules/workspace";
 import type { SpaceState } from "./store";
@@ -320,8 +321,8 @@ export function serializeSpace(
   for (const tab of tabs) {
     const [s] = serializeTabs([tab]);
     if (!s) continue;
-    const g = tab.groupId === undefined ? undefined : byId.get(tab.groupId);
-    if (!g || g.spaceId !== tab.spaceId) {
+    const g = validGroupOf(tab, byId);
+    if (!g) {
       outTabs.push(s);
       continue;
     }

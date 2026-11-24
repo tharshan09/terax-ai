@@ -58,6 +58,9 @@ function context(
     openSpacesOverview: noop,
     newSpace: noop,
     switchSpace: noop,
+    createGroupFromTab: noop,
+    removeTabFromGroup: noop,
+    toggleGroupCollapsed: noop,
     ...overrides,
   };
 }

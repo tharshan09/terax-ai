@@ -1429,12 +1429,12 @@ export default function App() {
 
   const handleReorderTab = useCallback(
     (tabId: number, targetTabId: number, edge: "top" | "bottom") => {
-      if (reorderTab(tabId, targetTabId, edge)) {
+      if (reorderTab(tabId, targetTabId, edge, inheritedCwdForNewTab())) {
         const target = tabsRef.current.find((x) => x.id === targetTabId);
         if (target) useSpaces.getState().setActive(target.spaceId);
       }
     },
-    [reorderTab],
+    [reorderTab, inheritedCwdForNewTab],
   );
 
   const handleNewTabInSpace = useCallback(

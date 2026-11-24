@@ -165,6 +165,8 @@ export function TabBar({
   const scrollRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
+  // The typed name of the tab being renamed; null until the field changes.
+  const renameDraft = useRef<{ value: string; initial: string } | null>(null);
   const [dragging, setDragging] = useState<DragSource | null>(null);
   // Visual only; the release handler reads the ref so it is never a frame
   // behind the last pointermove.
@@ -212,6 +214,17 @@ export function TabBar({
     }
     return { tabIndex, groupRange, stripGroups };
   }, [layout]);
+  // React fires no blur when the focused field unmounts (its group collapsed,
+  // the space switched), so the edit is resolved here the way a blur would.
+  useEffect(() => {
+    if (editingId === null || tabIndex.has(editingId)) return;
+    const draft = renameDraft.current;
+    renameDraft.current = null;
+    setEditingId(null);
+    if (draft !== null && draft.value.trim() !== draft.initial.trim()) {
+      onRename(editingId, draft.value);
+    }
+  }, [editingId, tabIndex, onRename]);
   const colorOfGroup = (id: string | null): string | null => {
     if (id === null) return null;
     const g = stripGroups.find((x) => x.id === id);
@@ -455,11 +468,18 @@ export function TabBar({
           <TabIcon tab={t} />
           <TabRenameInput
             initial={labelFor(t)}
+            onDraft={(value) => {
+              renameDraft.current = { value, initial: labelFor(t) };
+            }}
             onCommit={(value) => {
+              renameDraft.current = null;
               onRename(t.id, value);
               setEditingId(null);
             }}
-            onCancel={() => setEditingId(null)}
+            onCancel={() => {
+              renameDraft.current = null;
+              setEditingId(null);
+            }}
           />
         </div>
       );
@@ -751,7 +771,10 @@ export function TabBar({
               <ContextMenuSeparator />
               <ContextMenuItem
                 className={TAB_MENU_ITEM}
-                onSelect={() => setEditingId(t.id)}
+                onSelect={() => {
+                  renameDraft.current = null;
+                  setEditingId(t.id);
+                }}
               >
                 <HugeiconsIcon
                   icon={PencilEdit02Icon}
@@ -1103,10 +1126,12 @@ export function TabIcon({ tab }: { tab: Tab }) {
 
 function TabRenameInput({
   initial,
+  onDraft,
   onCommit,
   onCancel,
 }: {
   initial: string;
+  onDraft: (value: string) => void;
   onCommit: (value: string) => void;
   onCancel: () => void;
 }) {
@@ -1148,6 +1173,7 @@ function TabRenameInput({
         "w-28 min-w-0 rounded-sm bg-background px-1 text-xs text-foreground",
         "outline-none ring-1 ring-border focus:ring-ring",
       )}
+      onChange={(e) => onDraft(e.currentTarget.value)}
       onKeyDown={(e) => {
         e.stopPropagation();
         if (e.key === "Enter") commit(e.currentTarget.value, true);

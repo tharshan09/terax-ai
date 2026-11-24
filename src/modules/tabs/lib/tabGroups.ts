@@ -65,7 +65,8 @@ function groupsById(groups: readonly TabGroup[]): Map<string, TabGroup> {
   return new Map(groups.map((g) => [g.id, g]));
 }
 
-function validGroupOf(
+/** The tab's group when it names a known group of the tab's own space. */
+export function validGroupOf(
   tab: Tab,
   byId: ReadonlyMap<string, TabGroup>,
 ): TabGroup | undefined {
@@ -101,13 +102,13 @@ export function stripLayout(state: GroupState, spaceId: string): StripItem[] {
   return items;
 }
 
-function withoutGroup(tab: Tab): Tab {
+export function withoutGroup(tab: Tab): Tab {
   if (tab.groupId === undefined) return tab;
   const { groupId: _dropped, ...rest } = tab;
   return rest as Tab;
 }
 
-function withGroup(tab: Tab, groupId: string | undefined): Tab {
+export function withGroup(tab: Tab, groupId: string | undefined): Tab {
   if (groupId === undefined) return withoutGroup(tab);
   return tab.groupId === groupId ? tab : { ...tab, groupId };
 }
@@ -186,6 +187,11 @@ function insertTab(tabs: Tab[], tab: Tab, beforeId: number | null): Tab[] {
   return insertBlock(tabs, [tab], tab.spaceId, beforeId);
 }
 
+/** Places `tab` behind the last tab of its space, or at the end. */
+export function appendToSpace(tabs: Tab[], tab: Tab): Tab[] {
+  return insertTab(tabs, tab, null);
+}
+
 /** The tab right behind the last member of `groupId` within the space; null
  *  when the group ends the space. */
 function idBehindGroup(
@@ -193,7 +199,9 @@ function idBehindGroup(
   spaceId: string,
   groupId: string,
 ): number | null {
-  const inSpace = tabs.filter((t) => t.spaceId === spaceId);
+  const inSpace = visibleTabsInSpace({ tabs, groups: [] }, spaceId, {
+    all: true,
+  });
   let last = -1;
   for (let i = 0; i < inSpace.length; i++) {
     if (inSpace[i].groupId === groupId) last = i;
@@ -288,11 +296,16 @@ export function activeAfterHide(
 ): number | "new-terminal" {
   const group = state.groups.find((g) => g.id === groupId);
   if (!group) return "new-terminal";
-  const hidden = new Set<string>([groupId]);
-  for (const g of state.groups) {
-    if (g.collapsed && g.spaceId === group.spaceId) hidden.add(g.id);
-  }
-  const inSpace = state.tabs.filter((t) => t.spaceId === group.spaceId);
+  const hiding = {
+    tabs: state.tabs,
+    groups: state.groups.map((g) =>
+      g.id === groupId ? { ...g, collapsed: true } : g,
+    ),
+  };
+  const inSpace = visibleTabsInSpace(hiding, group.spaceId, { all: true });
+  const shown = new Set(
+    visibleTabsInSpace(hiding, group.spaceId).map((t) => t.id),
+  );
   let first = -1;
   let last = -1;
   for (let i = 0; i < inSpace.length; i++) {
@@ -300,12 +313,11 @@ export function activeAfterHide(
     if (first < 0) first = i;
     last = i;
   }
-  const visible = (t: Tab) => t.groupId === undefined || !hidden.has(t.groupId);
   for (let i = last + 1; i < inSpace.length; i++) {
-    if (visible(inSpace[i])) return inSpace[i].id;
+    if (shown.has(inSpace[i].id)) return inSpace[i].id;
   }
   for (let i = (first < 0 ? inSpace.length : first) - 1; i >= 0; i--) {
-    if (visible(inSpace[i])) return inSpace[i].id;
+    if (shown.has(inSpace[i].id)) return inSpace[i].id;
   }
   return "new-terminal";
 }
@@ -340,7 +352,9 @@ function firstTabFrom(
 }
 
 /** Takes a tab already in the state (reorder) or a new one (a broken-out
- *  pane) and returns a normalized state. */
+ *  pane) and returns a normalized state. A target group gone from the tab's
+ *  space leaves a reorder undone; a new tab then lands loose, so the pane its
+ *  source already gave up is not lost. */
 export function applyGapTarget(
   state: GroupState,
   tab: Tab,
@@ -352,6 +366,13 @@ export function applyGapTarget(
       : state.groups.find(
           (g) => g.id === target.groupId && g.spaceId === tab.spaceId,
         );
+  if (
+    target.groupId !== null &&
+    !group &&
+    state.tabs.some((t) => t.id === tab.id)
+  ) {
+    return state;
+  }
   const rest = state.tabs.filter((t) => t.id !== tab.id);
   if (group && target.onCollapsedHeader) {
     return normalizeGroups({
@@ -375,7 +396,8 @@ export function applyGapTarget(
   });
 }
 
-/** A gap inside another group counts as the gap right behind that group. */
+/** A gap inside another group counts as the gap right behind that group; a
+ *  target group gone from the space leaves the state as it is. */
 export function moveGroupBlock(
   state: GroupState,
   groupId: string,
@@ -383,6 +405,14 @@ export function moveGroupBlock(
 ): GroupState {
   const group = state.groups.find((g) => g.id === groupId);
   if (!group || target.groupId === groupId) return state;
+  if (
+    target.groupId !== null &&
+    !state.groups.some(
+      (g) => g.id === target.groupId && g.spaceId === group.spaceId,
+    )
+  ) {
+    return state;
+  }
   const block = state.tabs.filter((t) => t.groupId === groupId);
   if (block.length === 0) return state;
   const rest = state.tabs.filter((t) => t.groupId !== groupId);
@@ -474,6 +504,16 @@ export function normalizeGroupName(raw: string): string {
   const code = trimmed.charCodeAt(end - 1);
   if (code >= 0xd800 && code <= 0xdbff) end -= 1;
   return trimmed.slice(0, end).trimEnd();
+}
+
+/** A palette index; anything else falls back to the first colour. */
+export function normalizeGroupColor(value: unknown): number {
+  return typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value < SPACE_COLORS.length
+    ? value
+    : 0;
 }
 
 /** Drawn from the tab id counter, so creating and restoring never collide. */

@@ -71,9 +71,9 @@ export type CommandPaletteActionContext = {
   openSpacesOverview: () => void;
   newSpace: () => void;
   switchSpace: (id: string) => void;
-  createGroupFromTab?: (tabId: number) => void;
-  removeTabFromGroup?: (tabId: number) => void;
-  toggleGroupCollapsed?: (groupId: string) => void;
+  createGroupFromTab: (tabId: number) => void;
+  removeTabFromGroup: (tabId: number) => void;
+  toggleGroupCollapsed: (groupId: string) => void;
 };
 
 const noop = () => {};
@@ -249,7 +249,7 @@ export function createCommandItems(
       icon: FolderAddIcon,
       disabledReason: activeTab ? undefined : "No active tab",
       run: () => {
-        if (activeTab) ctx.createGroupFromTab?.(activeTab.id);
+        if (activeTab) ctx.createGroupFromTab(activeTab.id);
       },
     },
     ...(activeTab && activeGroupId
@@ -260,7 +260,7 @@ export function createCommandItems(
             group: "Tabs" as const,
             keywords: ["group", "tab group", "ungroup", "remove"],
             icon: FolderRemoveIcon,
-            run: () => ctx.removeTabFromGroup?.(activeTab.id),
+            run: () => ctx.removeTabFromGroup(activeTab.id),
           },
           {
             id: "tab.group.toggle",
@@ -268,7 +268,7 @@ export function createCommandItems(
             group: "Tabs" as const,
             keywords: ["group", "tab group", "collapse", "expand", "fold"],
             icon: ArrowShrinkIcon,
-            run: () => ctx.toggleGroupCollapsed?.(activeGroupId),
+            run: () => ctx.toggleGroupCollapsed(activeGroupId),
           },
         ]
       : []),

@@ -146,8 +146,8 @@ export function TabGroupHeader({
     </>
   );
 
-  // While renaming, a plain cell: an <input> inside a <button> is invalid and
-  // WebKit then refuses it focus and selection.
+  // While renaming, a plain cell without role=button and the toggle and drag
+  // handlers, so clicks and keys belong to the field.
   const header = renaming ? (
     <div {...chrome}>{content}</div>
   ) : (

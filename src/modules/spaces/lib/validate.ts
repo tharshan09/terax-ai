@@ -1,6 +1,8 @@
-import { normalizeGroupName } from "@/modules/tabs/lib/tabGroups";
+import {
+  normalizeGroupColor,
+  normalizeGroupName,
+} from "@/modules/tabs/lib/tabGroups";
 import type { SerializedGroup } from "./serialize";
-import { SPACE_COLORS } from "./spaceColor";
 import type { SpaceMeta, SpaceState } from "./store";
 
 function isObject(v: unknown): v is Record<string, unknown> {
@@ -28,15 +30,9 @@ export function isSpaceState(v: unknown): v is SpaceState {
 
 function readGroupEntry(v: unknown): SerializedGroup | null {
   if (!isObject(v) || Array.isArray(v)) return null;
-  const color =
-    Number.isInteger(v.color) &&
-    (v.color as number) >= 0 &&
-    (v.color as number) < SPACE_COLORS.length
-      ? (v.color as number)
-      : 0;
   return {
     name: typeof v.name === "string" ? normalizeGroupName(v.name) : "",
-    color,
+    color: normalizeGroupColor(v.color),
     collapsed: v.collapsed === true,
   };
 }

@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { leafIds } from "@/modules/terminal";
+import type { PaneNode } from "@/modules/terminal/lib/panes";
 import { leafForegroundCheck } from "@/modules/terminal/lib/useTerminalSession";
 import {
   type GroupClosePlan,
@@ -27,6 +28,24 @@ export async function closeConfirmReason(
     leafIds(tab.paneTree).map(leafForegroundCheck),
   );
   return checks.some((c) => c !== "idle") ? "process" : null;
+}
+
+function paneBoundToTmux(node: PaneNode): boolean {
+  if (node.kind === "leaf") return Boolean(node.tmuxSession);
+  return node.children.some(paneBoundToTmux);
+}
+
+/** Closing a group also ends the tmux sessions Terax manages for it, and the
+ *  process check sees nothing in a member that is not mounted (after a
+ *  restart), so a tmux-bound terminal always asks. */
+async function groupMemberNeedsConfirm(tab: Tab): Promise<boolean> {
+  if (
+    tab.kind === "terminal" &&
+    (Boolean(tab.tmuxSession) || paneBoundToTmux(tab.paneTree))
+  ) {
+    return true;
+  }
+  return (await closeConfirmReason(tab)) !== null;
 }
 
 /**
@@ -104,9 +123,9 @@ export function useTabCloseGuards({
   const requestCloseGroup = useCallback(
     async (groupId: string) => {
       const members = tabs.filter((t) => t.groupId === groupId);
-      const reasons = await Promise.all(members.map(closeConfirmReason));
+      const asks = await Promise.all(members.map(groupMemberNeedsConfirm));
       const confirmIds = new Set(
-        members.filter((_, i) => reasons[i] !== null).map((t) => t.id),
+        members.filter((_, i) => asks[i]).map((t) => t.id),
       );
       const plan = planGroupClose(tabs, groupId, confirmIds);
       if (plan === null) return;
