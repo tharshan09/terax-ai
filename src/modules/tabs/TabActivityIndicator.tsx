@@ -20,6 +20,15 @@ export function TabActivityIndicator({ paneTree }: Props) {
   // traverses; the primitive result still lets Object.is bail the re-render.
   const status = useAgentStore((s) => selectTabAgentStatus(s.sessions, ids));
 
+  return <AgentStatusBadge status={status} />;
+}
+
+/** The look of one agent status, shared by the tab and the group header. */
+export function AgentStatusBadge({
+  status,
+}: {
+  status: "working" | "waiting" | null;
+}) {
   if (status === null) return null;
 
   if (status === "working") {
