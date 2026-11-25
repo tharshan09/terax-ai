@@ -1,6 +1,8 @@
 //! Esc ends zen mode over a preview even while focus sits inside its iframe,
-//! where the webview never sees the key. The switch and the decision are plain
-//! Rust on every platform; only the macOS arm installs a monitor that reads them.
+//! where the app's own page gets no key event. The macOS monitor sees the key
+//! before the webview, passes it on unchanged and emits an event to the page.
+//! The switch and the decision are plain Rust on every platform; only the
+//! macOS arm installs the monitor that reads them.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
