@@ -188,7 +188,7 @@ describe("useZenEscape", () => {
     expect(useZenStore.getState().on).toBe(true);
   });
 
-  it("[AC-5] works without the native event (Windows, Linux, stub command)", async () => {
+  it("[AC-5] works without the native event (Windows, Linux)", async () => {
     listen.mockImplementationOnce(() => new Promise<() => void>(() => {}));
     useZenStore.setState({ on: true });
     mount(markdown);

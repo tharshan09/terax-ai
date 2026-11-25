@@ -39,7 +39,7 @@ function sendArm(armed: boolean): void {
  * - Native (macOS only): with focus inside the HTML preview's iframe the
  *   document never sees the key, so the native monitor, armed only while
  *   `zenEscapeArmed`, sends `terax:zen-escape`. The event never comes on other
- *   platforms or while the Rust command is a stub; the DOM path still works.
+ *   platforms; the DOM path still works there.
  *
  * The only caller of `zen_escape_arm` and the only listener of
  * `terax:zen-escape`. Mount once, in App.

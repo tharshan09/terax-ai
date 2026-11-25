@@ -5198,7 +5198,8 @@ Host !secret prod
     // that they hand over their arguments unchanged and start plain `ssh`.
     #[test]
     fn ac5_the_public_typed_reads_delegate_their_arguments_unchanged() {
-        let source = include_str!("ssh.rs");
+        // A checkout with CRLF line ends must not change what this test sees.
+        let source = include_str!("ssh.rs").replace("\r\n", "\n");
         let code = source.split("#[cfg(test)]\nmod tests {").next().unwrap();
         let code: String = code.chars().filter(|c| !c.is_whitespace()).collect();
         for body in [

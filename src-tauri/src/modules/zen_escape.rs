@@ -175,7 +175,8 @@ mod tests {
     // monitor nor emits, and that the monitor exists only under that cfg.
     #[test]
     fn ac7_only_the_macos_arm_installs_a_monitor_or_emits() {
-        let source = include_str!("zen_escape.rs");
+        // A checkout with CRLF line ends must not change what this test sees.
+        let source = include_str!("zen_escape.rs").replace("\r\n", "\n");
         let gate = "#[cfg(target_os = \"macos\")]\n";
         let (shared, macos) = source.split_once(gate).expect("a macOS arm");
         for needle in [".emit(", "addLocalMonitor", "fn install_zen_escape_monitor"] {
@@ -193,7 +194,8 @@ mod tests {
     // compiles and lints them; the AppKit crates appear only in the macOS arm.
     #[test]
     fn ac8_switch_and_decision_build_on_every_platform() {
-        let source = include_str!("zen_escape.rs");
+        // A checkout with CRLF line ends must not change what this test sees.
+        let source = include_str!("zen_escape.rs").replace("\r\n", "\n");
         let code = source.split("#[cfg(test)]").next().unwrap();
         let (shared, macos) = code.split_once("#[cfg(target_os = \"macos\")]\n").unwrap();
         for needle in ["#[cfg", "objc2", "block2", "NSEvent"] {
