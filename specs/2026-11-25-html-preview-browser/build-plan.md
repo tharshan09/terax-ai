@@ -325,7 +325,12 @@
 
 **Wie gebaut**
 
-_(leer bis zum Merge)_
+- **Merge-Commit:** `f1b4f19` (Slice-Commit `946e60e` über `306abf8`, 12 Dateien, alle im Dateibereich).
+- **Gate auf `946e60e`:** `cargo test` 640 grün (629 Bestand + 11 neu), 13 ignoriert; Clippy `--all-targets -D warnings` ohne Warnung; `pnpm check-types` Exit 0; Vitest 1508 grün in 139 Dateien; Lockfile weiter 578 Pakete. Rust-Läufe mit eigenem Target je Worktree und „Compiling terax" im Log.
+- **Review:** Diff-Review, Claim-Verifikation und Mutationsstufe. Zwei blockierende Befunde, beide vom Nachprüfer bestätigt und in einer Fix-Runde behoben: (1) der Quelltext-Test der Verdrahtung war blind für auskommentierten Code; er entfernt jetzt Zeilen- und Blockkommentare und prüft im `generate_handler![…]`- bzw. `setup`-Block; (2) der Test der Status-Draht-Werte erzwang entgegen seinem Kommentar keinen Wert je Variante; jetzt bildet ein `match` ohne Platzhalter jede Variante auf ihren Draht-Wert ab. Dazu: `Eq` an `RemoteReadError` per Trait-Schranke erzwungen, zwei Stellen in `TERAX.md` berichtigt (`400`/`421` beim `Host`, voller CSP-Wert). Delta-Review ohne blockierenden Befund.
+- **Abweichungen vom Plan:** `pub struct PreviewServer {}` mit leeren Klammern (sonst meldet Clippy voraussichtlich `default_constructed_unit_structs` an `.manage(PreviewServer::default())`); vier zusätzliche Vertragstests (Derives, Command-Signaturen, IPC-Schlüssel, Verdrahtung in `lib.rs`); keine Konstante für den Event-Namen `terax:zen-escape` (baut slice-02).
+- **Bekannte Grenzen:** Eine neue Status-Variante, die im Test einen Arm bekommt, aber nicht in `ALL_*` eingetragen wird, bleibt ungeprüft (stabiles Rust kann Varianten nicht aufzählen). Die Quelltext-Tests nehmen feste Start-Texte an (`pubfnrun(){`, `.setup(|_app|{`, `tauri::generate_handler![`) und kennen keine Raw-Strings. Der Laufzeitteil des TS-Vertragstests vergleicht nur Testkonstanten; den Vertrag beweist `pnpm check-types`. Code unter `cfg(target_os = "macos")` (Aufruf in `setup`, leerer Monitor) ist auf der Build-Maschine nicht kompiliert.
+- **An Folge-Slices:** slice-01 nutzt `httparse`, `getrandom` und `percent-encoding` (sonst meldet `cargo machete` sie) und ersetzt die Doc-Kommentare der Rümpfe, die Zielverhalten beschreiben; slice-02 und slice-04 ebenso für ihre Rümpfe.
 
 ### slice-01-preview-server: Rust-Kern des Mini-Servers
 
