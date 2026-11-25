@@ -137,7 +137,8 @@ fn decode_segment(raw: &str) -> Option<String> {
     acceptable_segment(&decoded).then_some(decoded)
 }
 
-fn acceptable_segment(segment: &str) -> bool {
+/// A decoded segment the server serves; the click holds entry names to it.
+pub(crate) fn acceptable_segment(segment: &str) -> bool {
     if segment.is_empty() || segment == "." || segment == ".." {
         return false;
     }
@@ -299,11 +300,12 @@ mod tests {
         #![proptest_config(ProptestConfig::with_cases(1000))]
 
         // Only the characters of the plan, drawn as the pieces that matter
-        // (dots, encoded dots, slashes and backslashes), so the generator
-        // reaches `..`, `%2e%2e` or `%2F` often instead of rarely.
+        // (dots, encoded dots, slashes, backslashes) and as single
+        // characters, so `..`, `%2e%2e`, `%2F`, `%252e` and broken `%`
+        // sequences all come up.
         /// Sicherheitsmodell 6
         #[test]
-        fn ac8_an_accepted_target_stays_below_root(rel in "(\\.|\\.\\.|%2[eEfF]|%25|%5[cC]|a|e|/|\\\\){0,12}") {
+        fn ac8_an_accepted_target_stays_below_root(rel in "(\\.|\\.\\.|%2[eEfF]|%25|2[eEfF]|%5[cC]|5[cC]|[/.%25eEfFcC\\\\a]){0,16}") {
             if let Ok(target) = split_target(&format!("/{T}/{rel}"), T) {
                 for segment in &target.segments {
                     prop_assert!(segment != "." && segment != ".." && !segment.is_empty(), "{:?}", target);
@@ -324,6 +326,19 @@ mod tests {
                 }
                 prop_assert_eq!(depth as usize, target.segments.len());
                 prop_assert!(joined.starts_with(root));
+            }
+        }
+
+        // Beyond the plan's characters: pieces that decode to control
+        // characters or to bytes that are no UTF-8, which must never be
+        // accepted.
+        #[test]
+        fn ac8_control_characters_and_broken_utf8_are_never_accepted(rel in "(%00|%0[aA]|%1[fF]|%7[fF]|%[fF][fF]|%[cC]3|%[aA]4|%C2%8[05]|a|/|\\.){0,12}") {
+            if let Ok(target) = split_target(&format!("/{T}/{rel}"), T) {
+                for segment in &target.segments {
+                    prop_assert!(!segment.chars().any(char::is_control), "{:?}", target);
+                    prop_assert!(segment != "." && segment != ".." && !segment.is_empty(), "{:?}", target);
+                }
             }
         }
     }

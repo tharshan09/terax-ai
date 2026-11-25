@@ -92,14 +92,37 @@ pub(crate) fn entry_kind(name: &str, wave: u8) -> Option<EntryKind> {
 }
 
 /// Media type of a served file. `entry` is the grant's kind when the file is
-/// the entry itself; only a Markdown entry differs from its raw extension.
+/// the entry itself: then the kind decides the art (an image entry is inert,
+/// a PDF entry needs the magic, a Markdown entry is rendered), the extension
+/// only the image type.
 pub(crate) fn served_type(name: &str, entry: Option<EntryKind>) -> Served {
-    if entry == Some(EntryKind::Markdown) {
-        return Served {
+    let by_name = served_by_name(name);
+    match entry {
+        None => by_name,
+        Some(EntryKind::Html) => Served {
+            art: Art::Html,
+            mime: "text/html",
+        },
+        Some(EntryKind::Image) => Served {
+            art: Art::Inert,
+            mime: if by_name.mime.starts_with("image/") {
+                by_name.mime
+            } else {
+                "application/octet-stream"
+            },
+        },
+        Some(EntryKind::Pdf) => Served {
+            art: Art::Pdf,
+            mime: "application/pdf",
+        },
+        Some(EntryKind::Markdown) => Served {
             art: Art::RenderedMarkdown,
             mime: "text/html",
-        };
+        },
     }
+}
+
+fn served_by_name(name: &str) -> Served {
     let inert = |mime| Served {
         art: Art::Inert,
         mime,
@@ -155,6 +178,16 @@ fn frame_csp() -> String {
     format!("frame-ancestors {}", origins.join(" "))
 }
 
+/// The headers every answer carries, empty ones included.
+pub(crate) fn common_headers() -> Vec<(&'static str, String)> {
+    vec![
+        ("X-Content-Type-Options", "nosniff".to_string()),
+        ("Cache-Control", "no-store".to_string()),
+        ("Referrer-Policy", "no-referrer".to_string()),
+        ("Connection", "close".to_string()),
+    ]
+}
+
 /// Headers of a `200` (or a text page) for `served` in `class`.
 /// `frame_ancestors` is the switch `FRAME_ANCESTORS`, a parameter so both
 /// variants of the M-C measurement are tested.
@@ -166,19 +199,16 @@ pub(crate) fn response_headers(
     let csp = match (served.art, class) {
         (Art::Html, GrantClass::Browser) => Some(HTML_BROWSER_CSP.to_string()),
         (Art::Html, GrantClass::Frame) => frame_ancestors.then(frame_csp),
-        (Art::Script, _) => None,
-        (Art::Inert | Art::Pdf | Art::RenderedMarkdown, _) => Some(INERT_CSP.to_string()),
+        (Art::Script, GrantClass::Browser | GrantClass::Frame) => None,
+        (Art::Inert | Art::Pdf | Art::RenderedMarkdown, GrantClass::Browser | GrantClass::Frame) => {
+            Some(INERT_CSP.to_string())
+        }
     };
     let mut headers = vec![("Content-Type", served.mime.to_string())];
     if let Some(csp) = csp {
         headers.push(("Content-Security-Policy", csp));
     }
-    headers.extend([
-        ("X-Content-Type-Options", "nosniff".to_string()),
-        ("Cache-Control", "no-store".to_string()),
-        ("Referrer-Policy", "no-referrer".to_string()),
-        ("Connection", "close".to_string()),
-    ]);
+    headers.extend(common_headers());
     headers
 }
 
@@ -232,9 +262,32 @@ mod tests {
         assert_eq!(entry_kind("a.html", WAVE), Some(EntryKind::Html));
         assert_eq!(entry_kind("a.pdf", WAVE), Some(EntryKind::Pdf));
         assert_eq!(entry_kind("a.svg", WAVE), Some(EntryKind::Image));
-        for ext in ENTRY_EXTENSIONS {
-            assert!(entry_kind(&format!("x.{ext}"), WAVE).is_some(), "{ext} has no kind");
+        let kinds = [
+            ("html", EntryKind::Html),
+            ("htm", EntryKind::Html),
+            ("png", EntryKind::Image),
+            ("jpg", EntryKind::Image),
+            ("jpeg", EntryKind::Image),
+            ("gif", EntryKind::Image),
+            ("webp", EntryKind::Image),
+            ("ico", EntryKind::Image),
+            ("svg", EntryKind::Image),
+            ("pdf", EntryKind::Pdf),
+        ];
+        assert_eq!(kinds.len(), ENTRY_EXTENSIONS.len());
+        for (ext, kind) in kinds {
+            assert!(ENTRY_EXTENSIONS.contains(&ext), "{ext}");
+            assert_eq!(entry_kind(&format!("x.{ext}"), WAVE), Some(kind), "{ext}");
+            assert_eq!(entry_kind(&format!("x.{}", ext.to_uppercase()), WAVE), Some(kind), "{ext}");
         }
+    }
+
+    #[test]
+    fn ac9_the_entry_is_served_by_its_kind() {
+        assert_eq!(served_type("x.html", Some(EntryKind::Image)), Served { art: Art::Inert, mime: "application/octet-stream" });
+        assert_eq!(served_type("x.svg", Some(EntryKind::Image)), Served { art: Art::Inert, mime: "image/svg+xml" });
+        assert_eq!(served_type("x.html", Some(EntryKind::Pdf)), Served { art: Art::Pdf, mime: "application/pdf" });
+        assert_eq!(served_type("x.htm", Some(EntryKind::Html)), Served { art: Art::Html, mime: "text/html" });
     }
 
     // Prepared for wave 2, unreachable in wave 1 (`md` is no entry there).
@@ -275,7 +328,7 @@ mod tests {
         }
         let html = response_headers(served_type("a.html", None), GrantClass::Frame, true);
         assert_eq!(header(&html, "Content-Security-Policy"), Some(origins.as_str()));
-        assert!(!origins.contains("sandbox"));
+        assert!(!header(&html, "Content-Security-Policy").unwrap().contains("sandbox"));
 
         let switched_off = response_headers(served_type("a.html", None), GrantClass::Frame, false);
         assert_eq!(header(&switched_off, "Content-Security-Policy"), None);

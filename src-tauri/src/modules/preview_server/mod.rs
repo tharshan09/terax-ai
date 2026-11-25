@@ -29,10 +29,10 @@ use crate::modules::fs::file::{is_pdf_magic, StatKind, MAX_READ_BYTES};
 use crate::modules::ssh::RemoteReadError;
 use crate::modules::workspace::WorkspaceEnv;
 
-use grant::{grant_scope, new_token, Grant, GrantClass, HostName, Location};
+use grant::{basename, grant_scope, new_token, Grant, GrantClass, HostName, Location};
 use listener::{serve_listener, Shared};
 use policy::EntryKind;
-use source::{check_blocklist, path_text, Remote, FAKE_PDF_REASON};
+use source::{check_blocklist, clean_detail, open_for_reading, path_text, Remote, FAKE_PDF_REASON};
 
 /// Fallback address `localhost` (with `[::1]` on the same port) for the
 /// `frame` class, should WebKit refuse `127.0.0.1` in the app frame.
@@ -247,12 +247,19 @@ struct Entry {
     root: Option<String>,
 }
 
-/// Why a typed SSH call failed, as the click shows it.
+const OTHER_KIND_REASON: &str = "the link points to a different kind of file";
+const BAD_NAME_REASON: &str = "the file name cannot be served";
+const NOT_REGULAR_REASON: &str = "not a regular file";
+/// An opener error that still names a part of the link after scrubbing.
+const OPEN_FAILED_REASON: &str = "the default browser could not be started";
+
+/// Why a typed SSH call failed, as the click shows it: the host's text
+/// cleaned and shortened (it carries the MaxSessions reason of OB-14).
 fn remote_reason(error: RemoteReadError) -> String {
     match error {
         RemoteReadError::Unreachable(reason)
         | RemoteReadError::TimedOut(reason)
-        | RemoteReadError::Failed(reason) => reason,
+        | RemoteReadError::Failed(reason) => clean_detail(&reason),
         RemoteReadError::Missing => "no such file".to_string(),
         RemoteReadError::NotRegularFile => "not a regular file".to_string(),
         RemoteReadError::TooLarge => "larger than 10 MB".to_string(),
@@ -265,8 +272,44 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) 
         .map_err(|e| format!("preview server task failed: {e}"))
 }
 
-/// VAL-7 to VAL-9 and the scope for a local entry. Blocking.
-fn local_entry(path: &str, kind: EntryKind, home: Option<PathBuf>) -> Result<Entry, Denial> {
+/// The kind of a resolved entry, held against the kind of the clicked name
+/// (E1): the resolved name decides; another kind than the clicked one is
+/// refused, a name the server could never serve too.
+fn resolved_kind(clicked: EntryKind, resolved: &str) -> Result<EntryKind, Denial> {
+    let name = basename(resolved);
+    let kind = policy::entry_kind(name, policy::WAVE).ok_or(Denial::Unsupported)?;
+    if kind != clicked {
+        return Err(Denial::Refused(OTHER_KIND_REASON.to_string()));
+    }
+    if !request::acceptable_segment(name) {
+        return Err(Denial::Refused(BAD_NAME_REASON.to_string()));
+    }
+    Ok(kind)
+}
+
+/// The local home resolved like the entry (OB-3); `None` with a warning when
+/// it is unknown, not resolvable or not UTF-8, so the grant gets only the file.
+fn local_home(home: Option<PathBuf>) -> Option<String> {
+    let Some(home) = home else {
+        log::warn!("preview server: the home folder is unknown, sharing only the file");
+        return None;
+    };
+    let resolved = match std::fs::canonicalize(&home) {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            log::warn!("preview server: cannot resolve the home folder ({e}), sharing only the file");
+            return None;
+        }
+    };
+    let text = path_text(&resolved);
+    if text.is_none() {
+        log::warn!("preview server: the home folder is not valid UTF-8, sharing only the file");
+    }
+    text
+}
+
+/// VAL-7 to VAL-10 and the scope for a local entry. Blocking.
+fn local_entry(path: &str, clicked: EntryKind, home: Option<PathBuf>) -> Result<Entry, Denial> {
     check_blocklist(path).map_err(Denial::Refused)?;
     let resolved = std::fs::canonicalize(path).map_err(|e| {
         log::info!("preview server: cannot resolve the file to share: {e}");
@@ -274,9 +317,10 @@ fn local_entry(path: &str, kind: EntryKind, home: Option<PathBuf>) -> Result<Ent
     })?;
     let text = path_text(&resolved).ok_or_else(|| Denial::Refused("path is not valid UTF-8".to_string()))?;
     check_blocklist(&text).map_err(Denial::Refused)?;
+    let kind = resolved_kind(clicked, &text)?;
     let meta = std::fs::metadata(&resolved).map_err(|e| Denial::Refused(e.to_string()))?;
     if !meta.is_file() {
-        return Err(Denial::Refused("not a regular file".to_string()));
+        return Err(Denial::Refused(NOT_REGULAR_REASON.to_string()));
     }
     if meta.len() > MAX_READ_BYTES {
         return Err(Denial::TooLarge);
@@ -284,10 +328,7 @@ fn local_entry(path: &str, kind: EntryKind, home: Option<PathBuf>) -> Result<Ent
     if kind == EntryKind::Pdf && !starts_as_pdf(&resolved).map_err(|e| Denial::Refused(e.to_string()))? {
         return Err(Denial::Refused(FAKE_PDF_REASON.to_string()));
     }
-    // OB-3: the home is resolved the same way as the entry.
-    let home = home.and_then(|home| std::fs::canonicalize(&home).ok().or(Some(home)));
-    let home = home.as_deref().and_then(path_text);
-    let root = grant_scope(&text, home.as_deref(), kind);
+    let root = grant_scope(&text, local_home(home).as_deref(), kind);
     Ok(Entry {
         location: Location::Local,
         path: text,
@@ -299,7 +340,7 @@ fn local_entry(path: &str, kind: EntryKind, home: Option<PathBuf>) -> Result<Ent
 fn starts_as_pdf(path: &std::path::Path) -> std::io::Result<bool> {
     use std::io::Read;
     let mut head = Vec::new();
-    std::fs::File::open(path)?.take(8).read_to_end(&mut head)?;
+    open_for_reading(path)?.take(8).read_to_end(&mut head)?;
     Ok(is_pdf_magic(&head))
 }
 
@@ -314,8 +355,25 @@ fn entry_url(grant: &Grant) -> String {
     )
 }
 
+/// The opener's error without the link: the address (encoded and decoded),
+/// the secret and the authority become `<link>`; if any piece of the secret
+/// or the port is still there, a fixed reason replaces the whole text.
+fn scrub_link(error: &str, grant: &Grant, url: &str) -> String {
+    let decoded = percent_encoding::percent_decode_str(url).decode_utf8_lossy().into_owned();
+    let scrubbed = clean_detail(&error.replace(url, "<link>").replace(&decoded, "<link>"))
+        .replace(&grant.token, "<link>")
+        .replace(&grant.host_name.authority(grant.port), "<link>");
+    let leaks = grant.token.as_bytes().windows(8).any(|piece| scrubbed.as_bytes().windows(8).any(|w| w == piece))
+        || scrubbed.contains(&grant.port.to_string());
+    if leaks {
+        OPEN_FAILED_REASON.to_string()
+    } else {
+        scrubbed
+    }
+}
+
 /// Builds the entry address and opens it (SVC-11). An opener error never
-/// carries the address back: it, the secret and the authority become `<link>`.
+/// carries the address back (`scrub_link`).
 async fn open_entry(grant: &Grant, open: impl FnOnce(&str) -> Result<(), String> + Send + 'static) -> Result<BrowserOpen, String> {
     let url = entry_url(grant);
     let opened = {
@@ -328,10 +386,7 @@ async fn open_entry(grant: &Grant, open: impl FnOnce(&str) -> Result<(), String>
             reason: None,
         },
         Err(error) => {
-            let reason = error
-                .replace(&url, "<link>")
-                .replace(&grant.token, "<link>")
-                .replace(&grant.host_name.authority(grant.port), "<link>");
+            let reason = scrub_link(&error, grant, &url);
             log::info!("preview server: the browser did not open: {reason}");
             BrowserOpen {
                 status: BrowserOpenStatus::OpenFailed,
@@ -421,10 +476,8 @@ impl Core {
         class: GrantClass,
     ) -> Result<Result<Arc<Grant>, Denial>, String> {
         let name = grant::basename(&path).to_string();
-        let kind = match policy::entry_kind(&name, policy::WAVE) {
-            // The in-app frame is the HTML preview only.
-            Some(kind) if class == GrantClass::Browser || kind == EntryKind::Html => kind,
-            Some(_) | None => return Ok(Err(Denial::Unsupported)),
+        let Some(kind) = policy::entry_kind(&name, policy::WAVE) else {
+            return Ok(Err(Denial::Unsupported));
         };
         let entry = match WorkspaceEnv::from_option(workspace) {
             WorkspaceEnv::Wsl { .. } => Err(Denial::Unsupported),
@@ -435,6 +488,8 @@ impl Core {
             WorkspaceEnv::Ssh { host } => self.remote_entry(host, path, kind).await?,
         };
         let granted = match entry {
+            // The in-app frame is the HTML preview only, by the resolved kind.
+            Ok(entry) if class == GrantClass::Frame && entry.kind != EntryKind::Html => Err(Denial::Unsupported),
             Ok(entry) => self.grant(entry, class)?,
             Err(denial) => Err(denial),
         };
@@ -462,6 +517,10 @@ impl Core {
         if let Err(reason) = check_blocklist(&resolved) {
             return Ok(Err(Denial::Refused(reason)));
         }
+        let kind = match resolved_kind(kind, &resolved) {
+            Ok(kind) => kind,
+            Err(denial) => return Ok(Err(denial)),
+        };
         let stat = {
             let (stat, host, resolved) = (Arc::clone(&remote.stat), host.clone(), resolved.clone());
             match blocking(move || stat(&host, &resolved)).await? {
@@ -470,7 +529,7 @@ impl Core {
             }
         };
         if !matches!(stat.kind, StatKind::File) {
-            return Ok(Err(Denial::Refused("not a regular file".to_string())));
+            return Ok(Err(Denial::Refused(NOT_REGULAR_REASON.to_string())));
         }
         if stat.size > MAX_READ_BYTES {
             return Ok(Err(Denial::TooLarge));
@@ -526,6 +585,18 @@ impl Core {
         };
         let failed = |e: std::io::Error| format!("could not start the preview server: {e}");
         let (port, sockets) = bind_listeners(host_name).map_err(failed)?;
+        #[cfg(test)]
+        let addrs = sockets.iter().filter_map(|s| s.local_addr().ok()).collect();
+        // Every socket is converted before any listener starts, so a failure
+        // leaves no listener without a grant.
+        let sockets = sockets
+            .into_iter()
+            .map(|socket| {
+                socket.set_nonblocking(true)?;
+                tokio::net::TcpListener::from_std(socket)
+            })
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(failed)?;
         let grant = Arc::new(Grant {
             token: new_token()?,
             class,
@@ -536,10 +607,10 @@ impl Core {
             host_name,
             port,
             connections: Arc::new(Semaphore::new(self.shared.limits.connections_per_grant)),
+            #[cfg(test)]
+            addrs,
         });
         for socket in sockets {
-            socket.set_nonblocking(true).map_err(failed)?;
-            let socket = tokio::net::TcpListener::from_std(socket).map_err(failed)?;
             tokio::spawn(serve_listener(socket, Arc::clone(&grant), Arc::clone(&self.shared)));
         }
         grants.push(Arc::clone(&grant));
@@ -628,12 +699,24 @@ pub(crate) mod testkit {
             host_name: HostName::Ip,
             port: 0,
             connections: Arc::new(Semaphore::new(16)),
+            addrs: Vec::new(),
         }
     }
 
+    /// A real, empty home folder shared by the tests that name none.
+    fn test_home() -> PathBuf {
+        static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        HOME.get_or_init(|| tempfile::tempdir().unwrap()).path().to_path_buf()
+    }
+
     pub(crate) fn core(fake: &Arc<FakeHost>, home: Option<PathBuf>, config: Config) -> Arc<Core> {
-        let home = home.or_else(|| Some(PathBuf::from("/nonexistent-home")));
-        Arc::new(Core::new(config, fake.remote(), Arc::new(move || home.clone())))
+        let home = home.unwrap_or_else(test_home);
+        Arc::new(Core::new(config, fake.remote(), Arc::new(move || Some(home.clone()))))
+    }
+
+    /// A server whose local home cannot be found.
+    pub(crate) fn core_without_home(config: Config) -> Arc<Core> {
+        Arc::new(Core::new(config, FakeHost::new().remote(), Arc::new(|| None)))
     }
 
     /// One `current_thread` runtime driven by its own thread for the server's
@@ -665,6 +748,15 @@ pub(crate) mod testkit {
 
         pub(crate) fn block_on<F: Future>(&self, work: F) -> F::Output {
             self.handle.block_on(work)
+        }
+
+        /// Runs `work` on the server's own thread.
+        pub(crate) fn spawn<F>(&self, work: F) -> tokio::task::JoinHandle<F::Output>
+        where
+            F: Future + Send + 'static,
+            F::Output: Send + 'static,
+        {
+            self.handle.spawn(work)
         }
     }
 
@@ -742,6 +834,8 @@ pub(crate) mod testkit {
         sizes: Mutex<HashMap<String, u64>>,
         calls: Mutex<Vec<Call>>,
         realpath_calls: Mutex<Vec<(String, String)>>,
+        realpath_holds: Mutex<HashMap<String, Arc<Latch>>>,
+        ignore_limit: Mutex<bool>,
         delay: Mutex<Duration>,
         holds: Mutex<HashMap<String, Arc<Latch>>>,
         hang: Mutex<HashSet<String>>,
@@ -783,6 +877,16 @@ pub(crate) mod testkit {
         /// The size `stat` reports, instead of the length of the bytes.
         pub(crate) fn size(&self, path: &str, size: u64) {
             self.sizes.lock().unwrap().insert(path.to_string(), size);
+        }
+
+        /// Breaks the helper's promise: bytes above `limit` are sent anyway.
+        pub(crate) fn ignore_limit(&self) {
+            *self.ignore_limit.lock().unwrap() = true;
+        }
+
+        /// The first `realpath` of `path` waits until `latch` opens.
+        pub(crate) fn hold_realpath(&self, path: &str, latch: &Arc<Latch>) {
+            self.realpath_holds.lock().unwrap().insert(path.to_string(), Arc::clone(latch));
         }
 
         pub(crate) fn set_delay(&self, delay: Duration) {
@@ -880,7 +984,7 @@ pub(crate) mod testkit {
                 return Err(RemoteReadError::NotRegularFile);
             }
             let bytes = self.files.lock().unwrap().get(&real).cloned().ok_or(RemoteReadError::Missing)?;
-            if bytes.len() as u64 > limit {
+            if bytes.len() as u64 > limit && !*self.ignore_limit.lock().unwrap() {
                 return Err(RemoteReadError::TooLarge);
             }
             Ok(RemoteFileBytes {
@@ -891,6 +995,10 @@ pub(crate) mod testkit {
 
         fn realpath(&self, host: &str, path: &str) -> Result<String, RemoteReadError> {
             self.realpath_calls.lock().unwrap().push((host.to_string(), path.to_string()));
+            let held = self.realpath_holds.lock().unwrap().remove(path);
+            if let Some(latch) = held {
+                latch.pass();
+            }
             if let Some(error) = self.realpath_errors.lock().unwrap().get(path) {
                 return Err(error.clone());
             }
@@ -1153,17 +1261,20 @@ mod tests {
     }
 
     #[test]
-    fn ac25_no_socket_before_the_first_click_and_one_grant_per_file() {
+    fn ac25_no_grant_and_no_bound_listener_before_the_first_click() {
         let dir = tempfile::tempdir().unwrap();
         let page = dir.path().join("p/a.html");
         write(&page, b"<html>");
         let driver = Driver::new();
         let core = testkit::core(&FakeHost::new(), None, testkit::config());
+        let bound = |core: &Core| core.grants().iter().map(|g| g.addrs.len()).sum::<usize>();
         assert!(core.grants().is_empty());
+        assert_eq!(bound(&core), 0);
         let (first, one) = open(&driver, &core, &page);
         let (second, two) = open(&driver, &core, &page);
         assert_eq!((first, second), (opened(), opened()));
         assert_eq!(core.grants().len(), 1);
+        assert_eq!(bound(&core), 1);
         assert_eq!(one.urls(), two.urls());
         let link = Link::parse(&two.urls()[0]);
         assert_eq!(get(link.port, &link.path("a.html"), &format!("127.0.0.1:{}", link.port)).status, 200);
@@ -1535,5 +1646,206 @@ mod tests {
         let link = Link::parse(&driver.block_on(core.frame_source(text(&page), None)).unwrap().url.unwrap());
         let reply = send(link.port, format!("DELETE {} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", link.path("a.html"), link.port).as_bytes());
         assert_eq!((reply.status, reply.body.len()), (405, 0));
+    }
+
+    fn refused_with(reason: &str) -> BrowserOpen {
+        BrowserOpen {
+            status: BrowserOpenStatus::Refused,
+            reason: Some(reason.into()),
+        }
+    }
+
+    /// Sicherheitsmodell 15
+    /// Sicherheitsmodell 16
+    #[cfg(unix)]
+    #[test]
+    fn ac26_the_kind_follows_the_resolved_entry() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("p");
+        write(&p.join("seite.html"), b"<html><script></script>");
+        write(&p.join("x.html"), b"%PDF-1.7\n<script></script>");
+        write(&p.join("daten.txt"), b"text");
+        write(&p.join("bild.png"), b"PNG");
+        write(&p.join("page.html"), b"<html>P</html>");
+        symlink(p.join("seite.html"), p.join("harmlos.png")).unwrap();
+        symlink(p.join("x.html"), p.join("bericht.pdf")).unwrap();
+        symlink(p.join("daten.txt"), p.join("liste.html")).unwrap();
+        symlink(p.join("bild.png"), p.join("link.html")).unwrap();
+        symlink(p.join("page.html"), p.join("index.htm")).unwrap();
+        symlink(p.join("bild.png"), p.join("a.jpg")).unwrap();
+        let driver = Driver::new();
+        let core = testkit::core(&FakeHost::new(), None, testkit::config());
+
+        for name in ["harmlos.png", "bericht.pdf", "link.html"] {
+            assert_eq!(open(&driver, &core, &p.join(name)).0, refused_with(OTHER_KIND_REASON), "{name}");
+        }
+        assert_eq!(open(&driver, &core, &p.join("liste.html")).0, status_only(BrowserOpenStatus::Unsupported));
+        assert!(core.grants().is_empty());
+
+        // The same kind under another extension is fine, and the link and its
+        // target share one grant in both orders: kind and scope follow from
+        // the resolved path, the key of the grant.
+        let (link_first, by_link) = open(&driver, &core, &p.join("index.htm"));
+        let (target_next, by_target) = open(&driver, &core, &p.join("page.html"));
+        assert_eq!((link_first, target_next), (opened(), opened()));
+        assert_eq!(by_link.urls(), by_target.urls());
+        let (target_first, by_target) = open(&driver, &core, &p.join("bild.png"));
+        let (link_next, by_link) = open(&driver, &core, &p.join("a.jpg"));
+        assert_eq!((target_first, link_next), (opened(), opened()));
+        assert_eq!(by_link.urls(), by_target.urls());
+        let kinds: Vec<(EntryKind, bool)> = core.grants().iter().map(|g| (g.kind, g.root.is_some())).collect();
+        assert_eq!(kinds, [(EntryKind::Html, true), (EntryKind::Image, false)]);
+
+        // The image entry is served inert, whatever it holds.
+        let image = Link::parse(&by_link.urls()[0]);
+        let reply = get(image.port, &image.path("bild.png"), &format!("127.0.0.1:{}", image.port));
+        assert_eq!(reply.header("Content-Security-Policy"), Some(policy::INERT_CSP));
+    }
+
+    #[test]
+    fn ac28_over_ssh_the_kind_follows_the_resolved_entry() {
+        let fake = FakeHost::new();
+        fake.file("/srv/p/seite.html", b"<html><script></script>");
+        fake.file("/srv/p/x.html", b"%PDF-1.7\n<script></script>");
+        fake.file("/srv/p/daten.txt", b"text");
+        fake.file("/srv/p/page.html", b"<html>P</html>");
+        fake.link("/srv/p/harmlos.png", "/srv/p/seite.html");
+        fake.link("/srv/p/bericht.pdf", "/srv/p/x.html");
+        fake.link("/srv/p/liste.html", "/srv/p/daten.txt");
+        fake.link("/srv/p/index.htm", "/srv/p/page.html");
+        let driver = Driver::new();
+        let core = testkit::core(&fake, None, testkit::config());
+        for name in ["harmlos.png", "bericht.pdf"] {
+            assert_eq!(ssh_open(&driver, &core, &format!("/srv/p/{name}")).0, refused_with(OTHER_KIND_REASON), "{name}");
+        }
+        assert_eq!(ssh_open(&driver, &core, "/srv/p/liste.html").0, status_only(BrowserOpenStatus::Unsupported));
+        assert!(core.grants().is_empty());
+        let (link_first, by_link) = ssh_open(&driver, &core, "/srv/p/index.htm");
+        let (target_next, by_target) = ssh_open(&driver, &core, "/srv/p/page.html");
+        assert_eq!((link_first, target_next), (opened(), opened()));
+        assert_eq!(by_link.urls(), by_target.urls());
+        assert_eq!(core.grants().len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ac26_entry_names_the_server_cannot_serve_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = dir.path().join("p/a\\b.html");
+        write(&page, b"<html>");
+        let driver = Driver::new();
+        let core = testkit::core(&FakeHost::new(), None, testkit::config());
+        assert_eq!(open(&driver, &core, &page).0, refused_with(BAD_NAME_REASON));
+        assert!(core.grants().is_empty());
+    }
+
+    #[test]
+    fn ac26_folders_fifos_and_missing_files_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("p");
+        std::fs::create_dir_all(p.join("x.html")).unwrap();
+        let driver = Driver::new();
+        let core = testkit::core(&FakeHost::new(), None, testkit::config());
+        assert_eq!(open(&driver, &core, &p.join("x.html")).0, refused_with("not a regular file"));
+        assert_eq!(open(&driver, &core, &p.join("fehlt.html")).0, refused_with("the file cannot be found"));
+        #[cfg(unix)]
+        {
+            let fifo = std::ffi::CString::new(p.join("y.html").to_str().unwrap()).unwrap();
+            // SAFETY: a valid NUL-terminated path.
+            assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+            assert_eq!(open(&driver, &core, &p.join("y.html")).0, refused_with("not a regular file"));
+        }
+        assert!(core.grants().is_empty());
+    }
+
+    #[test]
+    fn ac29_the_frame_is_for_html_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("p");
+        write(&p.join("a.png"), b"PNG");
+        write(&p.join("a.pdf"), b"%PDF-1.7");
+        write(&p.join("a.svg"), b"<svg/>");
+        let driver = Driver::new();
+        let core = testkit::core(&FakeHost::new(), None, testkit::config());
+        for name in ["a.png", "a.pdf", "a.svg"] {
+            let frame = driver.block_on(core.frame_source(text(&p.join(name)), None)).unwrap();
+            assert_eq!((frame.status, frame.url), (FrameStatus::Unsupported, None), "{name}");
+        }
+        assert!(core.grants().is_empty());
+    }
+
+    #[test]
+    fn ac3_without_a_home_the_link_gives_only_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = dir.path().join("p/a.html");
+        write(&page, b"<html>");
+        write(&dir.path().join("p/b.png"), b"B");
+        let driver = Driver::new();
+        let core = testkit::core_without_home(testkit::config());
+        let (answer, opener) = open(&driver, &core, &page);
+        assert_eq!(answer, opened());
+        assert_eq!(core.grants()[0].root, None);
+        let link = Link::parse(&opener.urls()[0]);
+        let host = format!("127.0.0.1:{}", link.port);
+        assert_eq!(get(link.port, &link.path("a.html"), &host).status, 200);
+        assert_eq!(get(link.port, &link.path("b.png"), &host).status, 403);
+        assert_eq!(local_home(Some(dir.path().join("missing"))), None);
+        assert_eq!(local_home(Some(dir.path().to_path_buf())), Some(canon(dir.path())));
+    }
+
+    #[test]
+    fn ac36_the_opener_reason_never_keeps_a_piece_of_the_link() {
+        let grant = testkit::grant(Location::Local, "/p/Bericht März.html", None, EntryKind::Html, GrantClass::Browser);
+        let grant = Grant { port: 32891, ..grant };
+        let url = entry_url(&grant);
+        let decoded = format!("http://127.0.0.1:32891/{}/Bericht März.html", grant.token);
+        assert_eq!(scrub_link(&format!("cannot open {decoded}"), &grant, &url), "cannot open <link>");
+        assert_eq!(scrub_link(&format!("token {} rejected", grant.token), &grant, &url), "token <link> rejected");
+        assert_eq!(scrub_link(&format!("cut {}", &url[..60]), &grant, &url), OPEN_FAILED_REASON);
+        assert_eq!(scrub_link("listener on port 32891", &grant, &url), OPEN_FAILED_REASON);
+        assert_eq!(scrub_link("no handler\r\nfor http", &grant, &url), "no handler  for http");
+    }
+
+    #[test]
+    fn ac35_the_click_reason_is_cleaned_and_short() {
+        let fake = FakeHost::new();
+        fake.file("/srv/p/a.html", b"<html>");
+        let noisy = format!("ssh: connect failed\r\n{}", "x".repeat(400));
+        fake.fail_realpath("/srv/p/a.html", RemoteReadError::Unreachable(noisy));
+        let driver = Driver::new();
+        let core = testkit::core(&fake, None, testkit::config());
+        let reason = ssh_open(&driver, &core, "/srv/p/a.html").0.reason.unwrap();
+        assert!(!reason.contains('\r') && !reason.contains('\n'), "{reason:?}");
+        assert!(reason.chars().count() <= 161, "{}", reason.chars().count());
+    }
+
+    #[test]
+    fn ac19_a_blocked_ssh_call_of_a_click_does_not_stop_local_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = dir.path().join("p/a.html");
+        write(&page, b"<html>L</html>");
+        let fake = FakeHost::new();
+        fake.file("/srv/p/a.html", b"<html>");
+        let latch = testkit::Latch::new();
+        fake.hold_realpath("/srv/p/a.html", &latch);
+        let driver = Driver::new();
+        let core = testkit::core(&fake, None, testkit::config());
+        let local = Link::parse(&open(&driver, &core, &page).1.urls()[0]);
+        let click = {
+            let core = Arc::clone(&core);
+            driver.spawn(async move {
+                core.open_in_browser("/srv/p/a.html".into(), testkit::ssh("devbox"), Opener::default().answering(Ok(()))).await
+            })
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !latch.entered() {
+            assert!(std::time::Instant::now() < deadline, "the click never reached realpath");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let reply = get(local.port, &local.path("a.html"), &format!("127.0.0.1:{}", local.port));
+        assert_eq!(reply.status, 200);
+        latch.open();
+        assert_eq!(driver.block_on(click).unwrap().unwrap(), opened());
     }
 }

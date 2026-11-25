@@ -1,7 +1,8 @@
 //! Reading a requested file through the same chain for every file of a
 //! grant, entry and neighbours alike, never `trusted`: scope by text, deny-list
-//! on the text, resolve, scope and deny-list on the resolved target (locally
-//! again on the opened file), regular file, 10 MiB, PDF magic.
+//! on the text, resolve, then scope and deny-list on the resolved target, and
+//! again on the opened file (on macOS and Linux the path of the open handle; on
+//! Windows by resolving the path again), regular file, 10 MiB, PDF magic.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -16,7 +17,7 @@ use crate::modules::fs::file::{is_pdf_magic, FileStat, MAX_READ_BYTES};
 use crate::modules::fs::guard;
 use crate::modules::ssh::{self, RemoteFileBytes, RemoteReadError};
 
-use super::grant::Grant;
+use super::grant::{Grant, Location};
 use super::policy::{self, Art, Served};
 use super::request::Target;
 use super::Limits;
@@ -24,6 +25,8 @@ use super::Limits;
 pub(crate) const GIT_REASON: &str = "path is inside a .git folder";
 pub(crate) const FAKE_PDF_REASON: &str = "not a real PDF";
 const OUTSIDE_REASON: &str = "path is outside the shared folder";
+/// Longest text from a host that reaches a log line or a click reason.
+const DETAIL_CHARS: usize = 160;
 
 /// The bytes of a file and how to serve them.
 #[derive(Debug)]
@@ -32,24 +35,45 @@ pub(crate) struct Loaded {
     pub served: Served,
 }
 
+/// Why the host could not be read, as the page names it. The host's own text
+/// never reaches the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Gateway {
+    /// `Unreachable` after the retry.
+    Unreachable,
+    /// `Failed` (also a killed helper).
+    Failed,
+}
+
+/// Why a `504` happened; only the log tells them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Timeout {
+    /// The read used up `ssh_read_budget`.
+    Budget,
+    /// The file waited `host_wait` for a slot without progress.
+    Wait,
+}
+
 /// Why a file is not served. `Refused` carries the reason for the log and the
-/// click; the browser only sees the fixed text.
+/// click, `detail` the cleaned text of the host for the log; the browser only
+/// sees the fixed text of `body`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Refusal {
     NotFound,
     Refused(String),
     TooLarge,
-    /// `502`: the host could not be read (`Unreachable` after the retry, or
-    /// `Failed`).
+    /// `502`: the host could not be read.
     BadGateway {
         name: String,
         host: String,
-        reason: String,
+        kind: Gateway,
+        detail: String,
     },
     /// `504`: the read hit its budget or the wait for the host's slot ended.
     TimedOut {
         name: String,
         host: String,
+        cause: Timeout,
     },
 }
 
@@ -63,19 +87,38 @@ impl Refusal {
         }
     }
 
-    /// The text page the browser gets.
+    /// The text page the browser gets: a fixed sentence per kind, with only
+    /// the file name and the host of the grant filled in.
     pub(crate) fn body(&self) -> String {
         match self {
             Self::NotFound => "Not found".to_string(),
             Self::Refused(_) => "Refused by Terax".to_string(),
             Self::TooLarge => "Larger than 10 MB".to_string(),
-            Self::BadGateway { name, host, reason } => {
-                format!("Terax could not read {name} from {host}: {reason}")
+            Self::BadGateway { name, host, kind, .. } => {
+                let why = match kind {
+                    Gateway::Unreachable => "the host could not be reached",
+                    Gateway::Failed => "the read failed",
+                };
+                format!("Terax could not read {name} from {host}: {why}")
             }
-            Self::TimedOut { name, host } => {
+            Self::TimedOut { name, host, .. } => {
                 format!("Terax could not read {name} from {host}: timed out")
             }
         }
+    }
+}
+
+/// A text from a host (stderr, a helper's message) for a log line or a click
+/// reason: control characters become spaces, at most `DETAIL_CHARS` chars.
+pub(crate) fn clean_detail(text: &str) -> String {
+    let cleaned: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let cleaned = cleaned.trim();
+    match cleaned.char_indices().nth(DETAIL_CHARS) {
+        Some((cut, _)) => format!("{}…", &cleaned[..cut]),
+        None => cleaned.to_string(),
     }
 }
 
@@ -105,6 +148,21 @@ pub(crate) fn within(path: &str, root: &str) -> bool {
     }
     let root = root.trim_end_matches('/');
     path.strip_prefix(root).is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// An absolute path (`/…` or `C:/…`) without empty, `.` or `..` segments, so
+/// a comparison by text means what it says.
+fn is_normalized(path: &str) -> bool {
+    let rest = if let Some(rest) = path.strip_prefix('/') {
+        rest
+    } else {
+        let b = path.as_bytes();
+        if b.len() < 3 || !b[0].is_ascii_alphabetic() || b[1] != b':' || b[2] != b'/' {
+            return false;
+        }
+        &path[3..]
+    };
+    !rest.is_empty() && rest.split('/').all(|s| !s.is_empty() && s != "." && s != "..")
 }
 
 /// Folder of a `/`-separated path; `/` for a file in the root.
@@ -146,19 +204,22 @@ fn requested(grant: &Grant, target: &Target) -> Result<(String, String), Refusal
     Ok((path, name))
 }
 
-/// VAL-6 and VAL-7 on a resolved target.
+/// VAL-6 and VAL-7 on a resolved target: normalized, below the folder (the
+/// folder itself is no file) or exactly the entry, and past the deny-list.
 fn check_target(grant: &Grant, resolved: &str) -> Result<(), Refusal> {
-    let in_scope = match &grant.root {
-        Some(root) => within(resolved, root),
-        None => resolved == grant.entry,
-    };
+    let in_scope = is_normalized(resolved)
+        && match &grant.root {
+            Some(root) => resolved != root && within(resolved, root),
+            None => resolved == grant.entry,
+        };
     if !in_scope {
         return Err(Refusal::Refused(OUTSIDE_REASON.to_string()));
     }
     check_blocklist(resolved).map_err(Refusal::Refused)
 }
 
-/// The type to serve, and VAL-9 for a PDF.
+/// The type to serve, and VAL-9 for a PDF. The entry is served by the kind
+/// of its grant.
 fn finish(grant: &Grant, name: &str, resolved: &str, bytes: Vec<u8>) -> Result<Loaded, Refusal> {
     let entry = (resolved == grant.entry).then_some(grant.kind);
     let served = policy::served_type(name, entry);
@@ -180,25 +241,8 @@ pub(crate) fn read_local(grant: &Grant, target: &Target) -> Result<Loaded, Refus
     let resolved_text = path_text(&resolved)
         .ok_or_else(|| Refusal::Refused("path is not valid UTF-8".to_string()))?;
     check_target(grant, &resolved_text)?;
-    let file = open_for_reading(&resolved).map_err(|e| {
-        log::debug!("preview server: cannot open {name}: {e}");
-        Refusal::NotFound
-    })?;
-    let meta = file.metadata().map_err(|e| {
-        log::debug!("preview server: cannot stat {name}: {e}");
-        Refusal::NotFound
-    })?;
-    if !meta.is_file() {
-        return Err(Refusal::NotFound);
-    }
-    let opened = opened_path(&file, &resolved).map_err(|e| {
-        log::debug!("preview server: cannot check the opened {name}: {e}");
-        Refusal::Refused("the opened file could not be checked".to_string())
-    })?;
-    let opened_text =
-        path_text(&opened).ok_or_else(|| Refusal::Refused("path is not valid UTF-8".to_string()))?;
-    check_target(grant, &opened_text)?;
-    if meta.len() > MAX_READ_BYTES {
+    let (file, len, opened_text) = open_checked(grant, &resolved, &name)?;
+    if len > MAX_READ_BYTES {
         return Err(Refusal::TooLarge);
     }
     let mut bytes = Vec::new();
@@ -212,10 +256,35 @@ pub(crate) fn read_local(grant: &Grant, target: &Target) -> Result<Loaded, Refus
     finish(grant, &name, &opened_text, bytes)
 }
 
+/// Opens a resolved target and checks the file that is actually open, so a
+/// path swapped for a link after resolving is caught. Returns the file, its
+/// length and the checked path.
+fn open_checked(grant: &Grant, resolved: &Path, name: &str) -> Result<(std::fs::File, u64, String), Refusal> {
+    let file = open_for_reading(resolved).map_err(|e| {
+        log::debug!("preview server: cannot open {name}: {e}");
+        Refusal::NotFound
+    })?;
+    let meta = file.metadata().map_err(|e| {
+        log::debug!("preview server: cannot stat {name}: {e}");
+        Refusal::NotFound
+    })?;
+    if !meta.is_file() {
+        return Err(Refusal::NotFound);
+    }
+    let opened = opened_path(&file, resolved).map_err(|e| {
+        log::debug!("preview server: cannot check the opened {name}: {e}");
+        Refusal::Refused("the opened file could not be checked".to_string())
+    })?;
+    let opened_text =
+        path_text(&opened).ok_or_else(|| Refusal::Refused("path is not valid UTF-8".to_string()))?;
+    check_target(grant, &opened_text)?;
+    Ok((file, meta.len(), opened_text))
+}
+
 /// Without `O_NONBLOCK` opening a FIFO named like an image would hang the
 /// thread; a regular file reads the same either way.
 #[cfg(unix)]
-fn open_for_reading(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_for_reading(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     std::fs::OpenOptions::new()
         .read(true)
@@ -224,12 +293,11 @@ fn open_for_reading(path: &Path) -> std::io::Result<std::fs::File> {
 }
 
 #[cfg(not(unix))]
-fn open_for_reading(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_for_reading(path: &Path) -> std::io::Result<std::fs::File> {
     std::fs::File::open(path)
 }
 
-/// The path of the file that is actually open, so a link swapped between
-/// resolving and opening is caught.
+/// The path of the open handle (`F_GETPATH`).
 #[cfg(target_os = "macos")]
 pub(crate) fn opened_path(file: &std::fs::File, _resolved: &Path) -> std::io::Result<PathBuf> {
     use std::ffi::OsStr;
@@ -245,13 +313,15 @@ pub(crate) fn opened_path(file: &std::fs::File, _resolved: &Path) -> std::io::Re
     Ok(PathBuf::from(OsStr::from_bytes(&buf[..len])))
 }
 
+/// The path of the open handle (`/proc/self/fd`).
 #[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) fn opened_path(file: &std::fs::File, _resolved: &Path) -> std::io::Result<PathBuf> {
     use std::os::unix::io::AsRawFd;
     std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
 }
 
-/// Windows has no cheap path of a handle here; the path is resolved again.
+/// Not the path of the open handle: the path is resolved a second time, so a
+/// swap between opening and this check is not caught on Windows.
 #[cfg(windows)]
 pub(crate) fn opened_path(_file: &std::fs::File, resolved: &Path) -> std::io::Result<PathBuf> {
     std::fs::canonicalize(resolved)
@@ -287,8 +357,15 @@ struct HostSlot {
     progress: Mutex<Instant>,
 }
 
+/// Why `ReadGate::read` gave no bytes.
+enum ReadFailure {
+    Host(RemoteReadError),
+    Waited,
+}
+
 /// SEC-14 and OB-12: at most `reads_total` SSH reads at once, `reads_per_host`
-/// of them per host; a file waits at most `host_wait` without progress.
+/// of them per host; a file waits at most `host_wait` without progress and
+/// keeps its place in the queue while it waits.
 pub(crate) struct ReadGate {
     limits: Limits,
     total: Arc<Semaphore>,
@@ -317,9 +394,11 @@ impl ReadGate {
     async fn wait_for_host(&self, slot: &HostSlot) -> Option<OwnedSemaphorePermit> {
         let start = Instant::now();
         let since = || (*slot.progress.lock().unwrap_or_else(PoisonError::into_inner)).max(start);
+        // One acquire for the whole wait: dropping it would leave the queue.
+        let mut acquire = Box::pin(Arc::clone(&slot.permits).acquire_owned());
         loop {
             let deadline = since() + self.limits.host_wait;
-            match tokio::time::timeout_at(deadline, Arc::clone(&slot.permits).acquire_owned()).await {
+            match tokio::time::timeout_at(deadline, acquire.as_mut()).await {
                 Ok(permit) => return permit.ok(),
                 // Another read of this host ended meanwhile: the wait restarts.
                 Err(_) if Instant::now() < since() + self.limits.host_wait => continue,
@@ -331,15 +410,14 @@ impl ReadGate {
     /// One read of `path` on `host` through the slots, on a blocking thread,
     /// with one retry after `Unreachable`. The slot stays taken until the
     /// reader returns, even if the request is gone.
-    async fn read(&self, host: &str, path: &str, read: Arc<ReadFn>) -> Result<RemoteFileBytes, RemoteReadError> {
-        let waited = || RemoteReadError::TimedOut("waited too long for the host".to_string());
+    async fn read(&self, host: &str, path: &str, read: Arc<ReadFn>) -> Result<RemoteFileBytes, ReadFailure> {
         let slot = self.slot(host);
-        let host_permit = self.wait_for_host(&slot).await.ok_or_else(waited)?;
+        let host_permit = self.wait_for_host(&slot).await.ok_or(ReadFailure::Waited)?;
         let total_permit = tokio::time::timeout(self.limits.host_wait, Arc::clone(&self.total).acquire_owned())
             .await
             .ok()
             .and_then(Result::ok)
-            .ok_or_else(waited)?;
+            .ok_or(ReadFailure::Waited)?;
         let (host, path) = (host.to_string(), path.to_string());
         let (budget, pause) = (self.limits.ssh_read_budget, self.limits.retry_pause);
         tokio::task::spawn_blocking(move || {
@@ -350,36 +428,57 @@ impl ReadGate {
                 result = read(&host, &path, MAX_READ_BYTES, budget);
             }
             *slot.progress.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now();
-            result
+            result.map_err(ReadFailure::Host)
         })
         .await
-        .unwrap_or_else(|e| Err(RemoteReadError::Failed(format!("the read task failed: {e}"))))
+        .unwrap_or_else(|e| Err(ReadFailure::Host(RemoteReadError::Failed(format!("the read task failed: {e}")))))
     }
 }
 
-/// What the browser gets for a failed SSH read; only the variant counts.
-fn remote_refusal(error: RemoteReadError, name: &str, host: &str) -> Refusal {
+/// What the browser gets for a failed SSH read; only the variant counts, the
+/// host's text goes to the log only.
+fn remote_refusal(failure: ReadFailure, name: &str, host: &str) -> Refusal {
     let (name, host) = (name.to_string(), host.to_string());
+    let error = match failure {
+        ReadFailure::Waited => {
+            return Refusal::TimedOut {
+                name,
+                host,
+                cause: Timeout::Wait,
+            }
+        }
+        ReadFailure::Host(error) => error,
+    };
     match error {
         RemoteReadError::Missing | RemoteReadError::NotRegularFile => Refusal::NotFound,
         RemoteReadError::TooLarge => Refusal::TooLarge,
-        RemoteReadError::TimedOut(_) => Refusal::TimedOut { name, host },
-        RemoteReadError::Unreachable(reason) | RemoteReadError::Failed(reason) => {
-            Refusal::BadGateway { name, host, reason }
-        }
+        RemoteReadError::TimedOut(_) => Refusal::TimedOut {
+            name,
+            host,
+            cause: Timeout::Budget,
+        },
+        RemoteReadError::Unreachable(detail) => Refusal::BadGateway {
+            name,
+            host,
+            kind: Gateway::Unreachable,
+            detail: clean_detail(&detail),
+        },
+        RemoteReadError::Failed(detail) => Refusal::BadGateway {
+            name,
+            host,
+            kind: Gateway::Failed,
+            detail: clean_detail(&detail),
+        },
     }
 }
 
-/// Reads a file of an SSH grant on `host`, the host of that grant. The
-/// deny-list runs on the text before anything is sent, scope and deny-list
-/// again on the target the host reports.
-pub(crate) async fn read_remote(
-    grant: &Grant,
-    host: &str,
-    target: &Target,
-    gate: &ReadGate,
-    read: Arc<ReadFn>,
-) -> Result<Loaded, Refusal> {
+/// Reads a file of an SSH grant on the grant's own host. The deny-list runs
+/// on the text before anything is sent, scope and deny-list again on the
+/// target the host reports.
+pub(crate) async fn read_remote(grant: &Grant, target: &Target, gate: &ReadGate, read: Arc<ReadFn>) -> Result<Loaded, Refusal> {
+    let Location::Ssh { host } = &grant.location else {
+        return Err(Refusal::Refused("not an SSH link".to_string()));
+    };
     let (path, name) = requested(grant, target)?;
     check_blocklist(&path).map_err(Refusal::Refused)?;
     let file = gate
@@ -594,10 +693,7 @@ mod tests {
     }
 
     fn remote(fake: &Arc<FakeHost>, gate: &ReadGate, grant: &Grant, rel: &str) -> Result<Loaded, Refusal> {
-        let Location::Ssh { host } = &grant.location else {
-            panic!("an SSH grant")
-        };
-        run(read_remote(grant, host, &target(rel), gate, fake.reader()))
+        run(read_remote(grant, &target(rel), gate, fake.reader()))
     }
 
     /// Sicherheitsmodell 8
@@ -659,13 +755,13 @@ mod tests {
             (
                 vec![RemoteReadError::Failed("boom".into())],
                 502,
-                "Terax could not read y.png from devbox: boom",
+                "Terax could not read y.png from devbox: the read failed",
                 1,
             ),
             (
                 vec![RemoteReadError::Unreachable("gone".into()), RemoteReadError::Unreachable("gone".into())],
                 502,
-                "Terax could not read y.png from devbox: gone",
+                "Terax could not read y.png from devbox: the host could not be reached",
                 2,
             ),
             // The text never decides: a timeout worded like a missing file.
@@ -738,7 +834,7 @@ mod tests {
                 let host = if i % 2 == 0 { "devbox" } else { "box2" };
                 jobs.push(tokio::spawn(async move {
                     let grant = grant_on(host);
-                    read_remote(&grant, host, &target("y.png"), &gate, fake.reader()).await.map(|l| l.bytes)
+                    read_remote(&grant, &target("y.png"), &gate, fake.reader()).await.map(|l| l.bytes)
                 }));
             }
             let mut out = Vec::new();
@@ -768,7 +864,7 @@ mod tests {
                 jobs.push(tokio::spawn(async move {
                     let host = format!("box{i}");
                     let grant = grant_on(&host);
-                    read_remote(&grant, &host, &target("y.png"), &gate, fake.reader()).await.is_ok()
+                    read_remote(&grant, &target("y.png"), &gate, fake.reader()).await.is_ok()
                 }));
             }
             let mut out = Vec::new();
@@ -796,13 +892,13 @@ mod tests {
             let first = {
                 let (fake, gate) = (Arc::clone(&fake), Arc::clone(&gate));
                 tokio::spawn(async move {
-                    read_remote(&grant_on("devbox"), "devbox", &target("a.png"), &gate, fake.reader()).await.is_ok()
+                    read_remote(&grant_on("devbox"), &target("a.png"), &gate, fake.reader()).await.is_ok()
                 })
             };
             latch.wait_until_entered().await;
 
             let started = Instant::now();
-            let second = read_remote(&grant_on("devbox"), "devbox", &target("b.png"), &gate, fake.reader()).await;
+            let second = read_remote(&grant_on("devbox"), &target("b.png"), &gate, fake.reader()).await;
             let waited = started.elapsed();
             let refusal = second.unwrap_err();
             assert_eq!(
@@ -812,13 +908,13 @@ mod tests {
             assert!(waited >= Duration::from_millis(200), "{waited:?}");
 
             let started = Instant::now();
-            let other = read_remote(&grant_on("box2"), "box2", &target("c.png"), &gate, fake.reader()).await;
+            let other = read_remote(&grant_on("box2"), &target("c.png"), &gate, fake.reader()).await;
             assert_eq!(other.map(|l| l.bytes).ok().as_deref(), Some(&b"C"[..]));
             assert!(started.elapsed() < Duration::from_millis(200), "{:?}", started.elapsed());
 
             latch.open();
             assert!(first.await.unwrap());
-            let third = read_remote(&grant_on("devbox"), "devbox", &target("c.png"), &gate, fake.reader()).await;
+            let third = read_remote(&grant_on("devbox"), &target("c.png"), &gate, fake.reader()).await;
             assert!(third.is_ok());
         });
     }
@@ -840,7 +936,7 @@ mod tests {
             for name in ["a.png", "b.png", "c.png"] {
                 let (fake, gate) = (Arc::clone(&fake), Arc::clone(&gate));
                 jobs.push(tokio::spawn(async move {
-                    read_remote(&grant_on("devbox"), "devbox", &target(name), &gate, fake.reader()).await.is_ok()
+                    read_remote(&grant_on("devbox"), &target(name), &gate, fake.reader()).await.is_ok()
                 }));
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
@@ -868,12 +964,12 @@ mod tests {
             let first = {
                 let (fake, gate) = (Arc::clone(&fake), Arc::clone(&gate));
                 tokio::spawn(async move {
-                    let result = read_remote(&grant_on("devbox"), "devbox", &target("a.png"), &gate, fake.reader()).await;
+                    let result = read_remote(&grant_on("devbox"), &target("a.png"), &gate, fake.reader()).await;
                     (result, started.elapsed())
                 })
             };
             tokio::time::sleep(Duration::from_millis(20)).await;
-            let second = read_remote(&grant_on("devbox"), "devbox", &target("b.png"), &gate, fake.reader()).await;
+            let second = read_remote(&grant_on("devbox"), &target("b.png"), &gate, fake.reader()).await;
             let second_done = started.elapsed();
             let (first, first_done) = first.await.unwrap();
             let refusal = first.unwrap_err();
@@ -907,5 +1003,212 @@ mod tests {
             (t.connections_per_grant, t.connections_total, t.reads_total, t.reads_per_host, t.head_bytes, t.head_lines, t.grants),
             (l.connections_per_grant, l.connections_total, l.reads_total, l.reads_per_host, l.head_bytes, l.head_lines, l.grants)
         );
+    }
+
+    #[test]
+    fn ac12_reasons_keep_their_wording() {
+        assert_eq!(check_blocklist("/p/.git/x"), Err("path is inside a .git folder".to_string()));
+        assert_eq!(FAKE_PDF_REASON, "not a real PDF");
+    }
+
+    #[test]
+    fn ac11_a_target_must_be_normalized_and_inside() {
+        let fake = FakeHost::new();
+        fake.file("/etc/secret.png", b"OUTSIDE");
+        fake.file("/srv/p/", b"FOLDER");
+        fake.file("/srv/p/./a.png", b"DOT");
+        fake.link("/srv/p/dd.png", "/srv/p/../../etc/secret.png");
+        fake.link("/srv/p/self.png", "/srv/p/");
+        fake.link("/srv/p/root.png", "/srv/p");
+        fake.link("/srv/p/dot.png", "/srv/p/./a.png");
+        fake.link("/srv/p/rel.png", "srv/p/a.png");
+        fake.file("srv/p/a.png", b"REL");
+        fake.file("/srv/p", b"ROOT");
+        fake.file("/srv/p/../../etc/secret.png", b"OUTSIDE");
+        let gate = ReadGate::new(testkit::limits());
+        for name in ["dd.png", "self.png", "root.png", "dot.png", "rel.png"] {
+            let got = remote(&fake, &gate, &remote_grant(), name);
+            assert_eq!(outcome(got), refused(), "{name}");
+        }
+        for path in ["/srv/p/a", "C:/p/a"] {
+            assert!(is_normalized(path), "{path}");
+        }
+        for path in ["srv/p", "/", "/srv//a", "/srv/./a", "/srv/../a", "/srv/a/", "C:", "C:/"] {
+            assert!(!is_normalized(path), "{path}");
+        }
+    }
+
+    /// Sicherheitsmodell 7
+    #[cfg(unix)]
+    #[test]
+    fn ac11_the_opened_file_is_checked_not_the_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let p = d.join("p");
+        write(&p.join("a.html"), b"<html>");
+        write(&p.join("sub/y.png"), b"Y");
+        write(&d.join("outside.png"), b"OUTSIDE");
+        let grant = local_grant(&p.join("a.html"), Some(&p), EntryKind::Html);
+
+        // The handle, not the name: after a rename the open file reports
+        // where it is now.
+        let file = open_for_reading(&p.join("sub/y.png")).unwrap();
+        std::fs::rename(p.join("sub/y.png"), d.join("moved.png")).unwrap();
+        assert_eq!(path_text(&opened_path(&file, &p.join("sub/y.png")).unwrap()).unwrap(), canon(&d.join("moved.png")));
+
+        // A checked path swapped for a link to the outside before opening.
+        std::os::unix::fs::symlink(d.join("outside.png"), p.join("sub/y.png")).unwrap();
+        let swapped = std::path::PathBuf::from(canon(&p.join("sub")) + "/y.png");
+        let refusal = open_checked(&grant, &swapped, "y.png").unwrap_err();
+        assert_eq!((refusal.status(), refusal.body()), (403, "Refused by Terax".to_string()));
+    }
+
+    #[test]
+    fn ac13_the_server_checks_the_size_even_if_the_host_does_not() {
+        let fake = FakeHost::new();
+        fake.ignore_limit();
+        fake.file("/srv/p/big.png", &vec![0u8; MAX_READ_BYTES as usize + 1]);
+        fake.file("/srv/p/exact.png", &vec![0u8; MAX_READ_BYTES as usize]);
+        let gate = ReadGate::new(testkit::limits());
+        let refusal = remote(&fake, &gate, &remote_grant(), "big.png").unwrap_err();
+        assert_eq!((refusal.status(), refusal.body().as_str()), (403, "Larger than 10 MB"));
+        let exact = remote(&fake, &gate, &remote_grant(), "exact.png").unwrap();
+        assert_eq!(exact.bytes.len() as u64, MAX_READ_BYTES);
+    }
+
+    #[test]
+    fn ac16_the_page_never_shows_the_hosts_text() {
+        let host_text = "[Errno 13] Permission denied: '/home/c/private/x.png'\r\nssh: connect to host 10.1.2.3";
+        for error in [RemoteReadError::Failed(host_text.into()), RemoteReadError::Unreachable(host_text.into())] {
+            let fake = FakeHost::new();
+            fake.file("/srv/p/y.png", b"Y");
+            fake.fail_next(error.clone());
+            fake.fail_next(error.clone());
+            let gate = ReadGate::new(testkit::limits());
+            let refusal = remote(&fake, &gate, &remote_grant(), "y.png").unwrap_err();
+            let body = refusal.body();
+            assert!(!body.contains("Errno") && !body.contains("10.1.2.3") && !body.contains("/home/c"), "{body}");
+            let Refusal::BadGateway { detail, .. } = refusal else {
+                panic!("{refusal:?}")
+            };
+            assert!(!detail.contains('\r') && !detail.contains('\n'), "{detail:?}");
+        }
+        assert_eq!(clean_detail(&"x".repeat(500)).chars().count(), DETAIL_CHARS + 1);
+        assert_eq!(clean_detail(" a\u{0}b\n"), "a b");
+    }
+
+    #[test]
+    fn ac18_the_wait_and_the_budget_are_told_apart() {
+        let fake = FakeHost::new();
+        fake.file("/srv/p/y.png", b"Y");
+        fake.fail_next(RemoteReadError::TimedOut("budget".into()));
+        let gate = ReadGate::new(testkit::limits());
+        let budget = remote(&fake, &gate, &remote_grant(), "y.png").unwrap_err();
+        assert!(matches!(budget, Refusal::TimedOut { cause: Timeout::Budget, .. }), "{budget:?}");
+        assert!(matches!(
+            remote_refusal(ReadFailure::Waited, "y.png", "devbox"),
+            Refusal::TimedOut { cause: Timeout::Wait, .. }
+        ));
+    }
+
+    #[test]
+    fn ac18_a_restarted_wait_keeps_its_place_in_the_queue() {
+        let fake = FakeHost::new();
+        for name in ["a", "b", "c", "d"] {
+            fake.file(&format!("/srv/p/{name}.png"), b"X");
+        }
+        let (first, second) = (Latch::new(), Latch::new());
+        fake.hold("/srv/p/a.png", &first);
+        fake.hold("/srv/p/b.png", &second);
+        let mut limits = testkit::limits();
+        limits.host_wait = Duration::from_millis(200);
+        let gate = Arc::new(ReadGate::new(limits));
+        let spawn = |name: &'static str| {
+            let (fake, gate) = (Arc::clone(&fake), Arc::clone(&gate));
+            tokio::spawn(async move {
+                read_remote(&grant_on("devbox"), &target(name), &gate, fake.reader()).await.is_ok()
+            })
+        };
+        let order = run(async {
+            let a = spawn("a.png");
+            first.wait_until_entered().await;
+            let b = spawn("b.png");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            // c waits from about 10 ms; its first deadline (about 210 ms)
+            // falls after the progress at 100 ms, so it restarts there.
+            let c = spawn("c.png");
+            tokio::time::sleep(Duration::from_millis(90)).await;
+            first.open();
+            second.wait_until_entered().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            // d queues before c restarts; c must still come first.
+            let d = spawn("d.png");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            second.open();
+            for job in [a, b, c, d] {
+                assert!(job.await.unwrap());
+            }
+            fake.calls().into_iter().map(|c| c.path).collect::<Vec<_>>()
+        });
+        assert_eq!(order, ["/srv/p/a.png", "/srv/p/b.png", "/srv/p/c.png", "/srv/p/d.png"]);
+    }
+
+    #[test]
+    fn ac17_waiting_for_one_of_the_eight_slots_ends_with_504() {
+        let fake = FakeHost::new();
+        for i in 0..9 {
+            fake.file(&format!("/srv/p/h{i}.png"), b"X");
+        }
+        let mut limits = testkit::limits();
+        limits.host_wait = Duration::from_millis(200);
+        let gate = Arc::new(ReadGate::new(limits));
+        run(async {
+            let mut held = Vec::new();
+            for i in 0..8 {
+                let path = format!("/srv/p/h{i}.png");
+                let latch_i = Latch::new();
+                fake.hold(&path, &latch_i);
+                let (fake, gate) = (Arc::clone(&fake), Arc::clone(&gate));
+                let job = tokio::spawn(async move {
+                    let host = format!("box{i}");
+                    read_remote(&grant_on(&host), &target(&format!("h{i}.png")), &gate, fake.reader()).await.is_ok()
+                });
+                latch_i.wait_until_entered().await;
+                held.push((job, latch_i));
+            }
+            let started = Instant::now();
+            let ninth = read_remote(&grant_on("box8"), &target("h8.png"), &gate, fake.reader()).await;
+            let refusal = ninth.unwrap_err();
+            assert_eq!(refusal.status(), 504);
+            assert!(started.elapsed() >= Duration::from_millis(200), "{:?}", started.elapsed());
+            for (job, latch) in held {
+                latch.open();
+                assert!(job.await.unwrap());
+            }
+        });
+    }
+
+    #[test]
+    fn ac16_the_retry_keeps_the_host_slot() {
+        let fake = FakeHost::new();
+        fake.file("/srv/p/a.png", b"A");
+        fake.file("/srv/p/b.png", b"B");
+        fake.fail_next(RemoteReadError::Unreachable("gone".into()));
+        let mut limits = testkit::limits();
+        limits.retry_pause = Duration::from_millis(150);
+        let gate = Arc::new(ReadGate::new(limits));
+        run(async {
+            let first = {
+                let (fake, gate) = (Arc::clone(&fake), Arc::clone(&gate));
+                tokio::spawn(async move { read_remote(&grant_on("devbox"), &target("a.png"), &gate, fake.reader()).await.is_ok() })
+            };
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            // During the pause after the first attempt.
+            assert!(read_remote(&grant_on("devbox"), &target("b.png"), &gate, fake.reader()).await.is_ok());
+            assert!(first.await.unwrap());
+        });
+        let order: Vec<String> = fake.calls().into_iter().map(|c| c.path).collect();
+        assert_eq!(order, ["/srv/p/a.png", "/srv/p/a.png", "/srv/p/b.png"]);
+        assert_eq!(fake.peak_on("devbox"), 1);
     }
 }

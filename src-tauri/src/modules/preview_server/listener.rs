@@ -12,15 +12,17 @@ use tokio::time::Instant;
 use super::grant::{Grant, GrantClass, Location};
 use super::policy;
 use super::request::{parse_request, split_target, Method, Reject, TargetError};
-use super::source::{read_local, read_remote, Loaded, ReadGate, Refusal, Remote};
+use super::source::{read_local, read_remote, Loaded, ReadGate, Refusal, Remote, Timeout};
 use super::Limits;
 
 /// After a failed accept (for example out of file descriptors), so the loop
 /// does not spin.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
-/// What a client may still send after its answer before the server stops
-/// waiting for it to close.
-const DRAIN_LIMIT: usize = 1 << 20;
+/// How long and how much the server still reads after its answer, waiting for
+/// the client to close; then it closes itself. Short, because the
+/// connection keeps its slot meanwhile.
+const DRAIN_TIME: Duration = Duration::from_millis(500);
+const DRAIN_LIMIT: usize = 64 * 1024;
 
 /// What all grants of one server share.
 pub(crate) struct Shared {
@@ -45,13 +47,12 @@ impl Shared {
 }
 
 /// One answer, written as a whole and followed by closing the connection.
+/// Whether the body goes out is decided once, when it is written.
 #[derive(Debug)]
 pub(crate) struct Reply {
     pub status: u16,
     pub headers: Vec<(&'static str, String)>,
     pub body: Vec<u8>,
-    /// `false` for `HEAD`: the headers name the length, the body stays home.
-    pub send_body: bool,
 }
 
 impl Reply {
@@ -59,9 +60,8 @@ impl Reply {
     fn empty(status: u16) -> Self {
         Self {
             status,
-            headers: vec![("Connection", "close".to_string())],
+            headers: policy::common_headers(),
             body: Vec::new(),
-            send_body: true,
         }
     }
 
@@ -78,7 +78,6 @@ impl Reply {
             status: refusal.status(),
             headers: policy::response_headers(policy::TEXT_PAGE, class, frame_ancestors),
             body: refusal.body().into_bytes(),
-            send_body: true,
         }
     }
 
@@ -88,7 +87,6 @@ impl Reply {
             status: 200,
             headers: policy::response_headers(served, class, frame_ancestors),
             body: bytes,
-            send_body: true,
         }
     }
 
@@ -118,7 +116,9 @@ fn reason_phrase(status: u16) -> &'static str {
 }
 
 /// Accepts connections for `grant` until the process ends. A connection over
-/// the limit of this grant or of all grants is closed at once.
+/// the limit of this grant or of all grants is closed at once. Slots are
+/// taken before the secret is known (it is in the path); a local process can
+/// hold them until the head budget or the drain time ends.
 pub(crate) async fn serve_listener(listener: TcpListener, grant: Arc<Grant>, shared: Arc<Shared>) {
     loop {
         let stream = match listener.accept().await {
@@ -177,12 +177,13 @@ async fn read_head(stream: &mut TcpStream, max: usize) -> std::io::Result<Head> 
     }
 }
 
+/// The head budget is one deadline for the whole head, not per read.
 async fn serve_connection(mut stream: TcpStream, grant: Arc<Grant>, shared: &Shared) {
     let limits = shared.limits;
     let head = match tokio::time::timeout(limits.head_budget, read_head(&mut stream, limits.head_bytes)).await {
         Ok(Ok(Head::Complete(head))) => head,
         Ok(Ok(Head::TooLarge)) => {
-            finish(stream, Reply::rejected(Reject::HeadersTooLarge), limits).await;
+            finish(stream, Reply::rejected(Reject::HeadersTooLarge), None, limits).await;
             return;
         }
         Ok(Ok(Head::Closed)) => return,
@@ -195,23 +196,24 @@ async fn serve_connection(mut stream: TcpStream, grant: Arc<Grant>, shared: &Sha
             return;
         }
     };
-    let reply = respond(&head, grant, shared).await;
-    finish(stream, reply, limits).await;
+    let (reply, method) = respond(&head, grant, shared).await;
+    finish(stream, reply, method, limits).await;
 }
 
-/// The answer to one complete head: VAL-1 to VAL-5, then the read chain of
-/// the grant's location.
-async fn respond(head: &[u8], grant: Arc<Grant>, shared: &Shared) -> Reply {
+/// The answer to one complete head (VAL-1 to VAL-5, then the read chain of
+/// the grant's location) and the method, once it is known.
+async fn respond(head: &[u8], grant: Arc<Grant>, shared: &Shared) -> (Reply, Option<Method>) {
     let authority = grant.host_name.authority(grant.port);
     let request = match parse_request(head, &authority, shared.limits.head_lines) {
         Ok(request) => request,
-        Err(reject) => return Reply::rejected(reject),
+        Err(reject) => return (Reply::rejected(reject), None),
     };
+    let method = Some(request.method);
     let (class, frame_ancestors) = (grant.class, shared.frame_ancestors);
     let target = match split_target(&request.target, &grant.token) {
         Ok(target) => target,
-        Err(TargetError::NoGrant) => return Reply::empty(404),
-        Err(TargetError::BadPath) => return Reply::refused(&Refusal::NotFound, class, frame_ancestors),
+        Err(TargetError::NoGrant) => return (Reply::empty(404), method),
+        Err(TargetError::BadPath) => return (Reply::refused(&Refusal::NotFound, class, frame_ancestors), method),
     };
     let loaded = match &grant.location {
         Location::Local => {
@@ -220,45 +222,47 @@ async fn respond(head: &[u8], grant: Arc<Grant>, shared: &Shared) -> Reply {
                 .await
                 .unwrap_or_else(|e| Err(Refusal::Refused(format!("the read task failed: {e}"))))
         }
-        Location::Ssh { host } => {
+        Location::Ssh { .. } => {
             let read = Arc::clone(&shared.remote.read);
-            read_remote(&grant, host, &target, &shared.reads, read).await
+            read_remote(&grant, &target, &shared.reads, read).await
         }
     };
-    let mut reply = match loaded {
+    let reply = match loaded {
         Ok(loaded) => Reply::file(loaded, class, frame_ancestors),
         Err(refusal) => {
             log_refusal(&refusal);
             Reply::refused(&refusal, class, frame_ancestors)
         }
     };
-    reply.send_body = request.method == Method::Get;
-    reply
+    (reply, method)
 }
 
-/// Log levels after "Error Handling Strategy"; never the request target.
+/// Log levels after "Error Handling Strategy"; never the request target. The
+/// host's own text only here, cleaned and shortened.
 fn log_refusal(refusal: &Refusal) {
     match refusal {
         Refusal::NotFound => log::debug!("preview server: not found"),
         Refusal::Refused(reason) => log::debug!("preview server: refused: {reason}"),
         Refusal::TooLarge => log::debug!("preview server: larger than 10 MB"),
-        Refusal::BadGateway { name, host, reason } => {
-            log::info!("preview server: could not read {name} from {host}: {reason}")
+        Refusal::BadGateway { name, host, kind, detail } => {
+            log::warn!("preview server: could not read {name} from {host} ({kind:?}): {detail}")
         }
-        Refusal::TimedOut { name, host } => {
-            log::warn!("preview server: reading {name} from {host} timed out")
-        }
+        Refusal::TimedOut { name, host, cause } => match cause {
+            Timeout::Budget => log::warn!("preview server: reading {name} from {host} used up its budget"),
+            Timeout::Wait => log::warn!("preview server: {name} waited too long for a read slot on {host}"),
+        },
     }
 }
 
-/// Writes the answer within the write budget, then closes only the sending
-/// half and reads what the client still sends until it closes, so the answer
-/// is not lost to a reset (OB-11).
-async fn finish(mut stream: TcpStream, reply: Reply, limits: Limits) {
-    let deadline = Instant::now() + limits.write_budget;
-    let written = tokio::time::timeout_at(deadline, async {
+/// Writes the answer within the write budget (without the body for `HEAD`:
+/// the one place that decides it), then closes only the sending half and
+/// reads what the client still sends until it closes, so the answer is not
+/// lost to a reset (OB-11). That reading is short and bounded.
+async fn finish(mut stream: TcpStream, reply: Reply, method: Option<Method>, limits: Limits) {
+    let head_only = method == Some(Method::Head);
+    let written = tokio::time::timeout(limits.write_budget, async {
         stream.write_all(&reply.head_bytes()).await?;
-        if reply.send_body {
+        if !head_only {
             stream.write_all(&reply.body).await?;
         }
         stream.shutdown().await
@@ -275,7 +279,7 @@ async fn finish(mut stream: TcpStream, reply: Reply, limits: Limits) {
             return;
         }
     }
-    match tokio::time::timeout_at(deadline, drain(&mut stream)).await {
+    match tokio::time::timeout_at(Instant::now() + DRAIN_TIME, drain(&mut stream)).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => log::debug!("preview server: closing a connection failed: {e}"),
         Err(_) => log::debug!("preview server: a client kept its connection open after the answer"),
@@ -336,12 +340,10 @@ mod tests {
         let driver = Driver::new();
         let core = testkit::core(&FakeHost::new(), None, testkit::config());
         let link = open_local(&driver, &core, &site.p.join("a.html"));
-        // The browser class binds exactly this way (SEC-4).
-        let (port, sockets) = super::super::bind_listeners(super::super::grant::HostName::Ip).unwrap();
-        let addr = sockets[0].local_addr().unwrap();
-        assert_eq!((sockets.len(), addr.ip()), (1, std::net::IpAddr::from([127, 0, 0, 1])));
-        assert_ne!(port, 0);
-        assert_eq!(core.grant_at(link.port).host_name, super::super::grant::HostName::Ip);
+        // The listener of this grant is bound to the IPv4 loopback only (SEC-4).
+        let grant = core.grant_at(link.port);
+        assert_eq!(grant.addrs, vec![std::net::SocketAddr::from(([127, 0, 0, 1], link.port))]);
+        assert_ne!(link.port, 0);
 
         let host = format!("127.0.0.1:{}", link.port);
         let page = get(link.port, &link.path("a.html"), &host);
@@ -583,5 +585,150 @@ mod tests {
         assert!(!blocked.is_finished());
         latch.open();
         assert_eq!(blocked.join().unwrap().status, 200);
+    }
+
+    fn head_of(port: u16, path: &str) -> testkit::HttpReply {
+        send(port, format!("HEAD {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes())
+    }
+
+    /// Opens a local page and an SSH page whose next two reads fail.
+    fn two_links(site: &Site, driver: &Driver, core: &super::super::Core) -> (Link, Link) {
+        let local = open_local(driver, core, &site.p.join("a.html"));
+        let opener = Opener::default();
+        let opened = driver.block_on(core.open_in_browser("/srv/p/a.html".into(), testkit::ssh("devbox"), opener.answering(Ok(()))));
+        assert_eq!(opened.unwrap().status, super::super::BrowserOpenStatus::Opened);
+        (local, Link::parse(&opener.urls()[0]))
+    }
+
+    fn remote_site() -> std::sync::Arc<FakeHost> {
+        let fake = FakeHost::new();
+        fake.file("/srv/p/a.html", b"<html>");
+        fake.file("/srv/p/y.png", b"Y");
+        fake
+    }
+
+    #[test]
+    fn ac7_a_bad_path_on_the_wire_is_not_found_and_head_has_no_body() {
+        let site = site();
+        let driver = Driver::new();
+        let fake = remote_site();
+        let core = testkit::core(&fake, None, testkit::config());
+        let (local, remote) = two_links(&site, &driver, &core);
+        write(&site.p.join(".env"), b"S");
+
+        let bad = get(local.port, &local.path("a%2Fb"), &format!("127.0.0.1:{}", local.port));
+        assert_eq!((bad.status, bad.body.as_slice()), (404, &b"Not found"[..]));
+        assert_eq!(bad.header("Content-Type"), Some("text/plain; charset=utf-8"));
+
+        fake.fail_next(crate::modules::ssh::RemoteReadError::Failed("boom".into()));
+        let failed = head_of(remote.port, &remote.path("y.png"));
+        fake.fail_next(crate::modules::ssh::RemoteReadError::TimedOut("budget".into()));
+        let timed_out = head_of(remote.port, &remote.path("y.png"));
+        let cases = [
+            (head_of(local.port, &local.path("a%2Fb")), 404, "9"),
+            (head_of(local.port, "/falsch/a.html"), 404, "0"),
+            (head_of(local.port, &local.path(".env")), 403, "16"),
+            (head_of(local.port, &local.path("fehlt.png")), 404, "9"),
+            (head_of(local.port, &local.path("a.html")), 200, "14"),
+            (failed, 502, "55"),
+            (timed_out, 504, "49"),
+        ];
+        for (reply, status, length) in cases {
+            assert_eq!(reply.status, status, "{reply:?}");
+            assert_eq!(reply.header("Content-Length"), Some(length), "{reply:?}");
+            assert!(reply.body.is_empty(), "{reply:?}");
+        }
+    }
+
+    /// Sicherheitsmodell 11
+    #[test]
+    fn ac10_every_answer_on_the_wire_carries_the_protective_headers() {
+        let site = site();
+        let driver = Driver::new();
+        let fake = remote_site();
+        let core = testkit::core(&fake, None, testkit::config());
+        let (local, remote) = two_links(&site, &driver, &core);
+        write(&site.p.join(".env"), b"S");
+        let (lp, rp) = (local.port, remote.port);
+        let host = format!("127.0.0.1:{lp}");
+        let many: String = (0..70).map(|i| format!("X-{i}: v\r\n")).collect();
+        let raw = |text: String| send(lp, text.as_bytes());
+        fake.fail_next(crate::modules::ssh::RemoteReadError::Failed("boom".into()));
+        let failed = get(rp, &remote.path("y.png"), &format!("127.0.0.1:{rp}"));
+        fake.fail_next(crate::modules::ssh::RemoteReadError::TimedOut("budget".into()));
+        let timed_out = get(rp, &remote.path("y.png"), &format!("127.0.0.1:{rp}"));
+        let replies = [
+            raw(format!("GET {} HTTP/1.1\r\n\r\n", local.path("a.html"))),
+            raw(format!("GET /a.html HTTP/1.1\r\nHost: {host}\r\n\r\n")),
+            raw(format!("POST {} HTTP/1.1\r\nHost: {host}\r\n\r\n", local.path("a.html"))),
+            raw(format!("GET {} HTTP/1.1\r\nHost: localhost:{lp}\r\n\r\n", local.path("a.html"))),
+            raw(format!("GET {} HTTP/1.1\r\nHost: {host}\r\n{many}\r\n", local.path("a.html"))),
+            raw(format!("GET {} HTTP/1.1\r\nHost: {host}\r\nX: {}\r\n\r\n", local.path("a.html"), "x".repeat(70 * 1024))),
+            get(lp, &local.path("a%2Fb"), &host),
+            get(lp, &local.path(".env"), &host),
+            get(lp, &local.path("fehlt.png"), &host),
+            get(lp, &local.path("a.html"), &host),
+            failed,
+            timed_out,
+        ];
+        let statuses: Vec<u16> = replies.iter().map(|r| r.status).collect();
+        assert_eq!(statuses, [400, 404, 405, 421, 431, 431, 404, 403, 404, 200, 502, 504]);
+        for reply in &replies {
+            assert_eq!(reply.header("X-Content-Type-Options"), Some("nosniff"), "{reply:?}");
+            assert_eq!(reply.header("Cache-Control"), Some("no-store"), "{reply:?}");
+            assert_eq!(reply.header("Referrer-Policy"), Some("no-referrer"), "{reply:?}");
+            assert_eq!(reply.header("Connection"), Some("close"), "{reply:?}");
+            for (name, _) in &reply.headers {
+                let name = name.to_ascii_lowercase();
+                assert!(!name.starts_with("access-control-") && name != "set-cookie" && name != "server", "{reply:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn ac22_a_client_that_keeps_its_connection_open_frees_the_slot_soon() {
+        let site = site();
+        let driver = Driver::new();
+        let mut config = testkit::config();
+        config.limits.write_budget = Duration::from_secs(10);
+        let core = testkit::core(&FakeHost::new(), None, config);
+        let link = open_local(&driver, &core, &site.p.join("a.html"));
+        let grant = core.grant_at(link.port);
+        let mut open = connect(link.port);
+        open.write_all(format!("GET /a.html HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", link.port).as_bytes()).unwrap();
+        let mut answer = [0u8; 512];
+        let _ = open.read(&mut answer).unwrap();
+        let started = std::time::Instant::now();
+        assert!(eventually(Duration::from_secs(5), || grant.connections.available_permits() == 16));
+        let freed = started.elapsed();
+        assert!(freed < Duration::from_secs(2), "{freed:?}");
+        drop(open);
+    }
+
+    #[test]
+    fn ac22_the_head_budget_is_one_deadline_for_the_whole_head() {
+        let site = site();
+        let driver = Driver::new();
+        let mut config = testkit::config();
+        config.limits.head_budget = Duration::from_millis(400);
+        let core = testkit::core(&FakeHost::new(), None, config);
+        let link = open_local(&driver, &core, &site.p.join("a.html"));
+        let mut slow = connect(link.port);
+        let started = std::time::Instant::now();
+        let writer = {
+            let mut slow = slow.try_clone().unwrap();
+            std::thread::spawn(move || {
+                for byte in b"GET /a.html HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Slow: " {
+                    if slow.write_all(&[*byte]).is_err() {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            })
+        };
+        assert!(closed_without_answer(&mut slow));
+        let waited = started.elapsed();
+        assert!(waited < Duration::from_millis(800), "{waited:?}");
+        let _ = writer.join();
     }
 }

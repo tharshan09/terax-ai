@@ -52,6 +52,9 @@ pub(crate) struct Grant {
     pub port: u16,
     /// Open connections of this grant (SEC-12), shared by all its listeners.
     pub connections: Arc<Semaphore>,
+    /// The addresses its listeners are bound to.
+    #[cfg(test)]
+    pub addrs: Vec<std::net::SocketAddr>,
 }
 
 impl Grant {
@@ -88,7 +91,9 @@ pub(crate) fn token_matches(expected: &str, given: &str) -> bool {
 /// The folder an entry may reach: HTML (and Markdown from wave 2) reach the
 /// folder of the resolved entry with its subfolders; images and PDFs only the
 /// file. A folder that is the file system root, the home or above the home
-/// gives only the file. `entry` and `home` are resolved the same way.
+/// gives only the file, and so does every entry when the home is unknown
+/// (`None`): the home rule cannot be checked then. `entry` and `home` are
+/// resolved the same way.
 pub(crate) fn grant_scope(entry: &str, home: Option<&str>, kind: EntryKind) -> Option<String> {
     match kind {
         EntryKind::Html | EntryKind::Markdown => {}
@@ -98,7 +103,8 @@ pub(crate) fn grant_scope(entry: &str, home: Option<&str>, kind: EntryKind) -> O
     if is_fs_root(folder) {
         return None;
     }
-    if home.is_some_and(|home| within(home, folder)) {
+    let home = home?;
+    if within(home, folder) {
         return None;
     }
     Some(folder.to_string())
@@ -164,12 +170,19 @@ mod tests {
 
     #[test]
     fn ac2_grant_scope_compares_whole_segments() {
-        // `/home/user2` is beside the home `/home/u`, not above it.
+        // `/home/u2` is beside the home `/home/u`, not above it.
         assert_eq!(
             grant_scope("/home/u2/p.html", Some("/home/u"), EntryKind::Html).as_deref(),
             Some("/home/u2")
         );
-        assert_eq!(grant_scope("C:/a.html", None, EntryKind::Html), None);
-        assert_eq!(grant_scope("/srv/p/a.html", None, EntryKind::Html).as_deref(), Some("/srv/p"));
+        assert_eq!(grant_scope("C:/a.html", Some("C:/Users/u"), EntryKind::Html), None);
+        assert_eq!(grant_scope("/srv/p/a.html", Some("/home/u"), EntryKind::Html).as_deref(), Some("/srv/p"));
+    }
+
+    #[test]
+    fn ac2_without_a_known_home_only_the_file() {
+        for kind in [EntryKind::Html, EntryKind::Markdown, EntryKind::Image, EntryKind::Pdf] {
+            assert_eq!(grant_scope("/srv/p/a.html", None, kind), None, "{kind:?}");
+        }
     }
 }
