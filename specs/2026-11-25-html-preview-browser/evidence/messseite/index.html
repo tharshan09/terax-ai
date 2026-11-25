@@ -35,7 +35,7 @@
 <body>
 <header>
   <h1>Terax Messseite</h1>
-  <p class="hint" style="margin-left:0">Rot heißt „geht hier nicht“. Bitte einen Screenshot vom oberen Teil machen (bis einschließlich Punkt 9).</p>
+  <p class="hint" style="margin-left:0">Rot heißt „geht hier nicht“. Bitte einen Screenshot vom oberen Teil machen (bis einschließlich Punkt 13).</p>
 </header>
 
 <div class="rand" title="rote Marken = linker und rechter Rand der Seite"></div>
@@ -62,6 +62,7 @@
   <tr><td class="nr">7</td><td><span class="state" id="c7">nein</span></td><td>Seite kann sich etwas merken (Speicher im Browser)</td></tr>
   <tr><td class="nr">8</td><td><span class="state" id="c8">nein</span></td><td>Seite kann Daten nachladen (<code>daten.json</code>)</td></tr>
   <tr><td class="nr">9</td><td colspan="2">Breite laut Skript: <b id="c9">unbekannt (Skript läuft nicht)</b></td></tr>
+  <tr><td class="nr">13</td><td><span class="state" id="c13" style="background:#777">?</span></td><td>Seite erreicht die Schnittstelle der App (Tauri-IPC). <b>Hier ist „nein“ richtig</b> (grün). Steht hier rot „JA“: bitte sofort melden, das wäre ein Sicherheitsproblem.</td></tr>
 </table>
 
 <h2>10 · Breite Tabelle: waagerecht wischen</h2>
@@ -118,6 +119,40 @@
         if (d && d.messseite === "ok") ok("c8");
       }).catch(function () { /* bleibt rot: Nachladen geht nicht */ });
     } catch (e) { /* bleibt rot */ }
+    // Punkt 13: Kommt diese Seite an die Schnittstelle der App? Erwartet: nein.
+    (function () {
+      var el = document.getElementById("c13");
+      function safe(text) { el.textContent = text; el.style.background = "#1b7a3d"; }
+      function danger(text) { el.textContent = text; el.style.background = "#b3261e"; }
+      var seen = [];
+      try { if (window.__TAURI_INTERNALS__) seen.push("__TAURI_INTERNALS__"); } catch (e) {}
+      try { if (window.__TAURI__) seen.push("__TAURI__"); } catch (e) {}
+      try { if (window.ipc) seen.push("window.ipc"); } catch (e) {}
+      try {
+        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ipc) seen.push("webkit ipc");
+      } catch (e) {}
+      if (seen.length === 0) safe("nein");
+      else el.textContent = "Kanal sichtbar: " + seen.join(", ") + " …";
+      // Harmloser Aufruf (schaltet nur den Esc-Schalter aus). Wird er angenommen, ist die Schnittstelle offen.
+      var tried = false;
+      try {
+        if (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === "function") {
+          tried = true;
+          window.__TAURI_INTERNALS__.invoke("zen_escape_arm", { armed: false }).then(
+            function () { danger("JA: Aufruf angenommen (" + seen.join(", ") + ")"); },
+            function () { safe("nein (Aufruf abgelehnt; sichtbar: " + seen.join(", ") + ")"); }
+          );
+        }
+      } catch (e) { safe("nein (Aufruf wirft; sichtbar: " + seen.join(", ") + ")"); }
+      if (!tried && seen.length > 0) {
+        try {
+          fetch("ipc://localhost/zen_escape_arm", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{\"armed\":false}" }).then(
+            function (r) { if (r.ok) danger("JA: ipc:// antwortet mit " + r.status); else safe("nein (ipc:// " + r.status + "; sichtbar: " + seen.join(", ") + ")"); },
+            function () { safe("nein (ipc:// gesperrt; sichtbar: " + seen.join(", ") + ")"); }
+          );
+        } catch (e) { safe("nein (ipc:// wirft; sichtbar: " + seen.join(", ") + ")"); }
+      }
+    })();
     function width() {
       document.getElementById("c9").textContent =
         window.innerWidth + " × " + window.innerHeight + " px Seite, Bildschirm " + screen.width + " px";

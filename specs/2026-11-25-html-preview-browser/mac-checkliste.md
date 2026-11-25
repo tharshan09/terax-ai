@@ -35,6 +35,7 @@ Stand: 25.11.2026, Branch `html-preview-browser` im Fork `tharshan09/terax-ai` (
 - [ ] PDF auf dem Server: in Terax die Karte „preview not available over SSH" mit Kopfzeile; „Open in Browser" zeigt die PDF (N-24).
 - [ ] Verbindung trennen (N-20): `ssh -O exit {host}`, Seite im Browser neu laden: Textseite mit Dateiname und Host, ohne rohen Fehlertext des Servers. Terminal-Tab zum Host öffnen, neu laden: Seite da.
 - [ ] Last (N-25, N-4): auf dem Server `sshd -T | grep -i maxsessions` notieren. 7 SSH-Terminal-Tabs zum Host offen, dann eine Seite mit 30 Bildern per „Open in Browser": alle Bilder da; dabei einen weiteren Terminal-Tab öffnen und die Quellcodeverwaltung aktualisieren: beides ohne Fehler. Ladezeit notieren (ein Lesevorgang je Host zugleich: bei spürbarer Wartezeit melden, die Grenze ist einstellbar).
+- [ ] Dieselbe Lage, aber Klick statt Laden: bei 7 offenen SSH-Terminal-Tabs fünf verschiedene HTML-Dateien des Servers kurz nacheinander per „Open in Browser“ öffnen und zwei als Vorschau-Tab: kein Terminal-Tab und kein Git-Aufruf scheitert (der Klick prüft die Datei über eigene SSH-Aufrufe außerhalb der Lese-Reihe).
 - [ ] Strenges Öffnen auf dem Server: eine HTML-Datei in einem Ordner, dessen Elternordner für dein Konto nur Durchgangsrecht hat (`chmod 711` beim Besitzer eines anderen Kontos; nur falls es so einen Ordner gibt): notieren, ob „Open in Browser“ die Seite zeigt. Auf einem macOS-Server wird hier eine Fehlerseite erwartet, obwohl der Editor die Datei lesen kann; auf Linux-Servern soll es gehen.
 - [ ] Hängender Lesevorgang: nicht leicht nachzustellen; falls eine Seite über SSH einmal hängt, notieren, nach wie vielen Sekunden die Fehlerseite kommt (erwartet: spätestens rund 60 s je Datei).
 
@@ -42,10 +43,12 @@ Stand: 25.11.2026, Branch `html-preview-browser` im Fork `tharshan09/terax-ai` (
 
 Die Konstante `HTML_PREVIEW_VIA_SERVER` ist an. Bleibt die Vorschau weiß, ist das der Abbruchfall unten, kein Grund zur Sorge.
 
+- [ ] **Zuerst, vor allem anderen in diesem Abschnitt (Sicherheitsprobe):** Messseite lokal UND vom SSH-Server als HTML-Vorschau in Terax öffnen und Punkt 13 ablesen („Seite erreicht die Schnittstelle der App“). Erwartet: grün „nein“. Steht dort rot „JA“ oder „Kanal sichtbar: …“ ohne Auflösung: Screenshot schicken und in „Terax Dev“ keine fremden HTML-Dateien mehr als Vorschau öffnen; ich stelle die Vorschau über den Mini-Server dann ab. (Im Browser ist Punkt 13 immer „nein“.)
 - [ ] M-C lokal: Messseite (`evidence/messseite/index.html`) als HTML-Vorschau in Terax öffnen: Seite sichtbar, Punkte 1–6 „ja" (7 und 8 hängen an der Abschottung des Rahmens; Ergebnis notieren). Relatives CSS, Bild und Skript laden.
 - [ ] M-C über SSH: dieselbe Messseite vom Server als HTML-Vorschau: sichtbar, mit Nachbardateien (das ging bisher über SSH gar nicht).
 - [ ] Eine zweite HTML-Datei im selben Ordner, die `index.html` in einem `iframe` einbettet: Ergebnis notieren (darf leer sein; dann greift die Variante ohne `frame-ancestors`).
 - [ ] **Wenn weiß oder Punkt 4 rot:** zuerst M-B zur Einordnung (im Ordner `python3 -m http.server 8765 --bind 127.0.0.1`, in Terax einen Web-Vorschau-Tab mit `http://127.0.0.1:8765/index.html`, danach mit `http://localhost:8765/index.html`; Punkte 1–6 notieren) und Ergebnis schicken. Dann stelle ich in dieser Reihenfolge um: Fallback-Adresse `localhost`, Variante ohne `frame-ancestors`, und erst wenn beides nicht hilft, die Konstante aus (HTML-Vorschau wie heute). Die Ursache ist nur im Debug-Build oder mit Web Inspector sichtbar.
+- [ ] Für die Ursachensuche bei weißer Fläche: `pnpm tauri build --debug` der Dev-Variante bzw. Web Inspector; die Konsole zeigt, ob `frame-ancestors` oder das Laden von `127.0.0.1` scheitert. Nicht unter `tauri dev` messen (dort hat die App eine andere Herkunft als im Release).
 - [ ] „Neu laden" in der Kopfzeile: Seite lädt neu, die Taste hört auf zu drehen (lokal und über SSH). Datei ändern, „Neu laden": neuer Stand.
 - [ ] Neu laden bei Fehler: SSH-Verbindung trennen, „Neu laden": Fehlerseite im Rahmen oder Rückfall; die Taste darf nicht ewig drehen. Wieder verbinden, „Neu laden": Seite mit Nachbardateien da.
 - [ ] Rückfall und zweiter Versuch: HTML-Tab auf einem Server öffnen, BEVOR die Verbindung steht (direkt nach App-Start): Vorschau erscheint evtl. ohne Bilder; „Neu laden": jetzt mit Bildern. Notieren, ob die Fläche dabei kurz leer ist und ob das stört.
@@ -67,8 +70,10 @@ Die Konstante `HTML_PREVIEW_VIA_SERVER` ist an. Bleibt die Vorschau weiß, ist d
 
 - [ ] Zen-Taste in der Kopfzeile bzw. Kürzel: Seitenleiste, Ränder, Rahmen, Kopf und Statusleiste weg; die Vorschau füllt das Fenster. Tooltip zeigt „Toggle zen mode · {Kürzel}".
 - [ ] Ampelknöpfe (N-11): über Vorschau-Tabs rückt die Kopfzeile nach rechts (kein Überlappen mit dem Dateinamen); über Terminal-, Diff- und Web-Vorschau-Tabs notieren, ob sie die erste Zeile verdecken.
+- [ ] Dasselbe für Code-Tab, Video/Audio, Git-Verlauf und ein Bild/PDF während „Loading…“ (alle ohne Kopfzeile im Zen): notieren, ob die Ampelknöpfe die erste Zeile verdecken. App-Zoom auf rund 75 % und 150 % stellen: sitzt der Dateiname in der Kopfzeile im Zen weiter rechts neben den Ampelknöpfen?
 - [ ] Eingabezeile: in Vorschau- und Code-Tabs verborgen, im Terminal-Tab da.
 - [ ] Esc über einer HTML-Vorschau, nach einem Klick IN die Seite: Zen endet (N-10). Das ist der macOS-Tastenmonitor.
+- [ ] Esc im Zen über einer PDF, nach einem Klick IN die PDF: Zen endet. Raw-Ansicht einer HTML- oder Markdown-Datei im Zen: Esc geht an den Editor (Zen bleibt), die Zen-Taste in der Kopfzeile beendet ihn.
 - [ ] Esc im Einstellungsfenster, während das Hauptfenster im Zen über einer Vorschau steht: Zen bleibt (OB-4).
 - [ ] Esc im Zen in einem Terminal-Tab mit laufendem Claude Code: Claude Code bricht ab, Zen bleibt (N-21).
 - [ ] Esc bei offenem Dialog oder Menü über der Vorschau: schließt nur den Dialog, Zen bleibt.
@@ -81,6 +86,7 @@ Die Konstante `HTML_PREVIEW_VIA_SERVER` ist an. Bleibt die Vorschau weiß, ist d
 ## 6. Wischen
 
 - [ ] Über einer HTML-Vorschau waagerecht wischen: der Tab wechselt NICHT; eine breite Tabelle in der Seite scrollt waagerecht (N-12). Auch über der Kopfzeile der HTML-Vorschau wechselt der Tab nicht.
+- [ ] Den Zeiger von der Seitenleiste bzw. von der Tab-Leiste aus in die HTML-Vorschau bewegen und sofort wischen (auch im Zen vom Fensterrand aus): der Tab wechselt nicht.
 - [ ] Über Terminal-, Editor- und Markdown-Tabs: Wischen wechselt den Tab wie bisher.
 - [ ] Scroll-Hänger (N-13): Tab per Wischen wechseln, sodass die Geste auf einem HTML-Tab endet; danach in der Vorschau hoch und runter scrollen: geht es sofort? Falls der alte Hänger noch auftritt: Abfolge notieren (die Experimente E1–E8 stehen in `dossier-vorschau.md`, Abschnitt 7; E1 = Wisch-Einstellung einen Tag aus).
 
