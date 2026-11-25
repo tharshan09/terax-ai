@@ -1,8 +1,11 @@
 //! Reading a requested file through the same chain for every file of a
 //! grant, entry and neighbours alike, never `trusted`: scope by text, deny-list
-//! on the text, resolve, then scope and deny-list on the resolved target, and
-//! again on the opened file (on macOS and Linux the path of the open handle; on
-//! Windows by resolving the path again), regular file, 10 MiB, PDF magic.
+//! on the text, resolve, then scope and deny-list on the resolved target,
+//! regular file, 10 MiB, PDF magic. A local file is checked once more after it
+//! is opened: on macOS and Linux by the path of the open handle, on Windows by
+//! resolving the path again, which does not catch a swap. A file read over SSH
+//! is checked on the target the host reports; this module does not see the
+//! file the host opened.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -109,7 +112,8 @@ impl Refusal {
 }
 
 /// A text from a host (stderr, a helper's message) for a log line or a click
-/// reason: control characters become spaces, at most `DETAIL_CHARS` chars.
+/// reason: control characters become spaces; a longer text is cut after
+/// `DETAIL_CHARS` chars and ends with `…`.
 pub(crate) fn clean_detail(text: &str) -> String {
     let cleaned: String = text
         .chars()
@@ -257,8 +261,9 @@ pub(crate) fn read_local(grant: &Grant, target: &Target) -> Result<Loaded, Refus
 }
 
 /// Opens a resolved target and checks the file that is actually open, so a
-/// path swapped for a link after resolving is caught. Returns the file, its
-/// length and the checked path.
+/// path swapped for a link after resolving is caught on macOS and Linux; on
+/// Windows `opened_path` resolves the path again and does not catch it.
+/// Returns the file, its length and the checked path.
 fn open_checked(grant: &Grant, resolved: &Path, name: &str) -> Result<(std::fs::File, u64, String), Refusal> {
     let file = open_for_reading(resolved).map_err(|e| {
         log::debug!("preview server: cannot open {name}: {e}");

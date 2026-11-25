@@ -272,8 +272,8 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) 
         .map_err(|e| format!("preview server task failed: {e}"))
 }
 
-/// The kind of a resolved entry, held against the kind of the clicked name
-/// (E1): the resolved name decides; another kind than the clicked one is
+/// The kind of a resolved entry, held against the kind of the clicked name:
+/// the resolved name decides; another kind than the clicked one is
 /// refused, a name the server could never serve too.
 fn resolved_kind(clicked: EntryKind, resolved: &str) -> Result<EntryKind, Denial> {
     let name = basename(resolved);
@@ -356,8 +356,10 @@ fn entry_url(grant: &Grant) -> String {
 }
 
 /// The opener's error without the link: the address (encoded and decoded),
-/// the secret and the authority become `<link>`; if any piece of the secret
-/// or the port is still there, a fixed reason replaces the whole text.
+/// the secret and the authority become `<link>`; if a run of 8 bytes of the
+/// secret (compared byte for byte, so case-sensitive) or the port number is
+/// still there, a fixed reason replaces the whole text. Shorter pieces of the
+/// secret and a secret in another letter case are not detected.
 fn scrub_link(error: &str, grant: &Grant, url: &str) -> String {
     let decoded = percent_encoding::percent_decode_str(url).decode_utf8_lossy().into_owned();
     let scrubbed = clean_detail(&error.replace(url, "<link>").replace(&decoded, "<link>"))
@@ -373,12 +375,22 @@ fn scrub_link(error: &str, grant: &Grant, url: &str) -> String {
 }
 
 /// Builds the entry address and opens it (SVC-11). An opener error never
-/// carries the address back (`scrub_link`).
+/// carries the address back (`scrub_link`). A failed opener task answers with
+/// the fixed reason; its own text is dropped.
 async fn open_entry(grant: &Grant, open: impl FnOnce(&str) -> Result<(), String> + Send + 'static) -> Result<BrowserOpen, String> {
     let url = entry_url(grant);
     let opened = {
         let url = url.clone();
-        blocking(move || open(&url)).await?
+        match blocking(move || open(&url)).await {
+            Ok(opened) => opened,
+            Err(_) => {
+                log::warn!("preview server: the opener task failed");
+                return Ok(BrowserOpen {
+                    status: BrowserOpenStatus::OpenFailed,
+                    reason: Some(OPEN_FAILED_REASON.to_string()),
+                });
+            }
+        }
     };
     Ok(match opened {
         Ok(()) => BrowserOpen {
@@ -1805,6 +1817,20 @@ mod tests {
         assert_eq!(scrub_link(&format!("cut {}", &url[..60]), &grant, &url), OPEN_FAILED_REASON);
         assert_eq!(scrub_link("listener on port 32891", &grant, &url), OPEN_FAILED_REASON);
         assert_eq!(scrub_link("no handler\r\nfor http", &grant, &url), "no handler  for http");
+    }
+
+    #[test]
+    fn ac36_a_failed_opener_task_answers_with_the_fixed_reason() {
+        let grant = testkit::grant(Location::Local, "/p/a.html", None, EntryKind::Html, GrantClass::Browser);
+        let grant = Grant { port: 32891, ..grant };
+        let driver = Driver::new();
+        let answer = driver
+            .block_on(open_entry(&grant, |url: &str| -> Result<(), String> { panic!("cannot open {url}") }))
+            .unwrap();
+        assert_eq!(answer.status, BrowserOpenStatus::OpenFailed);
+        let reason = answer.reason.unwrap();
+        assert_eq!(reason, "the default browser could not be started");
+        assert!(!reason.contains(&grant.token) && !reason.contains("32891"), "{reason}");
     }
 
     #[test]

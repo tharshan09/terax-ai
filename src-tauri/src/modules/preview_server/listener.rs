@@ -118,7 +118,9 @@ fn reason_phrase(status: u16) -> &'static str {
 /// Accepts connections for `grant` until the process ends. A connection over
 /// the limit of this grant or of all grants is closed at once. Slots are
 /// taken before the secret is known (it is in the path); a local process can
-/// hold them until the head budget or the drain time ends.
+/// hold them until the head budget or the drain time ends. Connections held
+/// that way up to the limit of a grant block that link, up to the limit of
+/// all grants every link, until they time out.
 pub(crate) async fn serve_listener(listener: TcpListener, grant: Arc<Grant>, shared: Arc<Shared>) {
     loop {
         let stream = match listener.accept().await {
@@ -256,8 +258,10 @@ fn log_refusal(refusal: &Refusal) {
 
 /// Writes the answer within the write budget (without the body for `HEAD`:
 /// the one place that decides it), then closes only the sending half and
-/// reads what the client still sends until it closes, so the answer is not
-/// lost to a reset (OB-11). That reading is short and bounded.
+/// reads what the client still sends, for at most `DRAIN_TIME` and
+/// `DRAIN_LIMIT`. A client that sends more or longer after its request head
+/// can lose the rest of the answer to a reset; a browser sends nothing after
+/// the head of a `GET` or `HEAD`.
 async fn finish(mut stream: TcpStream, reply: Reply, method: Option<Method>, limits: Limits) {
     let head_only = method == Some(Method::Head);
     let written = tokio::time::timeout(limits.write_budget, async {
