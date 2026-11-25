@@ -55,6 +55,8 @@ import type { GitStatusCode } from "./lib/gitStatusUtils";
 import { useGlobalShortcuts } from "@/modules/shortcuts";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { GitStatusSnapshot } from "@/modules/ai/lib/native";
+import { browserOpenable } from "@/modules/preview-server/lib/browserOpenable";
+import { openInBrowser } from "@/modules/preview-server/lib/openInBrowser";
 import { useWorkspaceEnvStore } from "@/modules/workspace";
 
 export type FileExplorerHandle = {
@@ -801,6 +803,17 @@ export const FileExplorer = memo(
                       Open with Default App
                     </ContextMenuItem>
                   )}
+                  {!menuTarget.isDir &&
+                    browserOpenable(menuTarget.path, workspace) && (
+                      <ContextMenuItem
+                        className={COMPACT_ITEM}
+                        onSelect={() =>
+                          void openInBrowser(menuTarget.path, workspace)
+                        }
+                      >
+                        Open in Browser
+                      </ContextMenuItem>
+                    )}
                   {menuTarget.isDir && onRevealInTerminal && (
                     <ContextMenuItem
                       className={COMPACT_ITEM}
