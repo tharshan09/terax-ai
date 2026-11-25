@@ -391,24 +391,76 @@ def read_file(req):
             "mtime": int(st.st_mtime * 1000)}
 
 
+READ_MISSING = "missing"
+READ_NOT_REGULAR = "not_regular"
+READ_TOO_LARGE = "too_large"
+EXACT_UNSUPPORTED = "this host cannot open a file without following symlinks"
+PATH_CHANGED = "the path changed while it was read"
+
+
+class _Refused(ValueError):
+    # A read_bytes refusal with a fixed kind; main adds the kind to the envelope
+    # and the message stays the one read_bytes always gave.
+    def __init__(self, kind, message):
+        ValueError.__init__(self, message)
+        self.kind = kind
+
+
+def _open_exact(real):
+    # Opens the resolved path one component at a time without following any
+    # symlink, so the file read is the one at `real` even if a folder on the way
+    # was swapped for a link after realpath. A host that cannot do this refuses.
+    if not (os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW")
+            and hasattr(os, "O_DIRECTORY")):
+        raise ValueError(EXACT_UNSUPPORTED)
+    parts = real.split("/")
+    if parts[0] != "":
+        raise ValueError("not an absolute path: " + real)
+    walk = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open("/", walk)
+    try:
+        for name in parts[1:-1]:
+            step = os.open(name, walk, dir_fd=fd)
+            os.close(fd)
+            fd = step
+        return os.open(parts[-1], os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | os.O_NOFOLLOW,
+                       dir_fd=fd)
+    except FileNotFoundError as ex:
+        raise _Refused(READ_MISSING, str(ex))
+    except OSError as ex:
+        # A link where realpath saw none: ELOOP, or ENOTDIR with O_DIRECTORY on Linux.
+        if ex.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ValueError(PATH_CHANGED)
+        raise
+    finally:
+        os.close(fd)
+
+
 def read_bytes(req):
     # Reads the resolved target and reports it, so the caller can refuse a
     # symlink to a secret; O_NONBLOCK keeps a FIFO swapped in from blocking.
+    # With "exact" the open cannot leave the reported path (_open_exact).
     path = os.path.expanduser(req["path"])
     limit = min(int(req.get("limit", MAX_READ)), MAX_READ)
     real = os.path.realpath(path)
-    if not S_ISREG(os.stat(real).st_mode):
-        raise ValueError("not a regular file: " + path)
+    try:
+        mode = os.stat(real).st_mode
+    except FileNotFoundError as ex:
+        raise _Refused(READ_MISSING, str(ex))
+    if not S_ISREG(mode):
+        raise _Refused(READ_NOT_REGULAR, "not a regular file: " + path)
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
-    with os.fdopen(os.open(real, flags), "rb") as f:
+    fd = _open_exact(real) if req.get("exact") else os.open(real, flags)
+    with os.fdopen(fd, "rb") as f:
         st = os.fstat(f.fileno())
         if not S_ISREG(st.st_mode):
-            raise ValueError("not a regular file: " + path)
+            raise _Refused(READ_NOT_REGULAR, "not a regular file: " + path)
         if st.st_size > limit:
-            raise ValueError("file too large to preview: %d bytes (limit %d)" % (st.st_size, limit))
+            raise _Refused(READ_TOO_LARGE, "file too large to preview: %d bytes (limit %d)"
+                           % (st.st_size, limit))
         data = f.read(limit + 1)
     if len(data) > limit:
-        raise ValueError("file too large to preview (limit %d bytes)" % limit)
+        raise _Refused(READ_TOO_LARGE, "file too large to preview (limit %d bytes)" % limit)
     return {"real": real, "b64": base64.b64encode(data).decode("ascii")}
 
 
@@ -793,7 +845,10 @@ def main():
         data = OPS[req["op"]](req)
         out = json.dumps({"ok": True, "data": data})
     except Exception as ex:
-        out = json.dumps({"ok": False, "error": str(ex)})
+        reply = {"ok": False, "error": str(ex)}
+        if isinstance(ex, _Refused):
+            reply["kind"] = ex.kind
+        out = json.dumps(reply)
     # Prefix a sentinel so the caller can skip any login-shell banner/MOTD that
     # printed to stdout before us (exit code stays 0, so we can't rely on stderr).
     sys.stdout.write("__TERAX_JSON__" + out)
@@ -1144,6 +1199,29 @@ fn run_remote_json(
     request: &serde_json::Value,
     timeout: Option<std::time::Duration>,
 ) -> Result<serde_json::Value, RemoteError> {
+    let exit = run_remote_helper(host, request, timeout)?;
+    read_envelope(exit.code, &exit.stdout, exit.overflow, &exit.stderr)
+}
+
+/// What one helper run left behind, before anyone reads its answer.
+struct HelperExit {
+    code: Option<i32>,
+    stdout: Vec<u8>,
+    overflow: bool,
+    /// Trimmed.
+    stderr: String,
+}
+
+/// A helper run as the typed reads take it from their executor.
+type HelperRun = Result<HelperExit, RemoteError>;
+
+/// The one ssh exec behind every helper op. `Err` is `Transport` before an
+/// exit (host, spawn, pipes, wait) or `TimedOut` once `timeout` killed it.
+fn run_remote_helper(
+    host: &str,
+    request: &serde_json::Value,
+    timeout: Option<std::time::Duration>,
+) -> HelperRun {
     use std::io::Write;
     use std::process::{Command, Stdio};
     use RemoteError::Transport;
@@ -1205,7 +1283,12 @@ fn run_remote_json(
     let (stdout_bytes, overflow) = out_reader.join().unwrap_or((Vec::new(), false));
     let (stderr_bytes, _) = err_reader.join().unwrap_or((Vec::new(), false));
     let stderr = String::from_utf8_lossy(&stderr_bytes);
-    read_envelope(status.code(), &stdout_bytes, overflow, stderr.trim())
+    Ok(HelperExit {
+        code: status.code(),
+        stdout: stdout_bytes,
+        overflow,
+        stderr: stderr.trim().to_string(),
+    })
 }
 
 /// An ssh failure is transport whatever reached stdout; on any other exit the
@@ -1547,6 +1630,9 @@ pub fn stat(host: &str, path: &str) -> Result<crate::modules::fs::file::FileStat
 }
 
 /// Failure kind of a typed remote read; `read_bytes` keeps its text error.
+/// `Missing`, `NotRegularFile` and `TooLarge` come from the fixed kind the
+/// helper puts in its envelope; the texts of the other three are the host's or
+/// ssh's own words, without control characters and cut to 300 characters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteReadError {
     Unreachable(String),
@@ -1557,30 +1643,163 @@ pub enum RemoteReadError {
     TooLarge,
 }
 
-/// `read_bytes` with the failure kind kept; `budget` bounds the whole `ssh` call.
+/// Fixed kinds of a `read_bytes` refusal; each matches the helper's
+/// `READ_*` line (pinned by test).
+const READ_MISSING: &str = "missing";
+const READ_NOT_REGULAR: &str = "not_regular";
+const READ_TOO_LARGE: &str = "too_large";
+
+/// Reason for a session the server refused (OB-14), in place of the login
+/// hint `classify_ssh_error` gives for the `Permission denied` ssh prints after.
+const SESSION_REFUSED: &str = "the SSH server refused another session (MaxSessions limit)";
+
+/// Longest host or ssh text a typed error carries.
+const MAX_REASON_CHARS: usize = 300;
+
+/// The one test for a refused session; `classify_ssh_error` could use it too.
+fn session_refused(stderr: &str) -> Option<&'static str> {
+    stderr
+        .to_ascii_lowercase()
+        .contains("session open refused by peer")
+        .then_some(SESSION_REFUSED)
+}
+
+/// The host's text without control characters (each becomes a space), cut short.
+fn host_reason(text: &str) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(MAX_REASON_CHARS)
+        .collect();
+    flat.trim().to_string()
+}
+
+fn read_error(error: RemoteError) -> RemoteReadError {
+    match error {
+        RemoteError::Transport(message) => RemoteReadError::Unreachable(host_reason(&message)),
+        RemoteError::TimedOut(message) => RemoteReadError::TimedOut(host_reason(&message)),
+        RemoteError::Failed(message) => RemoteReadError::Failed(host_reason(&message)),
+        RemoteError::Killed(message) => RemoteReadError::Failed(host_reason(&message)),
+    }
+}
+
+/// The fixed kind of a helper error envelope, if it carries one.
+fn refusal_kind(stdout: &[u8]) -> Option<RemoteReadError> {
+    let at = find_subslice(stdout, TERAX_SENTINEL)? + TERAX_SENTINEL.len();
+    let envelope: serde_json::Value = serde_json::from_slice(&stdout[at..]).ok()?;
+    match envelope.get("kind")?.as_str()? {
+        READ_MISSING => Some(RemoteReadError::Missing),
+        READ_NOT_REGULAR => Some(RemoteReadError::NotRegularFile),
+        READ_TOO_LARGE => Some(RemoteReadError::TooLarge),
+        _unknown_kind => None,
+    }
+}
+
+/// The sorting all three typed reads share: a refused session first, then the
+/// answer as `read_envelope` reads it, with the helper's fixed kind kept.
+fn typed_answer(exit: HelperRun) -> Result<serde_json::Value, RemoteReadError> {
+    let exit = exit.map_err(read_error)?;
+    if matches!(exit.code, None | Some(SSH_OWN_FAILURE_EXIT)) {
+        if let Some(reason) = session_refused(&exit.stderr) {
+            return Err(RemoteReadError::Unreachable(reason.to_string()));
+        }
+    }
+    match read_envelope(exit.code, &exit.stdout, exit.overflow, &exit.stderr) {
+        Ok(data) => Ok(data),
+        Err(RemoteError::Failed(message)) => Err(refusal_kind(&exit.stdout)
+            .unwrap_or_else(|| read_error(RemoteError::Failed(message)))),
+        Err(other) => Err(read_error(other)),
+    }
+}
+
+/// OB-21: a reported target is absolute and has no `.`, `..` or empty segment
+/// (`/` itself has none).
+fn exact_target(path: String) -> Result<String, RemoteReadError> {
+    let exact = path == "/"
+        || (path.starts_with('/')
+            && path[1..].split('/').all(|segment| !matches!(segment, "" | "." | "..")));
+    if exact {
+        Ok(path)
+    } else {
+        Err(RemoteReadError::Failed(
+            "the host reported a path that is not absolute and normalized".to_string(),
+        ))
+    }
+}
+
+/// `read_bytes` with the failure kind kept. The request asks for the exact
+/// open (`_open_exact` in the helper), and `budget` alone bounds the `ssh`
+/// call: once it runs out the process is killed and the result is `TimedOut`.
 pub fn read_bytes_typed(
     host: &str,
     path: &str,
     limit: u64,
     budget: std::time::Duration,
 ) -> Result<RemoteFileBytes, RemoteReadError> {
-    let _ = (host, path, limit, budget);
-    Err(RemoteReadError::Failed("not implemented".to_string()))
+    read_bytes_typed_with(host, path, limit, budget, run_remote_helper)
 }
 
-/// `realpath` with the failure kind kept.
+fn read_bytes_typed_with(
+    host: &str,
+    path: &str,
+    limit: u64,
+    budget: std::time::Duration,
+    run: impl FnOnce(&str, &serde_json::Value, Option<std::time::Duration>) -> HelperRun,
+) -> Result<RemoteFileBytes, RemoteReadError> {
+    let request =
+        serde_json::json!({ "op": "read_bytes", "path": path, "limit": limit, "exact": true });
+    read_bytes_answer(run(host, &request, Some(budget)))
+}
+
+fn read_bytes_answer(exit: HelperRun) -> Result<RemoteFileBytes, RemoteReadError> {
+    let file =
+        parse_read_bytes(typed_answer(exit)?).map_err(|e| read_error(RemoteError::Failed(e)))?;
+    Ok(RemoteFileBytes {
+        resolved_path: exact_target(file.resolved_path)?,
+        bytes: file.bytes,
+    })
+}
+
+/// `realpath` with the failure kind kept, on the budget of `realpath`.
 pub fn realpath_typed(host: &str, path: &str) -> Result<String, RemoteReadError> {
-    let _ = (host, path);
-    Err(RemoteReadError::Failed("not implemented".to_string()))
+    realpath_typed_with(host, path, run_remote_helper)
 }
 
-/// `stat` with the failure kind kept.
+fn realpath_typed_with(
+    host: &str,
+    path: &str,
+    run: impl FnOnce(&str, &serde_json::Value, Option<std::time::Duration>) -> HelperRun,
+) -> Result<String, RemoteReadError> {
+    let request = serde_json::json!({ "op": "realpath", "path": path });
+    realpath_answer(run(host, &request, Some(REMOTE_FS_TIMEOUT)))
+}
+
+fn realpath_answer(exit: HelperRun) -> Result<String, RemoteReadError> {
+    let real: String = serde_json::from_value(typed_answer(exit)?)
+        .map_err(|e| read_error(RemoteError::Failed(format!("bad realpath response: {e}"))))?;
+    exact_target(real)
+}
+
+/// `stat` with the failure kind kept, on the budget of `stat`.
 pub fn stat_typed(
     host: &str,
     path: &str,
 ) -> Result<crate::modules::fs::file::FileStat, RemoteReadError> {
-    let _ = (host, path);
-    Err(RemoteReadError::Failed("not implemented".to_string()))
+    stat_typed_with(host, path, run_remote_helper)
+}
+
+fn stat_typed_with(
+    host: &str,
+    path: &str,
+    run: impl FnOnce(&str, &serde_json::Value, Option<std::time::Duration>) -> HelperRun,
+) -> Result<crate::modules::fs::file::FileStat, RemoteReadError> {
+    let request = serde_json::json!({ "op": "stat", "path": path });
+    stat_answer(run(host, &request, Some(REMOTE_FS_TIMEOUT)))
+}
+
+fn stat_answer(exit: HelperRun) -> Result<crate::modules::fs::file::FileStat, RemoteReadError> {
+    serde_json::from_value(typed_answer(exit)?)
+        .map_err(|e| read_error(RemoteError::Failed(format!("bad stat response: {e}"))))
 }
 
 /// Remote `fs_search`. The host helper walks + subsequence-prefilters; we
@@ -4648,5 +4867,448 @@ Host !secret prod
         assert!(read_dir(&host, &base, false).is_err(), "tree must be gone");
 
         let _ = std::fs::remove_dir_all(&local);
+    }
+
+    // Typed remote reads (slice 02). Helper envelopes are written out with the
+    // literal sentinel, so a renamed TERAX_SENTINEL does not move both sides.
+
+    fn exit(code: Option<i32>, stdout: &str, stderr: &str) -> HelperRun {
+        Ok(HelperExit {
+            code,
+            stdout: stdout.as_bytes().to_vec(),
+            overflow: false,
+            stderr: stderr.to_string(),
+        })
+    }
+
+    fn answer(envelope: &str) -> String {
+        format!("__TERAX_JSON__{envelope}")
+    }
+
+    const FOO_AT_A_PNG: &str = r#"{"ok": true, "data": {"real": "/srv/p/a.png", "b64": "Zm9v"}}"#;
+    const CONNECTION_REFUSED: &str = "ssh: connect to host devbox port 22: Connection refused";
+    const REFUSED_SESSION: &str = "mux_client_request_session: session request failed: \
+                                   Session open refused by peer\nPermission denied (publickey).";
+
+    fn failed(text: &str) -> Option<RemoteReadError> {
+        Some(RemoteReadError::Failed(text.to_string()))
+    }
+
+    fn bytes_of(result: Result<RemoteFileBytes, RemoteReadError>) -> RemoteFileBytes {
+        match result {
+            Ok(file) => file,
+            Err(error) => panic!("expected the bytes, got {error:?}"),
+        }
+    }
+
+    /// The typed read run against the local helper, through the same request
+    /// and the same decoding as `read_bytes_typed`; `None` without python3,
+    /// like the other helper tests. Also returns the raw envelope.
+    #[cfg(unix)]
+    fn typed_read_here(
+        prelude: &str,
+        path: &std::path::Path,
+        limit: u64,
+    ) -> Option<(Result<RemoteFileBytes, RemoteReadError>, String)> {
+        let mut envelope = None;
+        let budget = std::time::Duration::from_secs(60);
+        let run_here = |_: &str, request: &serde_json::Value, _: Option<_>| -> HelperRun {
+            let (code, stdout, stderr) = helper_output(prelude, request)
+                .ok_or_else(|| RemoteError::Transport("no local python3".to_string()))?;
+            envelope = Some(String::from_utf8_lossy(&stdout).into_owned());
+            Ok(HelperExit {
+                code,
+                stdout,
+                overflow: false,
+                stderr,
+            })
+        };
+        let path = path.to_string_lossy();
+        let result = read_bytes_typed_with("devbox", &path, limit, budget, run_here);
+        Some((result, envelope?))
+    }
+
+    /// A path as a Python string literal (JSON quoting is valid Python).
+    #[cfg(unix)]
+    fn py_str(path: &std::path::Path) -> String {
+        serde_json::to_string(&path.to_string_lossy()).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ac1_the_helpers_refusals_decode_to_missing_not_regular_and_too_large() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("big.png");
+        std::fs::write(&big, vec![7u8; 64]).unwrap();
+
+        let Some((missing, envelope)) = typed_read_here("", &dir.path().join("gone.png"), 1024)
+        else {
+            return;
+        };
+        assert_eq!(missing.err(), Some(RemoteReadError::Missing));
+        assert!(envelope.contains(r#""kind": "missing""#), "{envelope}");
+
+        let (folder, envelope) = typed_read_here("", dir.path(), 1024).unwrap();
+        assert_eq!(folder.err(), Some(RemoteReadError::NotRegularFile));
+        assert!(envelope.contains(r#""kind": "not_regular""#), "{envelope}");
+
+        let (large, envelope) = typed_read_here("", &big, 63).unwrap();
+        assert_eq!(large.err(), Some(RemoteReadError::TooLarge));
+        assert!(envelope.contains(r#""kind": "too_large""#), "{envelope}");
+        assert!(!envelope.contains("b64"), "refused before the transfer: {envelope}");
+
+        let (fits, _) = typed_read_here("", &big, 64).unwrap();
+        let file = bytes_of(fits);
+        assert_eq!(file.bytes, vec![7u8; 64]);
+        assert_eq!(file.resolved_path, std::fs::canonicalize(&big).unwrap().to_string_lossy());
+    }
+
+    // Disposition 5: the editor's read keeps every error text; the kind only rides along.
+    #[cfg(unix)]
+    #[test]
+    fn the_editor_read_keeps_its_error_texts_now_that_kinds_ride_along() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let gone = root.join("gone.png");
+        let big = root.join("big.png");
+        std::fs::write(&big, vec![7u8; 64]).unwrap();
+        let cases = [
+            (
+                gone.clone(),
+                1024,
+                format!("[Errno 2] No such file or directory: '{}'", gone.display()),
+            ),
+            (root.clone(), 1024, format!("not a regular file: {}", root.display())),
+            (big, 63, "file too large to preview: 64 bytes (limit 63)".to_string()),
+        ];
+        for (path, limit, text) in cases {
+            let path = path.to_string_lossy();
+            let req = serde_json::json!({ "op": "read_bytes", "path": path, "limit": limit });
+            let Some((code, stdout, stderr)) = helper_output("", &req) else {
+                return;
+            };
+            let reply = read_envelope(code, &stdout, false, &stderr).err().map(String::from);
+            assert_eq!(reply, Some(text));
+        }
+    }
+
+    /// Kinds whose `READ_*` definition line is missing from `helper`.
+    fn kinds_missing_from(helper: &str) -> Vec<&'static str> {
+        [
+            ("READ_MISSING", READ_MISSING),
+            ("READ_NOT_REGULAR", READ_NOT_REGULAR),
+            ("READ_TOO_LARGE", READ_TOO_LARGE),
+        ]
+        .into_iter()
+        .filter(|(name, kind)| !helper.contains(&format!("\n{name} = \"{kind}\"\n")))
+        .map(|(_, kind)| kind)
+        .collect()
+    }
+
+    #[test]
+    fn ac2_each_read_kind_stands_once_in_the_helper() {
+        assert_eq!(
+            [READ_MISSING, READ_NOT_REGULAR, READ_TOO_LARGE],
+            ["missing", "not_regular", "too_large"]
+        );
+        assert_eq!(kinds_missing_from(REMOTE_PYTHON), Vec::<&str>::new());
+        for kind in ["missing", "not_regular", "too_large"] {
+            assert_eq!(REMOTE_PYTHON.matches(&format!("\"{kind}\"")).count(), 1, "{kind}");
+        }
+        // Red counter-probe: the same checker on a copy with `not_regular` renamed.
+        let renamed = REMOTE_PYTHON.replace("\"not_regular\"", "\"not_a_file\"");
+        assert_eq!(kinds_missing_from(&renamed), vec!["not_regular"]);
+    }
+
+    #[test]
+    fn ac3_the_typed_answer_sorts_exit_code_stdout_and_stderr() {
+        assert_eq!(
+            read_bytes_answer(exit(Some(255), "", CONNECTION_REFUSED)).err(),
+            Some(RemoteReadError::Unreachable(
+                "Connection refused — the host isn't accepting SSH on that address/port."
+                    .to_string()
+            ))
+        );
+        let late = RemoteError::TimedOut(timed_out_msg("devbox", "read_bytes", 60));
+        assert_eq!(
+            read_bytes_answer(Err(late)).err(),
+            Some(RemoteReadError::TimedOut(
+                "SSH request to 'devbox' timed out after 60s (budget) and was killed: read_bytes"
+                    .to_string()
+            ))
+        );
+        assert_eq!(
+            read_bytes_answer(exit(Some(137), "", "")).err(),
+            failed("remote helper exited with status 137")
+        );
+        let boom = answer(r#"{"ok": false, "error": "boom"}"#);
+        assert_eq!(read_bytes_answer(exit(Some(0), &boom, "")).err(), failed("boom"));
+        let file = bytes_of(read_bytes_answer(exit(Some(0), &answer(FOO_AT_A_PNG), "")));
+        assert_eq!(
+            (file.resolved_path.as_str(), file.bytes.as_slice()),
+            ("/srv/p/a.png", &b"foo"[..])
+        );
+        // ssh that never started is unreachable too.
+        let spawn =
+            RemoteError::Transport("ssh spawn failed: No such file or directory".to_string());
+        assert_eq!(
+            read_bytes_answer(Err(spawn)).err(),
+            Some(RemoteReadError::Unreachable(
+                "ssh spawn failed: No such file or directory".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_helper_error_with_an_unknown_kind_stays_failed_with_its_text() {
+        let odd = answer(r#"{"ok": false, "error": "nope", "kind": "gone"}"#);
+        assert_eq!(read_bytes_answer(exit(Some(0), &odd, "")).err(), failed("nope"));
+    }
+
+    #[test]
+    fn typed_reasons_carry_no_control_characters_and_stay_short() {
+        assert_eq!(
+            read_error(RemoteError::Failed("line one\nline\ttwo\u{1b}[31m".to_string())),
+            RemoteReadError::Failed("line one line two [31m".to_string())
+        );
+        assert_eq!(
+            read_error(RemoteError::Transport("x".repeat(1000))),
+            RemoteReadError::Unreachable("x".repeat(300))
+        );
+    }
+
+    fn refused_session(
+        _: &str,
+        _: &serde_json::Value,
+        _: Option<std::time::Duration>,
+    ) -> HelperRun {
+        exit(Some(255), "", REFUSED_SESSION)
+    }
+
+    #[test]
+    fn ac4_a_refused_session_names_the_session_limit_in_all_three_reads() {
+        let budget = std::time::Duration::from_secs(60);
+        let expected = Some(RemoteReadError::Unreachable(
+            "the SSH server refused another session (MaxSessions limit)".to_string(),
+        ));
+        let read = read_bytes_typed_with("devbox", "/srv/p/a.png", 1024, budget, refused_session);
+        for (read, got) in [
+            ("read_bytes_typed", read.err()),
+            ("realpath_typed", realpath_typed_with("devbox", "/srv/p", refused_session).err()),
+            ("stat_typed", stat_typed_with("devbox", "/srv/p/a.png", refused_session).err()),
+        ] {
+            assert_eq!(got, expected, "{read}");
+            assert!(!format!("{got:?}").contains("open a terminal"), "{read}");
+        }
+        // Every other caller keeps the login hint for the same stderr.
+        let hint = classify_ssh_error(REFUSED_SESSION).expect("a hint");
+        assert!(hint.contains("open a terminal to this host first"), "{hint}");
+        let editor = read_envelope(Some(255), b"", false, REFUSED_SESSION)
+            .err()
+            .map(String::from)
+            .expect("an error");
+        assert!(editor.contains("open a terminal to this host first"), "{editor}");
+        // Only ssh's own exit counts: a helper that answered keeps its answer.
+        let answered = read_bytes_answer(exit(Some(0), &answer(FOO_AT_A_PNG), REFUSED_SESSION));
+        assert!(answered.is_ok());
+    }
+
+    // PD-01 / OB-22: the budget the typed read hands its executor is what
+    // `run_remote_helper` passes to `wait_child` in production.
+    #[test]
+    fn ac5_the_typed_read_hands_its_own_budget_to_the_ssh_call() {
+        use std::time::Duration;
+        for budget in [Duration::from_secs(60), Duration::from_millis(1500)] {
+            let mut seen = None;
+            let record = |host: &str, request: &serde_json::Value, timeout: Option<Duration>| {
+                seen = Some((host.to_string(), request.clone(), timeout));
+                exit(Some(0), &answer(FOO_AT_A_PNG), "")
+            };
+            let result = read_bytes_typed_with("devbox", "/srv/p/a.png", 10485760, budget, record);
+            assert!(result.is_ok());
+            let (host, request, timeout) = seen.expect("one helper run");
+            assert_eq!(host, "devbox");
+            let expected = serde_json::json!({
+                "op": "read_bytes", "path": "/srv/p/a.png", "limit": 10485760, "exact": true,
+            });
+            assert_eq!(request, expected);
+            assert_eq!(timeout, Some(budget));
+        }
+        // The editor's budget for the same limit, which the typed read must not take.
+        assert_eq!(read_bytes_timeout(10485760, None), Duration::from_secs(244));
+    }
+
+    // The public typed reads are one call each; this pins that they hand over
+    // their arguments and the real executor unchanged.
+    #[test]
+    fn ac5_the_public_typed_reads_delegate_their_arguments_unchanged() {
+        let source = include_str!("ssh.rs");
+        let code = source.split("#[cfg(test)]\nmod tests {").next().unwrap();
+        let code: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+        for body in [
+            "->Result<RemoteFileBytes,RemoteReadError>{read_bytes_typed_with(host,path,limit,budget,run_remote_helper)}",
+            "->Result<String,RemoteReadError>{realpath_typed_with(host,path,run_remote_helper)}",
+            "->Result<crate::modules::fs::file::FileStat,RemoteReadError>{stat_typed_with(host,path,run_remote_helper)}",
+            "letstatus=matchwait_child(&child,timeout).map_err(Transport)?",
+        ] {
+            assert_eq!(code.matches(body).count(), 1, "{body}");
+        }
+    }
+
+    #[test]
+    fn ac10_realpath_and_stat_answers_and_their_budget() {
+        assert_eq!(
+            realpath_answer(exit(Some(0), &answer(r#"{"ok": true, "data": "/srv/p/a.html"}"#), "")),
+            Ok("/srv/p/a.html".to_string())
+        );
+        let stat = r#"{"ok": true, "data": {"size": 2048, "mtime": 1, "kind": "file"}}"#;
+        let stat = match stat_answer(exit(Some(0), &answer(stat), "")) {
+            Ok(stat) => stat,
+            Err(error) => panic!("expected a stat, got {error:?}"),
+        };
+        assert_eq!(stat.size, 2048);
+        assert!(matches!(stat.kind, crate::modules::fs::file::StatKind::File));
+
+        let enoent = answer(r#"{"ok": false, "error": "[Errno 2] No such file or directory"}"#);
+        assert_eq!(
+            realpath_answer(exit(Some(0), &enoent, "")).err(),
+            failed("[Errno 2] No such file or directory")
+        );
+        assert_eq!(
+            stat_answer(exit(Some(0), &enoent, "")).err(),
+            failed("[Errno 2] No such file or directory")
+        );
+        let unreachable =
+            |error: Option<RemoteReadError>| matches!(error, Some(RemoteReadError::Unreachable(_)));
+        assert!(unreachable(realpath_answer(exit(Some(255), "", CONNECTION_REFUSED)).err()));
+        assert!(unreachable(stat_answer(exit(Some(255), "", CONNECTION_REFUSED)).err()));
+
+        let mut seen = Vec::new();
+        let _ = realpath_typed_with("devbox", "/srv/p/a.html", |_, request, timeout| {
+            seen.push((request.clone(), timeout));
+            exit(Some(0), &answer(r#"{"ok": true, "data": "/srv/p/a.html"}"#), "")
+        });
+        let _ = stat_typed_with("devbox", "/srv/p/a.html", |_, request, timeout| {
+            seen.push((request.clone(), timeout));
+            exit(Some(0), &answer(r#"{"ok": false, "error": "x"}"#), "")
+        });
+        let thirty = Some(std::time::Duration::from_secs(30));
+        assert_eq!(
+            seen,
+            [
+                (serde_json::json!({ "op": "realpath", "path": "/srv/p/a.html" }), thirty),
+                (serde_json::json!({ "op": "stat", "path": "/srv/p/a.html" }), thirty),
+            ]
+        );
+    }
+
+    // OB-21: only an absolute, normalized target leaves the typed reads.
+    #[test]
+    fn typed_reads_refuse_a_reported_target_that_is_not_exact() {
+        let refused = failed("the host reported a path that is not absolute and normalized");
+        for real in ["srv/p/a.png", "/srv/./a.png", "/srv/../a.png", "/srv//a.png", "/srv/p/", ""] {
+            let bytes = serde_json::json!({ "ok": true, "data": { "real": real, "b64": "Zm9v" } });
+            let bytes = read_bytes_answer(exit(Some(0), &answer(&bytes.to_string()), ""));
+            assert_eq!(bytes.err(), refused, "read_bytes_typed {real:?}");
+            let path = serde_json::json!({ "ok": true, "data": real });
+            let path = realpath_answer(exit(Some(0), &answer(&path.to_string()), ""));
+            assert_eq!(path.err(), refused, "realpath_typed {real:?}");
+        }
+        for real in ["/", "/srv/p/a.png", "/srv/p/.hidden", "/srv/p/a..b"] {
+            let path = serde_json::json!({ "ok": true, "data": real });
+            assert_eq!(
+                realpath_answer(exit(Some(0), &answer(&path.to_string()), "")),
+                Ok(real.to_string())
+            );
+        }
+    }
+
+    // OB-20: after realpath, a folder on the way becomes a link to a folder
+    // outside; the exact open must not follow it.
+    #[cfg(unix)]
+    #[test]
+    fn the_typed_read_never_returns_bytes_from_a_folder_swapped_for_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let sub = root.join("shared/sub");
+        let outside = root.join("outside/sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(sub.join("a.png"), b"INSIDE").unwrap();
+        std::fs::write(outside.join("a.png"), b"SECRET").unwrap();
+        let prelude = format!(
+            "import os\n\
+             _realpath = os.path.realpath\n\
+             def _swap(p, *a, **k):\n    \
+                 r = _realpath(p, *a, **k)\n    \
+                 os.rename({sub}, {sub} + '.was')\n    \
+                 os.symlink({outside}, {sub})\n    \
+                 return r\n\
+             os.path.realpath = _swap\n",
+            sub = py_str(&sub),
+            outside = py_str(&outside),
+        );
+        let Some((result, envelope)) = typed_read_here(&prelude, &sub.join("a.png"), 1024) else {
+            return;
+        };
+        assert!(
+            std::fs::symlink_metadata(&sub).unwrap().file_type().is_symlink(),
+            "the swap must have happened"
+        );
+        assert!(!envelope.contains(&b64encode(b"SECRET")), "{envelope}");
+        assert_eq!(result.err(), failed("the path changed while it was read"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_typed_read_resolves_links_the_request_itself_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir(root.join("real")).unwrap();
+        std::fs::write(root.join("real/a.png"), b"foo").unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+        let Some((result, _)) = typed_read_here("", &root.join("link/a.png"), 1024) else {
+            return;
+        };
+        let file = bytes_of(result);
+        assert_eq!(file.bytes, b"foo");
+        assert_eq!(file.resolved_path, root.join("real/a.png").to_string_lossy());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_host_without_dir_fd_refuses_the_typed_read_and_keeps_the_editor_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.png");
+        std::fs::write(&file, b"foo").unwrap();
+        let prelude = "import os\nos.supports_dir_fd = set()\n";
+        let Some((typed, _)) = typed_read_here(prelude, &file, 1024) else {
+            return;
+        };
+        assert_eq!(typed.err(), failed("this host cannot open a file without following symlinks"));
+        let path = file.to_string_lossy();
+        let req = serde_json::json!({ "op": "read_bytes", "path": path, "limit": 1024 });
+        let env = run_helper(prelude, &req).unwrap();
+        assert_eq!(env["ok"], serde_json::Value::Bool(true), "{env}");
+        assert_eq!(parse_read_bytes(env["data"].clone()).unwrap().bytes, b"foo");
+    }
+
+    // The exact open walks with O_PATH on Linux, so a folder the user may only
+    // pass through still reads, as it does for the editor.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_typed_read_passes_a_search_only_folder_on_linux() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("a.png"), b"foo").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o100)).unwrap();
+        let read = typed_read_here("", &locked.join("a.png"), 1024);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let Some((result, _)) = read else {
+            return;
+        };
+        assert_eq!(bytes_of(result).bytes, b"foo");
     }
 }
