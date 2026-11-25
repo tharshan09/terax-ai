@@ -16,7 +16,7 @@ export function DocViewToggle({
   renderedHint,
 }: Props) {
   return (
-    <div className="absolute right-3 top-3 z-10 inline-flex items-center gap-0.5 rounded-md border border-border/60 bg-card/85 p-0.5 text-[11px] shadow-sm backdrop-blur">
+    <div className="inline-flex shrink-0 items-center gap-0.5 rounded-md border border-border/60 bg-card/85 p-0.5 text-[11px]">
       <button
         type="button"
         onClick={() => onChange("rendered")}

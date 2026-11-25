@@ -17,6 +17,7 @@ import { vim } from "@replit/codemirror-vim";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import {
   forwardRef,
+  type ReactNode,
   useCallback,
   useEffect,
   useImperativeHandle,
@@ -44,6 +45,13 @@ import {
 } from "./lib/binaryPreview";
 import { ImagePreview } from "@/modules/editor/ImagePreview";
 import { MediaPreview } from "./MediaPreview";
+import {
+  binaryHeaderSurface,
+  previewHeaderModel,
+} from "@/modules/doc/lib/previewHeader";
+import { PreviewHeader } from "@/modules/doc/PreviewHeader";
+import { OpenInBrowserButton } from "@/modules/preview-server/OpenInBrowserButton";
+import { ZenToggleButton } from "@/modules/zen";
 
 initVimGlobals();
 
@@ -75,6 +83,9 @@ type Props = {
   onDirtyChange?: (dirty: boolean) => void;
   onSaved?: () => void;
   onClose?: () => void;
+  /** Fires each time the document has been read (content, binary, too large
+   *  or error), i.e. whenever it leaves the loading state. */
+  onLoaded?: () => void;
   visible?: boolean;
 };
 
@@ -93,6 +104,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
       onDirtyChange,
       onSaved,
       onClose,
+      onLoaded,
       visible = true,
     } = props;
 
@@ -103,6 +115,11 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
     });
     const reloadRef = useRef(reload);
     reloadRef.current = reload;
+    const onLoadedRef = useRef(onLoaded);
+    onLoadedRef.current = onLoaded;
+    useEffect(() => {
+      if (doc.status !== "loading") onLoadedRef.current?.();
+    }, [doc.status]);
     const cmRef = useRef<ReactCodeMirrorRef>(null);
     const themeExt = useEditorThemeExt();
     const vimMode = usePreferencesStore((s) => s.vimMode);
@@ -442,8 +459,27 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
         );
       }
 
+      // Images and PDFs (their preview and the card in their place) get the
+      // preview header; video, audio and other binaries render as before.
+      const surface = binaryHeaderSurface(path);
+      const withHeader = (body: ReactNode) =>
+        surface ? (
+          <div className="flex h-full min-h-0 flex-col">
+            <PreviewHeader
+              model={previewHeaderModel({ surface, path, workspace: readEnv })}
+              openInBrowser={
+                <OpenInBrowserButton path={path} workspace={readEnv} />
+              }
+              zen={<ZenToggleButton />}
+            />
+            <div className="min-h-0 flex-1">{body}</div>
+          </div>
+        ) : (
+          body
+        );
+
       if (mode !== "card") {
-        return (
+        return withHeader(
           <div className="flex h-full min-h-0 flex-col items-center justify-center bg-background p-4 overflow-auto">
             {mode === "image" && (
               <ImagePreview
@@ -479,11 +515,11 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
                 // only this one path — no directory listing, no other files).
               />
             )}
-          </div>
+          </div>,
         );
       }
 
-      return (
+      return withHeader(
         <div className="flex h-full flex-col items-center justify-center gap-1 px-6 text-center">
           <div className="text-sm text-foreground">
             {doc.status === "binary" ? "Binary file" : "File too large"}
@@ -505,7 +541,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
               Open with default app
             </Button>
           )}
-        </div>
+        </div>,
       );
     }
 

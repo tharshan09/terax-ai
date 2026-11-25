@@ -1,7 +1,13 @@
-import { cn, isHtmlPath, isMarkdownPath } from "@/lib/utils";
-import { DocViewToggle } from "@/components/ui/DocViewToggle";
+import { cn } from "@/lib/utils";
+import {
+  previewHeaderModel,
+  rawHeaderSurface,
+} from "@/modules/doc/lib/previewHeader";
+import { PreviewHeader } from "@/modules/doc/PreviewHeader";
+import { OpenInBrowserButton } from "@/modules/preview-server/OpenInBrowserButton";
 import type { EditorTab, Tab } from "@/modules/tabs";
-import { memo, useCallback, useEffect, useMemo, useRef } from "react";
+import { usePaneFrameClass, ZenToggleButton } from "@/modules/zen";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EditorPane, type EditorPaneHandle } from "./EditorPane";
 
 type Props = {
@@ -40,6 +46,18 @@ const EditorTabLayer = memo(function EditorTabLayer({
     (mode: "rendered" | "raw") => onSetDocView(tab.id, mode),
     [onSetDocView, tab.id],
   );
+  const frameClass = usePaneFrameClass();
+  const surface = rawHeaderSurface(tab.path);
+  // Reload rebuilds the editor through its key; it is done once the new
+  // editor has read the file. Locked while the buffer has unsaved changes.
+  const [editorKey, setEditorKey] = useState(0);
+  const [reloading, setReloading] = useState(false);
+  const reload = useCallback(() => {
+    if (tab.dirty) return;
+    setReloading(true);
+    setEditorKey((k) => k + 1);
+  }, [tab.dirty]);
+  const loaded = useCallback(() => setReloading(false), []);
   return (
     <div
       className={cn(
@@ -48,24 +66,42 @@ const EditorTabLayer = memo(function EditorTabLayer({
       )}
       aria-hidden={!visible}
     >
-      <div className="relative h-full overflow-hidden rounded-md border border-border/60 bg-background">
-        {(isMarkdownPath(tab.path) || isHtmlPath(tab.path)) && (
-          <DocViewToggle
-            mode="raw"
-            onChange={setView}
-            renderedDisabled={tab.dirty}
-            renderedHint="Save to preview"
+      <div
+        className={cn(
+          "relative flex h-full flex-col overflow-hidden bg-background",
+          frameClass,
+        )}
+      >
+        {surface && (
+          <PreviewHeader
+            model={previewHeaderModel({
+              surface,
+              path: tab.path,
+              workspace: tab.workspace,
+              dirty: tab.dirty,
+            })}
+            onSetView={setView}
+            onReload={reload}
+            reloading={reloading}
+            openInBrowser={
+              <OpenInBrowserButton path={tab.path} workspace={tab.workspace} />
+            }
+            zen={<ZenToggleButton />}
           />
         )}
-        <EditorPane
-          ref={setRef}
-          path={tab.path}
-          workspace={tab.workspace}
-          overrideLanguage={tab.overrideLanguage}
-          onDirtyChange={onDirty}
-          onClose={onClose}
-          visible={visible}
-        />
+        <div className="min-h-0 flex-1">
+          <EditorPane
+            key={editorKey}
+            ref={setRef}
+            path={tab.path}
+            workspace={tab.workspace}
+            overrideLanguage={tab.overrideLanguage}
+            onDirtyChange={onDirty}
+            onClose={onClose}
+            onLoaded={loaded}
+            visible={visible}
+          />
+        </div>
       </div>
     </div>
   );

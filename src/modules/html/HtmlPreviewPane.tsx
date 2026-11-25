@@ -1,9 +1,19 @@
 import { cn } from "@/lib/utils";
 import type { ReadResult } from "@/modules/ai/lib/native";
-import { DocViewToggle } from "@/components/ui/DocViewToggle";
+import { previewHeaderModel } from "@/modules/doc/lib/previewHeader";
+import { PreviewHeader } from "@/modules/doc/PreviewHeader";
+import { OpenInBrowserButton } from "@/modules/preview-server/OpenInBrowserButton";
+import type { FrameSource } from "@/modules/preview-server/types";
 import type { WorkspaceEnv } from "@/modules/workspace";
+import { usePaneFrameClass, ZenToggleButton } from "@/modules/zen";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
+import {
+  type FrameRoute,
+  frameRoute,
+  HTML_PREVIEW_VIA_SERVER,
+  htmlPreviewSource,
+} from "./lib/htmlPreviewSource";
 
 type Status =
   | { kind: "loading" }
@@ -19,57 +29,105 @@ type Props = {
   onSetView: (mode: "rendered" | "raw") => void;
 };
 
-// Local files render through the asset protocol so the page's own relative
-// CSS / JS / images resolve and the document gets full fidelity. Remote files
-// (SSH / WSL) have no local asset URL, so we read the source and render it via
-// a sandboxed srcdoc instead. Relative resources can't resolve there.
-function rendersViaAsset(ws: WorkspaceEnv | undefined): boolean {
-  return !ws || ws.kind === "local";
-}
+// The way this pane loads: `pending` while it waits for the server's answer.
+type Route = { kind: "pending" } | FrameRoute;
 
-// Both paths omit allow-same-origin: with allow-scripts a same-origin frame can
-// reach into the asset origin (and, for a local file, script the asset:// scheme
-// the app itself serves from). Dropping it forces an opaque origin, so a
-// workspace HTML file can render and run its own scripts but can't touch the
-// host app's storage or assets. Local and remote now share one policy.
+// Every path omits allow-same-origin: with allow-scripts a same-origin frame
+// can reach into the origin it was loaded from (and, for a local file, script
+// the asset:// scheme the app itself serves from). Dropping it forces an
+// opaque origin, so a workspace HTML file can render and run its own scripts
+// but can't touch the host app's storage or assets. A frame loaded from the
+// preview server uses the same constant as the built-in way of its place.
 const LOCAL_SANDBOX = "allow-scripts allow-forms allow-popups allow-modals";
 const REMOTE_SANDBOX = "allow-scripts allow-forms allow-popups allow-modals";
 
 // The asset protocol sends no cache validators, so the webview can serve a
 // byte-identical asset URL from cache after the file is edited and saved. A
-// per-mount token makes each render a distinct URL and forces a fresh read.
-// The remote (srcdoc) path re-reads via fs_read_file instead, so it needs none.
-let assetMountSeq = 0;
+// token per load (mount and every reload) makes each a distinct URL and
+// forces a fresh read. The srcDoc path re-reads via fs_read_file instead.
+let assetLoadSeq = 0;
 
-export function HtmlPreviewPane({ path, workspace, visible, onSetView }: Props) {
-  const viaAsset = rendersViaAsset(workspace);
-  const [assetToken] = useState(() => (assetMountSeq += 1));
+export function HtmlPreviewPane({
+  path,
+  workspace,
+  visible,
+  onSetView,
+}: Props) {
+  const source = htmlPreviewSource(workspace, HTML_PREVIEW_VIA_SERVER);
+  const frameClass = usePaneFrameClass();
+  const [route, setRoute] = useState<Route>(() =>
+    source === "server" ? { kind: "pending" } : { kind: source },
+  );
   const [status, setStatus] = useState<Status>({ kind: "loading" });
   const [assetSrc, setAssetSrc] = useState<string | null>(null);
+  // Bumped by Reload; every load path depends on it.
+  const [reloadSeq, setReloadSeq] = useState(0);
+  const [reloading, setReloading] = useState(false);
+  const loadVia = route.kind;
 
-  // Local: authorize the file (and its directory, for relative CSS/JS/images)
-  // on the asset-protocol scope before pointing the iframe at it. The scope is
-  // empty by default, so the page can reach only its own folder, never an
-  // arbitrary path like ~/.ssh/id_rsa.
+  // Server path: ask once per file for the frame address. The address lives
+  // only in `route`; it is never logged. Any answer but `ready` and a failed
+  // call load this preview the built-in way (`frameRoute`).
   useEffect(() => {
-    if (!viaAsset) return;
+    if (source !== "server") {
+      setRoute({ kind: source });
+      return;
+    }
     let cancelled = false;
-    setAssetSrc(null);
-    setStatus({ kind: "loading" });
-    invoke("asset_allow", { path, directory: true })
-      .then(() => {
-        if (!cancelled) setAssetSrc(`${convertFileSrc(path)}?v=${assetToken}`);
+    setRoute({ kind: "pending" });
+    invoke<FrameSource>("preview_frame_source", { path, workspace })
+      .then((answer) => {
+        if (cancelled) return;
+        if (answer.status !== "ready") {
+          console.info(
+            `html preview: frame source answered ${answer.status}, loading the built-in way`,
+          );
+        }
+        setRoute(frameRoute(answer, workspace));
       })
-      .catch((e) => {
-        if (!cancelled) setStatus({ kind: "error", message: String(e) });
+      .catch((e: unknown) => {
+        console.warn(
+          "html preview: frame source call failed, loading the built-in way:",
+          String(e),
+        );
+        if (!cancelled)
+          setRoute(frameRoute({ status: "call_failed" }, workspace));
       });
     return () => {
       cancelled = true;
     };
-  }, [path, viaAsset, assetToken]);
+  }, [path, workspace, source]);
 
+  // Asset path: authorize the file (and its directory, for relative
+  // CSS/JS/images) on the asset-protocol scope before pointing the iframe at
+  // it. The scope is empty by default, so the page can reach only its own
+  // folder, never an arbitrary path like ~/.ssh/id_rsa.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reloadSeq re-runs the load on Reload
   useEffect(() => {
-    if (viaAsset) return;
+    if (loadVia !== "asset") return;
+    let cancelled = false;
+    assetLoadSeq += 1;
+    const token = assetLoadSeq;
+    setAssetSrc(null);
+    setStatus({ kind: "loading" });
+    invoke("asset_allow", { path, directory: true })
+      .then(() => {
+        if (!cancelled) setAssetSrc(`${convertFileSrc(path)}?v=${token}`);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setStatus({ kind: "error", message: String(e) });
+        setReloading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [path, loadVia, reloadSeq]);
+
+  // srcDoc path: read the source; a reload is done once the read answers.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reloadSeq re-runs the read on Reload
+  useEffect(() => {
+    if (loadVia !== "srcdoc") return;
     let cancelled = false;
     setStatus({ kind: "loading" });
     // The user explicitly opened this preview, so the read is trusted.
@@ -83,39 +141,71 @@ export function HtmlPreviewPane({ path, workspace, visible, onSetView }: Props) 
         } else {
           setStatus({ kind: "toolarge", size: res.size, limit: res.limit });
         }
+        setReloading(false);
       })
       .catch((e) => {
-        if (!cancelled) setStatus({ kind: "error", message: String(e) });
+        if (cancelled) return;
+        setStatus({ kind: "error", message: String(e) });
+        setReloading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [path, workspace, viaAsset]);
+  }, [path, workspace, loadVia, reloadSeq]);
+
+  // Server and asset frames: a reload is done at the new frame's `load`.
+  const frameLoaded = () => setReloading(false);
+  const reload = () => {
+    setReloading(true);
+    setReloadSeq((n) => n + 1);
+  };
 
   return (
     <div
+      data-no-tab-swipe={visible ? "" : undefined}
       className={cn(
-        "relative flex h-full w-full flex-col overflow-hidden rounded-md border border-border/60 bg-background",
+        "relative flex h-full w-full flex-col overflow-hidden bg-background",
+        frameClass,
         !visible && "pointer-events-none",
       )}
     >
-      <DocViewToggle mode="rendered" onChange={onSetView} />
-      {viaAsset && assetSrc ? (
+      <PreviewHeader
+        model={previewHeaderModel({ surface: "html", path, workspace })}
+        onSetView={onSetView}
+        onReload={reload}
+        reloading={reloading}
+        openInBrowser={
+          <OpenInBrowserButton path={path} workspace={workspace} />
+        }
+        zen={<ZenToggleButton />}
+      />
+      {route.kind === "server" ? (
+        <iframe
+          // A new key per reload: a new frame element, same address.
+          key={reloadSeq}
+          title={path}
+          src={route.url}
+          sandbox={workspace?.kind === "ssh" ? REMOTE_SANDBOX : LOCAL_SANDBOX}
+          onLoad={frameLoaded}
+          className="min-h-0 w-full flex-1 border-none bg-white"
+        />
+      ) : route.kind === "asset" && assetSrc ? (
         <iframe
           title={path}
           src={assetSrc}
           sandbox={LOCAL_SANDBOX}
-          className="h-full w-full border-none bg-white"
+          onLoad={frameLoaded}
+          className="min-h-0 w-full flex-1 border-none bg-white"
         />
-      ) : !viaAsset && status.kind === "ready" ? (
+      ) : route.kind === "srcdoc" && status.kind === "ready" ? (
         <iframe
           title={path}
           srcDoc={status.content}
           sandbox={REMOTE_SANDBOX}
-          className="h-full w-full border-none bg-white"
+          className="min-h-0 w-full flex-1 border-none bg-white"
         />
       ) : (
-        <div className="flex-1 overflow-auto">
+        <div className="min-h-0 flex-1 overflow-auto">
           <div className="px-8 py-6">
             {status.kind === "loading" && (
               <p className="text-[12px] text-muted-foreground">Loading…</p>
