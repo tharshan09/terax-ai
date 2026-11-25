@@ -97,7 +97,7 @@ describe("previewHeaderModel", () => {
 });
 
 describe("which editor views get the header", () => {
-  it("[AC-7] raw view only for Markdown and HTML", () => {
+  it("[AC-11] raw view only for Markdown and HTML", () => {
     expect(
       [
         "a.md",
@@ -121,7 +121,7 @@ describe("which editor views get the header", () => {
     ]);
   });
 
-  it("[AC-7] binary preview only for images and PDF", () => {
+  it("[AC-17] binary preview only for images and PDF", () => {
     expect(
       [
         "a.png",

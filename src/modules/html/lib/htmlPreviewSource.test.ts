@@ -1,6 +1,6 @@
 import type { FrameStatus } from "@/modules/preview-server/types";
 import type { WorkspaceEnv } from "@/modules/workspace";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type FrameAnswer,
   frameRoute,
@@ -69,6 +69,10 @@ function answer(status: FrameStatus | "call_failed"): FrameAnswer {
 }
 
 describe("frameRoute", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it.each(
     Object.entries(BY_ANSWER) as Array<[FrameStatus | "call_failed", Expected]>,
   )(
@@ -85,6 +89,21 @@ describe("frameRoute", () => {
       kind: "server",
       url: FRAME_URL,
     });
+  });
+
+  it("[AC-13] a status unknown to this build loads the built-in way and warns with the status only", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const odd = {
+      status: "paused",
+      url: FRAME_URL,
+      reason: null,
+    } as unknown as FrameAnswer;
+    expect(frameRoute(odd, SSH)).toEqual({ kind: "srcdoc" });
+    expect(frameRoute(odd, LOCAL)).toEqual({ kind: "asset" });
+    expect(warn).toHaveBeenCalledTimes(2);
+    const text = warn.mock.calls.flat().join(" ");
+    expect(text).toContain("paused");
+    expect(text).not.toContain("127.0.0.1");
   });
 
   it("[AC-13] ready without an address loads the built-in way", () => {

@@ -16,10 +16,13 @@ export const BROWSER_OPENABLE_EXTENSIONS: readonly string[] =
 
 const OPENABLE = new Set(BROWSER_OPENABLE_EXTENSIONS);
 
+// Same rule as `extension` in policy.rs: the part after the last dot of the
+// last path segment, and only when the part before it is not empty (`.html`
+// has no extension).
 function extensionOf(path: string): string {
   const name = path.split(/[\\/]/).pop() ?? path;
   const dot = name.lastIndexOf(".");
-  return dot < 0 ? "" : name.slice(dot + 1).toLowerCase();
+  return dot <= 0 ? "" : name.slice(dot + 1).toLowerCase();
 }
 
 /**

@@ -110,6 +110,60 @@ describe("MarkdownPreviewPane header", () => {
     expect(n).toBe(3);
   });
 
+  it("[API-6] Reload keeps the shown content and its scroll container until the new read answers", async () => {
+    const second = deferred<unknown>();
+    let n = 0;
+    invoke.mockImplementation(() => {
+      n += 1;
+      return n === 1
+        ? Promise.resolve({ kind: "text", content: "# v1", size: 4 })
+        : second.promise;
+    });
+    const { container } = pane();
+    await settle();
+    const header = container.querySelector(
+      "[data-preview-header]",
+    ) as HTMLElement;
+    const scroller = header.nextElementSibling as HTMLElement;
+    expect(scroller.querySelector("h1")?.textContent).toBe("v1");
+
+    fireEvent.click(reloadButton(container));
+    await settle();
+    expect(n).toBe(2);
+    expect(container.textContent).not.toContain("Loading…");
+    expect(scroller.isConnected).toBe(true);
+    expect(scroller.querySelector("h1")?.textContent).toBe("v1");
+
+    await act(async () =>
+      second.resolve({ kind: "text", content: "# v2", size: 4 }),
+    );
+    await settle();
+    expect(header.nextElementSibling).toBe(scroller);
+    expect(scroller.querySelector("h1")?.textContent).toBe("v2");
+  });
+
+  it("[API-6] another file still shows Loading… until its read answers", async () => {
+    const next = deferred<unknown>();
+    invoke.mockImplementation((_cmd: string, args?: unknown) =>
+      (args as { path: string }).path === "/p/a.md"
+        ? Promise.resolve({ kind: "text", content: "# v1", size: 4 })
+        : next.promise,
+    );
+    const view = pane();
+    await settle();
+    view.rerender(
+      <MarkdownPreviewPane
+        path="/p/b.md"
+        workspace={{ kind: "local" }}
+        visible
+        onSetView={() => {}}
+      />,
+    );
+    await settle();
+    expect(view.container.textContent).toContain("Loading…");
+    expect(view.container.querySelector("h1")).toBeNull();
+  });
+
   it("[AC-10] the header sits above the scroll container and does not cover it", async () => {
     invoke.mockImplementation(() =>
       Promise.resolve({ kind: "text", content: "# v1", size: 4 }),

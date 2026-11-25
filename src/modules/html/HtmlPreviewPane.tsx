@@ -62,12 +62,17 @@ export function HtmlPreviewPane({
   const [assetSrc, setAssetSrc] = useState<string | null>(null);
   // Bumped by Reload; every load path depends on it.
   const [reloadSeq, setReloadSeq] = useState(0);
+  // Bumped by Reload while the preview is on the built-in way although the
+  // server path is on: asks the server again for the frame address.
+  const [askSeq, setAskSeq] = useState(0);
   const [reloading, setReloading] = useState(false);
   const loadVia = route.kind;
 
-  // Server path: ask once per file for the frame address. The address lives
-  // only in `route`; it is never logged. Any answer but `ready` and a failed
-  // call load this preview the built-in way (`frameRoute`).
+  // Server path: ask for the frame address once per file, and again on a
+  // Reload from the built-in way. The address lives only in `route`; it is
+  // never logged. Any answer but `ready` and a failed call load this preview
+  // the built-in way (`frameRoute`).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: askSeq asks again on Reload
   useEffect(() => {
     if (source !== "server") {
       setRoute({ kind: source });
@@ -96,7 +101,7 @@ export function HtmlPreviewPane({
     return () => {
       cancelled = true;
     };
-  }, [path, workspace, source]);
+  }, [path, workspace, source, askSeq]);
 
   // Asset path: authorize the file (and its directory, for relative
   // CSS/JS/images) on the asset-protocol scope before pointing the iframe at
@@ -155,9 +160,15 @@ export function HtmlPreviewPane({
 
   // Server and asset frames: a reload is done at the new frame's `load`.
   const frameLoaded = () => setReloading(false);
+  // On the built-in way with the server path on, Reload asks the server
+  // again; the answer then loads the frame (server) or reads anew (built-in
+  // way). Otherwise Reload re-runs the current way. While the first answer is
+  // pending, the request in flight already leads to a load.
   const reload = () => {
     setReloading(true);
-    setReloadSeq((n) => n + 1);
+    if (source === "server" && (loadVia === "asset" || loadVia === "srcdoc"))
+      setAskSeq((n) => n + 1);
+    else setReloadSeq((n) => n + 1);
   };
 
   return (

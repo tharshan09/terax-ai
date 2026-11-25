@@ -105,7 +105,7 @@ describe("PreviewHeader", () => {
     expect(classesOf(header())).not.toContain("pl-20");
   });
 
-  it("[AC-8] Reload shows aria-busy while reloading and calls onReload", () => {
+  it("[UI-3] Reload shows aria-busy while reloading and calls onReload", () => {
     const onReload = vi.fn();
     header({ onReload, reloading: true });
     const reload = screen.getByTitle("Reload");
@@ -114,7 +114,7 @@ describe("PreviewHeader", () => {
     expect(onReload).toHaveBeenCalledOnce();
   });
 
-  it("[AC-8] shows only what the model shows", () => {
+  it("[SVC-14] shows only what the model shows", () => {
     header({
       model: previewHeaderModel({
         surface: "image",

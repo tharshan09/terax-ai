@@ -1,4 +1,4 @@
-// GUARD: "Open in Browser" is reached only by a click: nothing in the AI module names the command or this module, each preview command has exactly one calling file, the openable extensions equal ENTRY_EXTENSIONS in policy.rs and follow the editor's image list and isHtmlPath, the capabilities carry no `remote`, and the import rules that keep the partial mocks of existing tests working hold.
+// GUARD: "Open in Browser" is reached only by a click: nothing in the AI module names the command or this module, each preview command has exactly one calling file (counted invoke calls) and its name appears as a string or template literal in exactly that one non-test file under src/ (a name put together from pieces, e.g. by concatenation or a template with a placeholder, is not seen), the openable extensions equal ENTRY_EXTENSIONS in policy.rs and follow the editor's image list and isHtmlPath, the capabilities carry no `remote`, and the import rules that keep the partial mocks of existing tests working hold.
 // DISPOSITION: specs/2026-11-25-html-preview-browser/slop-dispositions.md
 // RULE: --
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -100,6 +100,36 @@ function invokeCalls(text: string, fileName: string, command: string): number {
   return count;
 }
 
+/**
+ * Number of string and template literals in a source text whose text is
+ * exactly the command name (`"…"`, `'…'`, a template without placeholder).
+ * This catches a second caller that keeps the name in a constant, an
+ * `as const`, or calls through a rebound `invoke`, `.call`, `core["invoke"]`
+ * or a dynamic import, since each needs the name somewhere. Comments are not
+ * part of the syntax tree. Not seen: a name put together from pieces.
+ */
+function commandLiterals(
+  text: string,
+  fileName: string,
+  command: string,
+): number {
+  const source = parse(text, fileName);
+  let count = 0;
+  const visit = (node: ts.Node) => {
+    if (
+      (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) &&
+      node.text === command
+    )
+      count += 1;
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return count;
+}
+
+// Files exempt from the literal rule: none besides the test files, which
+// `isSource` leaves out (they name the commands to test them). types.ts
+// carries neither name as a literal, so it is not exempt.
 const SOURCES = files(SRC, isSource).map((path) => ({
   path,
   text: readFileSync(path, "utf8"),
@@ -108,6 +138,12 @@ const SOURCES = files(SRC, isSource).map((path) => ({
 function callers(command: string): string[] {
   return SOURCES.filter(
     ({ path, text }) => invokeCalls(text, path, command) > 0,
+  ).map(({ path }) => rel(path));
+}
+
+function literalFiles(command: string): string[] {
+  return SOURCES.filter(
+    ({ path, text }) => commandLiterals(text, path, command) > 0,
   ).map(({ path }) => rel(path));
 }
 
@@ -217,7 +253,7 @@ describe("invoke call counter", () => {
   const CMD = "preview_open_in_browser";
   const head = 'import { invoke } from "@tauri-apps/api/core";\n';
 
-  it("[AC-2] counts a real call, also generic, aliased or through a namespace", () => {
+  it("[GUARD] counts a real call, also generic, aliased or through a namespace", () => {
     expect(invokeCalls(`${head}invoke("${CMD}", {});`, "a.ts", CMD)).toBe(1);
     expect(
       invokeCalls(`${head}invoke<X>("${CMD}", { path });`, "a.ts", CMD),
@@ -238,7 +274,21 @@ describe("invoke call counter", () => {
     ).toBe(1);
   });
 
-  it("[AC-2] a comment or a string naming the command is not a call", () => {
+  it("[GUARD] the literal count sees the name in a constant, not in a comment", () => {
+    expect(
+      commandLiterals(`const c = "${CMD}" as const;\ninvoke(c);`, "a.ts", CMD),
+    ).toBe(1);
+    expect(commandLiterals(`run(\`${CMD}\`);`, "a.ts", CMD)).toBe(1);
+    expect(
+      commandLiterals(`// "${CMD}"\n/* '${CMD}' */\nconst x = 1;`, "a.ts", CMD),
+    ).toBe(0);
+    // Known gap: a name put together from pieces.
+    expect(
+      commandLiterals(`const c = "preview_open_" + "in_browser";`, "a.ts", CMD),
+    ).toBe(0);
+  });
+
+  it("[GUARD] a comment or a string naming the command is not a call", () => {
     expect(
       invokeCalls(
         `${head}// calls ${CMD} elsewhere\nconst s = "${CMD}";`,
@@ -275,6 +325,18 @@ describe("Open in Browser boundary", () => {
     expect(callCount("preview_open_in_browser")).toBe(1);
   });
 
+  it("[AC-2] the name preview_open_in_browser is a literal only in openInBrowser.ts", () => {
+    expect(literalFiles("preview_open_in_browser")).toEqual([
+      "src/modules/preview-server/lib/openInBrowser.ts",
+    ]);
+  });
+
+  it("[AC-2] the name preview_frame_source is a literal only in HtmlPreviewPane.tsx", () => {
+    expect(literalFiles("preview_frame_source")).toEqual([
+      "src/modules/html/HtmlPreviewPane.tsx",
+    ]);
+  });
+
   it("[AC-2] exactly one file calls preview_frame_source, once", () => {
     expect(callers("preview_frame_source")).toEqual([
       "src/modules/html/HtmlPreviewPane.tsx",
@@ -289,14 +351,14 @@ describe("Open in Browser boundary", () => {
     expect(BROWSER_OPENABLE_EXTENSIONS).toHaveLength(entry.length);
   });
 
-  it("[AC-2] the image part is exactly the editor's IMAGE_EXTS", () => {
+  it("[DISP-8] the image part is exactly the editor's IMAGE_EXTS", () => {
     const images = BROWSER_OPENABLE_EXTENSIONS.filter(
       (ext) => !isHtmlPath(`f.${ext}`) && ext !== "pdf",
     );
     expect(new Set(images)).toEqual(new Set(IMAGE_EXTS));
   });
 
-  it("[AC-2] the HTML part is exactly what isHtmlPath accepts", () => {
+  it("[DISP-8] the HTML part is what isHtmlPath accepts (sampled neighbours)", () => {
     const html = BROWSER_OPENABLE_EXTENSIONS.filter((ext) =>
       isHtmlPath(`f.${ext}`),
     );

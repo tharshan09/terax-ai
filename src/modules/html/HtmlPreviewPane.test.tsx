@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { inspect } from "node:util";
 import type { HtmlTab } from "@/modules/tabs/lib/useTabs";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
@@ -195,7 +196,7 @@ describe("HtmlPreviewPane reload", () => {
     expect(container.textContent).toContain("Failed to read file: gone");
   });
 
-  it("[AC-9] local built-in way: Reload re-authorizes, loads a new asset URL and is loading until its load event", async () => {
+  it("[API-6] local built-in way: Reload asks the server again, re-authorizes, loads a new asset URL and is loading until its load event", async () => {
     serve({
       preview_frame_source: () =>
         Promise.resolve({ status: "unsupported", url: null, reason: null }),
@@ -214,15 +215,162 @@ describe("HtmlPreviewPane reload", () => {
       second.getAttribute("src")?.startsWith(convertFileSrc("/p/a.html")),
     ).toBe(true);
     expect(callsOf("asset_allow")).toHaveLength(2);
+    expect(callsOf("preview_frame_source")).toHaveLength(2);
     expect(reloadButton(container).getAttribute("aria-busy")).toBe("true");
 
     fireEvent.load(second);
     expect(reloadButton(container).getAttribute("aria-busy")).toBe("false");
   });
+
+  it("[API-6] local built-in way: a failed re-authorization ends loading", async () => {
+    let allows = 0;
+    serve({
+      preview_frame_source: () =>
+        Promise.resolve({ status: "unsupported", url: null, reason: null }),
+      asset_allow: () => {
+        allows += 1;
+        return allows === 1 ? Promise.resolve(null) : Promise.reject("denied");
+      },
+    });
+    const { container } = pane("/p/a.html", LOCAL);
+    await settle();
+    fireEvent.load(frame(container));
+    fireEvent.click(reloadButton(container));
+    await settle();
+    expect(allows).toBe(2);
+    expect(container.textContent).toContain("Failed to read file: denied");
+    expect(reloadButton(container).getAttribute("aria-busy")).toBe("false");
+  });
+
+  it("[API-6] each mount of the same file gets its own asset URL", async () => {
+    serve({
+      preview_frame_source: () =>
+        Promise.resolve({ status: "unsupported", url: null, reason: null }),
+      asset_allow: () => Promise.resolve(null),
+    });
+    const first = pane("/p/a.html", LOCAL);
+    await settle();
+    const firstSrc = frame(first.container).getAttribute("src");
+    first.unmount();
+    const second = pane("/p/a.html", LOCAL);
+    await settle();
+    const secondSrc = frame(second.container).getAttribute("src");
+    expect(firstSrc?.startsWith(convertFileSrc("/p/a.html"))).toBe(true);
+    expect(secondSrc?.startsWith(convertFileSrc("/p/a.html"))).toBe(true);
+    expect(secondSrc).not.toBe(firstSrc);
+  });
+});
+
+describe("HtmlPreviewPane reload from the built-in way asks the server again", () => {
+  it("[API-6] refused, then Reload answers ready: the frame loads the server address", async () => {
+    let asks = 0;
+    serve({
+      preview_frame_source: () => {
+        asks += 1;
+        return asks === 1
+          ? Promise.resolve({
+              status: "unreachable",
+              url: null,
+              reason: "not connected",
+            })
+          : ready();
+      },
+      fs_read_file: () =>
+        Promise.resolve({ kind: "text", content: "<p>s</p>", size: 8 }),
+    });
+    const { container } = pane("/srv/p/b.html", SSH);
+    await settle();
+    expect(frame(container).getAttribute("srcdoc")).toContain("<p>s</p>");
+
+    fireEvent.click(reloadButton(container));
+    await settle();
+    const f = frame(container);
+    expect(asks).toBe(2);
+    expect(f.getAttribute("src")).toBe(FRAME_URL);
+    expect(f.hasAttribute("srcdoc")).toBe(false);
+    expect(f.getAttribute("sandbox")).toBe(REMOTE_SANDBOX);
+    expect(callsOf("fs_read_file")).toHaveLength(1);
+    expect(reloadButton(container).getAttribute("aria-busy")).toBe("true");
+    fireEvent.load(f);
+    expect(reloadButton(container).getAttribute("aria-busy")).toBe("false");
+  });
+
+  it("[API-6] refused, then Reload refused again: the built-in way reads anew", async () => {
+    let reads = 0;
+    serve({
+      preview_frame_source: () =>
+        Promise.resolve({ status: "limit_reached", url: null, reason: null }),
+      fs_read_file: () => {
+        reads += 1;
+        return Promise.resolve({
+          kind: "text",
+          content: `<p>v${reads}</p>`,
+          size: 9,
+        });
+      },
+    });
+    const { container } = pane("/srv/p/b.html", SSH);
+    await settle();
+    expect(frame(container).getAttribute("srcdoc")).toContain("v1");
+
+    fireEvent.click(reloadButton(container));
+    await settle();
+    expect(callsOf("preview_frame_source")).toHaveLength(2);
+    expect(reads).toBe(2);
+    expect(frame(container).getAttribute("srcdoc")).toContain("v2");
+    expect(reloadButton(container).getAttribute("aria-busy")).toBe("false");
+  });
+
+  it("[API-6] Reload while the first answer is pending asks once and ends with the frame's load", async () => {
+    const answer = deferred<unknown>();
+    serve({ preview_frame_source: () => answer.promise });
+    const { container } = pane("/p/a.html", LOCAL);
+    await settle();
+    fireEvent.click(reloadButton(container));
+    await settle();
+    expect(reloadButton(container).getAttribute("aria-busy")).toBe("true");
+    await act(async () =>
+      answer.resolve({ status: "ready", url: FRAME_URL, reason: null }),
+    );
+    await settle();
+    expect(callsOf("preview_frame_source")).toHaveLength(1);
+    const f = frame(container);
+    expect(f.getAttribute("src")).toBe(FRAME_URL);
+    fireEvent.load(f);
+    expect(reloadButton(container).getAttribute("aria-busy")).toBe("false");
+  });
+
+  it("[API-8] a late answer for the previous path is dropped", async () => {
+    const late = deferred<unknown>();
+    const NEXT_URL = "http://127.0.0.1:5000/U/b.html";
+    serve({
+      preview_frame_source: (args) =>
+        args.path === "/p/a.html"
+          ? late.promise
+          : Promise.resolve({ status: "ready", url: NEXT_URL, reason: null }),
+    });
+    const view = pane("/p/a.html", LOCAL);
+    await settle();
+    view.rerender(
+      <HtmlPreviewPane
+        path="/p/b.html"
+        workspace={LOCAL}
+        visible
+        onSetView={() => {}}
+      />,
+    );
+    await settle();
+    expect(frame(view.container).getAttribute("src")).toBe(NEXT_URL);
+    await act(async () =>
+      late.resolve({ status: "ready", url: FRAME_URL, reason: null }),
+    );
+    await settle();
+    expect(frame(view.container).getAttribute("src")).toBe(NEXT_URL);
+  });
 });
 
 describe("HtmlPreviewPane through the preview server", () => {
-  it("[AC-13] local and SSH load the server address; a refused file loads the built-in way", async () => {
+  it("[AC-13] local and SSH load the server address; a too_large file loads the built-in way", async () => {
     serve({
       preview_frame_source: (args) =>
         Promise.resolve(
@@ -246,7 +394,9 @@ describe("HtmlPreviewPane through the preview server", () => {
       const f = frame(view.container);
       expect(f.getAttribute("src")).toBe(FRAME_URL);
       expect(f.getAttribute("sandbox")).toBe(sandbox);
-      expect(f.getAttribute("sandbox")).not.toContain("allow-same-origin");
+      expect(f.getAttribute("sandbox")?.toLowerCase()).not.toContain(
+        "allow-same-origin",
+      );
       expect(f.hasAttribute("srcdoc")).toBe(false);
       expect(callsOf("asset_allow", path)).toHaveLength(0);
       expect(callsOf("fs_read_file", path)).toHaveLength(0);
@@ -273,7 +423,7 @@ describe("HtmlPreviewPane through the preview server", () => {
     }
   });
 
-  it("[AC-13] SSH: a server refusal loads the source as srcDoc", async () => {
+  it("[AC-13] SSH: an unreachable answer loads the source as srcDoc", async () => {
     serve({
       preview_frame_source: () =>
         Promise.resolve({
@@ -382,6 +532,43 @@ describe("HtmlPreviewPane keeps the frame address to itself", () => {
     );
   }
 
+  // Text of a logged or toasted value with objects, arrays and errors
+  // (message, stack, cause) spelled out, so an address inside one is seen.
+  function textOf(value: unknown): string {
+    return typeof value === "string"
+      ? value
+      : inspect(value, { depth: 10, breakLength: Number.POSITIVE_INFINITY });
+  }
+
+  // Every attribute and text in the pane that carries the address, other
+  // than the `src` of a frame.
+  function addressOutsideFrameSrc(root: Element): string[] {
+    const out: string[] = [];
+    const carries = (v: string) => v.includes("127.0.0.1") || v.includes("/T/");
+    for (const el of [root, ...root.querySelectorAll("*")]) {
+      for (const attr of el.attributes) {
+        if (el.tagName === "IFRAME" && attr.name === "src") continue;
+        if (carries(attr.value)) out.push(`${el.tagName} ${attr.name}`);
+      }
+    }
+    if (carries(root.textContent ?? "")) out.push("text");
+    return out;
+  }
+
+  it("[AC-21] the value-to-text check sees an address in objects and errors", () => {
+    const answer = { status: "ready", url: FRAME_URL, reason: null };
+    expect(leaked([textOf(answer)])).toHaveLength(1);
+    expect(leaked([textOf([answer])])).toHaveLength(1);
+    expect(
+      leaked([
+        textOf(
+          Object.assign(new Error("failed"), { cause: new Error(FRAME_URL) }),
+        ),
+      ]),
+    ).toHaveLength(1);
+    expect(leaked([textOf("html preview: ready")])).toEqual([]);
+  });
+
   it("[AC-21] neither console, toast nor the saved tab carries the address", async () => {
     const spies = (["log", "info", "warn", "error", "debug"] as const).map(
       (m) => vi.spyOn(console, m).mockImplementation(() => {}),
@@ -409,6 +596,9 @@ describe("HtmlPreviewPane keeps the frame address to itself", () => {
     });
     await settle();
 
+    // In the DOM the address is only the frame's `src`.
+    expect(addressOutsideFrameSrc(first.container)).toEqual([]);
+
     const second = pane("/p/c.html", LOCAL);
     await settle();
     expect(callsOf("asset_allow", "/p/c.html")).toHaveLength(1);
@@ -425,7 +615,7 @@ describe("HtmlPreviewPane keeps the frame address to itself", () => {
       toast.success,
     ];
     const said = [...spies, ...toastMocks].flatMap((fn) =>
-      fn.mock.calls.map((args) => args.map(String).join(" ")),
+      fn.mock.calls.map((args) => args.map(textOf).join(" ")),
     );
     // Something was said (the toast and the failed call's log), none of it leaks.
     expect(toast.error).toHaveBeenCalledOnce();

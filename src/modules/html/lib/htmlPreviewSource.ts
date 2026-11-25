@@ -48,7 +48,9 @@ export type FrameRoute =
  * The one place that turns the server's answer into the way the preview
  * loads. Only `ready` with an address loads through the server; every other
  * answer, and a failed call, loads this one preview the built-in way. This
- * rule is for the in-app preview only.
+ * rule is for the in-app preview only. A status this build does not know
+ * (the type check rules it out, the wire might not) also loads the built-in
+ * way, with a warning that names only the status.
  */
 export function frameRoute(
   answer: FrameAnswer,
@@ -67,4 +69,9 @@ export function frameRoute(
     case "call_failed":
       return { kind: builtInSource(workspace) };
   }
+  const unknown: never = answer;
+  console.warn(
+    `html preview: unknown frame source status ${String((unknown as { status: unknown }).status)}, loading the built-in way`,
+  );
+  return { kind: builtInSource(workspace) };
 }

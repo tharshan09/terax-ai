@@ -8,7 +8,7 @@ import { OpenInBrowserButton } from "@/modules/preview-server/OpenInBrowserButto
 import type { WorkspaceEnv } from "@/modules/workspace";
 import { usePaneFrameClass, ZenToggleButton } from "@/modules/zen";
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Streamdown } from "streamdown";
 
 type Status =
@@ -41,12 +41,20 @@ export function MarkdownPreviewPane({
   // Bumped by Reload; the read below depends on it.
   const [reloadSeq, setReloadSeq] = useState(0);
   const [reloading, setReloading] = useState(false);
+  // The file the shown content was read for; a reload of the same file keeps
+  // the content (and the scroll position) until the new read answers.
+  const readFor = useRef<{ path: string; workspace?: WorkspaceEnv } | null>(
+    null,
+  );
 
   // A reload is done once the read answers, with content or an error.
   // biome-ignore lint/correctness/useExhaustiveDependencies: reloadSeq re-runs the read on Reload
   useEffect(() => {
     let cancelled = false;
-    setStatus({ kind: "loading" });
+    const sameFile =
+      readFor.current?.path === path && readFor.current.workspace === workspace;
+    readFor.current = { path, workspace };
+    if (!sameFile) setStatus({ kind: "loading" });
     invoke<ReadResult>("fs_read_file", {
       path,
       workspace,

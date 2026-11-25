@@ -47,6 +47,15 @@ describe("browserOpenable", () => {
     expect(browserOpenable(`/p/${name}`, LOCAL)).toBe(false);
   });
 
+  it("[AC-1] follows the core's rule: a name made of a dot and an extension has none", () => {
+    expect(browserOpenable("/p/.html", LOCAL)).toBe(false);
+    expect(browserOpenable("/p/.pdf", LOCAL)).toBe(false);
+    expect(browserOpenable("/p/.png", SSH)).toBe(false);
+    expect(browserOpenable("/p/a.", LOCAL)).toBe(false);
+    expect(browserOpenable("/p/a.b.html", LOCAL)).toBe(true);
+    expect(browserOpenable("/p/.config.html", LOCAL)).toBe(true);
+  });
+
   it("[AC-1] reads only the last extension of the file name", () => {
     expect(browserOpenable("/p/site.html/readme", LOCAL)).toBe(false);
     expect(browserOpenable("/p/report.html.txt", LOCAL)).toBe(false);

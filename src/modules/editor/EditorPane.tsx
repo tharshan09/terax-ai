@@ -83,8 +83,10 @@ type Props = {
   onDirtyChange?: (dirty: boolean) => void;
   onSaved?: () => void;
   onClose?: () => void;
-  /** Fires each time the document has been read (content, binary, too large
-   *  or error), i.e. whenever it leaves the loading state. */
+  /** Fires whenever the document leaves the loading state: after the read on
+   *  mount and after a path or workspace change, with content, binary, too
+   *  large or error. A re-read through the handle's `reload()` stays out of
+   *  the loading state and does not fire it. */
   onLoaded?: () => void;
   visible?: boolean;
 };

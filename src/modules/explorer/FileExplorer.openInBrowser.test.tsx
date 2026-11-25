@@ -197,6 +197,23 @@ describe("FileExplorer Open in Browser", () => {
     expect(opens()).toEqual([]);
   });
 
+  it("[AC-6] in an SSH workspace the entry opens with that workspace", async () => {
+    env.current = { kind: "ssh", host: "devbox" };
+    render(<FileExplorer rootPath="/w" onOpenFile={() => {}} />);
+    const items = await menuFor("report.html");
+    expect(items).toContain("Open in Browser");
+    await act(async () => {
+      fireEvent.click(screen.getByText("Open in Browser"));
+    });
+    await settle();
+    expect(opens()).toEqual([
+      [
+        "preview_open_in_browser",
+        { path: "/w/report.html", workspace: { kind: "ssh", host: "devbox" } },
+      ],
+    ]);
+  });
+
   it("[AC-6] in a WSL workspace report.html has no Open in Browser", async () => {
     env.current = { kind: "wsl", distro: "Ubuntu" };
     render(<FileExplorer rootPath="/w" onOpenFile={() => {}} />);

@@ -1,4 +1,4 @@
-// GUARD: Every iframe of the HTML preview takes its sandbox from a declared constant; each constant allows scripts and never allow-same-origin, also on the preview-server path.
+// GUARD: Every iframe of the HTML preview takes its sandbox from a declared constant; each constant holds exactly the tokens allow-scripts allow-forms allow-popups allow-modals (compared without regard to case, as browsers do) and never allow-same-origin, also on the preview-server path.
 // DISPOSITION: specs/2026-11-25-html-preview-browser/gates/obligations.md (OB-5)
 // RULE: --
 import { readFileSync } from "node:fs";
@@ -6,6 +6,15 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
+
+// The tokens the build plan keeps unchanged (FS-6, SEC-9): no new token, no
+// allow-same-origin, no allow-top-navigation*, no popups escaping the sandbox.
+const ALLOWED_TOKENS = [
+  "allow-scripts",
+  "allow-forms",
+  "allow-popups",
+  "allow-modals",
+];
 
 const SOURCE = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "HtmlPreviewPane.tsx"),
@@ -62,11 +71,18 @@ function checkSandbox(text: string): Report {
   visit(file);
 
   for (const [name, value] of Object.entries(constants)) {
-    const tokens = value.split(/\s+/);
+    // Sandbox tokens are ASCII case-insensitive in the browser.
+    const tokens = value.toLowerCase().split(/\s+/).filter(Boolean);
     if (!tokens.includes("allow-scripts"))
       violations.push(`${name} lacks allow-scripts`);
     if (tokens.includes("allow-same-origin"))
       violations.push(`${name} has allow-same-origin`);
+    const set = [...new Set(tokens)].sort();
+    if (
+      set.length !== tokens.length ||
+      set.join(" ") !== [...ALLOWED_TOKENS].sort().join(" ")
+    )
+      violations.push(`${name} tokens differ: ${tokens.join(" ")}`);
   }
 
   const isConstant = (e: ts.Expression): boolean =>
@@ -99,7 +115,7 @@ function checkSandbox(text: string): Report {
 }
 
 describe("HtmlPreviewPane sandbox", () => {
-  it("[AC-15] every iframe uses a declared constant; each allows scripts, none same-origin", () => {
+  it("[AC-15] every iframe uses a declared constant; each holds exactly the kept tokens, none same-origin", () => {
     const report = checkSandbox(SOURCE);
     expect(Object.keys(report.constants).sort()).toEqual([
       "LOCAL_SANDBOX",
@@ -117,7 +133,35 @@ describe("HtmlPreviewPane sandbox", () => {
     expect(copy).not.toBe(SOURCE);
     expect(checkSandbox(copy).violations).toEqual([
       "REMOTE_SANDBOX has allow-same-origin",
+      "REMOTE_SANDBOX tokens differ: allow-scripts allow-forms allow-popups allow-modals allow-same-origin",
     ]);
+  });
+
+  it("[AC-15] flags allow-same-origin in another case", () => {
+    const copy = SOURCE.replace(
+      /(const LOCAL_SANDBOX = "[^"]*)"/,
+      '$1 Allow-Same-Origin"',
+    );
+    expect(copy).not.toBe(SOURCE);
+    expect(checkSandbox(copy).violations).toContain(
+      "LOCAL_SANDBOX has allow-same-origin",
+    );
+  });
+
+  it("[AC-15] flags any token beyond the kept set", () => {
+    for (const extra of [
+      "allow-top-navigation",
+      "allow-popups-to-escape-sandbox",
+      "allow-downloads",
+    ]) {
+      const copy = SOURCE.replace(
+        /(const LOCAL_SANDBOX = "[^"]*)"/,
+        `$1 ${extra}"`,
+      );
+      expect(checkSandbox(copy).violations).toEqual([
+        `LOCAL_SANDBOX tokens differ: allow-scripts allow-forms allow-popups allow-modals ${extra}`,
+      ]);
+    }
   });
 
   it("[AC-15] flags an iframe with a literal sandbox", () => {

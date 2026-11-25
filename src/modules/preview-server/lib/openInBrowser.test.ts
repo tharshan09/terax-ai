@@ -59,7 +59,7 @@ describe("openInBrowser", () => {
     );
   });
 
-  it("[AC-3] names the SSH host of the workspace when it can't read", async () => {
+  it("[EP-6] names the SSH host of the workspace when it can't read", async () => {
     answers({ status: "unreachable", reason: "connection refused" });
     await openInBrowser("/srv/p/a.html", { kind: "ssh", host: "devbox" });
     expect(toast.error).toHaveBeenCalledExactlyOnceWith(

@@ -130,6 +130,39 @@ describe("EditorStack raw header", () => {
 
     fireEvent.click(renderedButton(raw));
     expect(onSetDocView).toHaveBeenCalledExactlyOnceWith(1, "rendered");
+
+    // The header sits in the flow before the editor, not as an overlay.
+    const header = raw.querySelector("[data-preview-header]") as HTMLElement;
+    const editor = raw.querySelector(`[data-editor="${RAW}"]`) as HTMLElement;
+    expect(
+      header.compareDocumentPosition(editor) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      (header.getAttribute("class") ?? "")
+        .split(/\s+/)
+        .filter((c) =>
+          ["absolute", "fixed", "z-10", "top-3", "right-3"].includes(c),
+        ),
+    ).toEqual([]);
+  });
+
+  it("[AC-11] saved, then unsaved while open: Reload and Rendered lock", () => {
+    const onSetDocView = vi.fn();
+    const view = render(stack([editorTab(1, RAW)], 1, onSetDocView));
+    const raw = () => layerOf(view.container, RAW);
+    expect(button(raw(), 'button[title="Reload"]').disabled).toBe(false);
+    expect(renderedButton(raw()).disabled).toBe(false);
+
+    view.rerender(stack([editorTab(1, RAW, true)], 1, onSetDocView));
+    const reload = button(raw(), 'button[title="Reload"]');
+    const rendered = renderedButton(raw());
+    expect(reload.disabled).toBe(true);
+    expect(rendered.disabled).toBe(true);
+    expect(rendered.getAttribute("title")).toBe("Save to preview");
+    fireEvent.click(reload);
+    fireEvent.click(rendered);
+    expect(editors.filter((e) => e.path === RAW)).toHaveLength(1);
+    expect(onSetDocView).not.toHaveBeenCalled();
   });
 
   it("[AC-11] unsaved: Reload and Rendered are locked, Rendered says 'Save to preview'", () => {
@@ -146,6 +179,25 @@ describe("EditorStack raw header", () => {
     fireEvent.click(rendered);
     expect(editors.filter((e) => e.path === RAW)).toHaveLength(1);
     expect(onSetDocView).not.toHaveBeenCalled();
+  });
+
+  it("[AC-11] a tab without header keeps the frame of 712f137 with the editor as its direct child", () => {
+    // Classes of the frame on 712f137 (EditorStack.tsx:51 there).
+    const BASE_FRAME =
+      "relative h-full overflow-hidden rounded-md border border-border/60 bg-background";
+    const { container } = render(
+      stack([editorTab(1, CODE), editorTab(2, "/p/a.txt")], 1),
+    );
+    for (const path of [CODE, "/p/a.txt"]) {
+      const layer = layerOf(container, path);
+      expect(layer.children).toHaveLength(1);
+      const frame = layer.firstElementChild as HTMLElement;
+      expect((frame.getAttribute("class") ?? "").split(/\s+/).sort()).toEqual(
+        BASE_FRAME.split(" ").sort(),
+      );
+      expect(frame.children).toHaveLength(1);
+      expect(frame.firstElementChild?.getAttribute("data-editor")).toBe(path);
+    }
   });
 
   it("[AC-11] the main.rs tab has no header", () => {

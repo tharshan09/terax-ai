@@ -58,6 +58,19 @@ const EditorTabLayer = memo(function EditorTabLayer({
     setEditorKey((k) => k + 1);
   }, [tab.dirty]);
   const loaded = useCallback(() => setReloading(false), []);
+  const editor = (
+    <EditorPane
+      key={editorKey}
+      ref={setRef}
+      path={tab.path}
+      workspace={tab.workspace}
+      overrideLanguage={tab.overrideLanguage}
+      onDirtyChange={onDirty}
+      onClose={onClose}
+      onLoaded={loaded}
+      visible={visible}
+    />
+  );
   return (
     <div
       className={cn(
@@ -66,13 +79,14 @@ const EditorTabLayer = memo(function EditorTabLayer({
       )}
       aria-hidden={!visible}
     >
-      <div
-        className={cn(
-          "relative flex h-full flex-col overflow-hidden bg-background",
-          frameClass,
-        )}
-      >
-        {surface && (
+      {surface ? (
+        <div
+          className={cn(
+            "relative flex h-full flex-col overflow-hidden",
+            frameClass,
+            "bg-background",
+          )}
+        >
           <PreviewHeader
             model={previewHeaderModel({
               surface,
@@ -88,21 +102,20 @@ const EditorTabLayer = memo(function EditorTabLayer({
             }
             zen={<ZenToggleButton />}
           />
-        )}
-        <div className="min-h-0 flex-1">
-          <EditorPane
-            key={editorKey}
-            ref={setRef}
-            path={tab.path}
-            workspace={tab.workspace}
-            overrideLanguage={tab.overrideLanguage}
-            onDirtyChange={onDirty}
-            onClose={onClose}
-            onLoaded={loaded}
-            visible={visible}
-          />
+          <div className="min-h-0 flex-1">{editor}</div>
         </div>
-      </div>
+      ) : (
+        // Without a header the frame holds the editor directly.
+        <div
+          className={cn(
+            "relative h-full overflow-hidden",
+            frameClass,
+            "bg-background",
+          )}
+        >
+          {editor}
+        </div>
+      )}
     </div>
   );
 });
