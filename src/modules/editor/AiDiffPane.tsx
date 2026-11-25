@@ -1,6 +1,8 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import type { AiDiffStatus } from "@/modules/tabs";
+import { usePaneFrameClass } from "@/modules/zen";
 import { presentableDiff, unifiedMergeView } from "@codemirror/merge";
 import { EditorState, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
@@ -90,6 +92,7 @@ export function AiDiffPane({
   onAccept,
   onReject,
 }: Props) {
+  const frameClass = usePaneFrameClass();
   const cmRef = useRef<ReactCodeMirrorRef>(null);
   const themeExt = useEditorThemeExt();
 
@@ -134,7 +137,9 @@ export function AiDiffPane({
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col rounded-md border border-border/60 bg-background">
+    <div
+      className={cn("flex h-full min-h-0 flex-col bg-background", frameClass)}
+    >
       <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-border/60 px-3">
         <div className="flex min-w-0 items-center gap-2">
           <Badge

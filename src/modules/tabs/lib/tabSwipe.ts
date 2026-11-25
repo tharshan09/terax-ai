@@ -1,3 +1,5 @@
+import type { Tab } from "./useTabs";
+
 // The two-finger swipe gesture itself is detected natively in AppKit (Rust:
 // install_tab_swipe_monitor in src-tauri/src/lib.rs) - WebKit never exposes
 // NSEvent phase/momentum to JS, so a reliable detector can only live there. The
@@ -39,4 +41,17 @@ export function isInsideHorizontalScroller(
     el = el.parentElement;
   }
   return false;
+}
+
+/** Fallback next to `isInsideHorizontalScroller` for the active HTML preview:
+ *  when `:hover` yields no element while an HTML tab is active, the swipe keeps
+ *  the tab (`true`). A hovered element is not decided here (`false`): it is
+ *  left to `isInsideHorizontalScroller`, which defers to a horizontal scroller
+ *  and to a `data-no-tab-swipe` opt-out on an ancestor. Every other tab kind
+ *  gives `false`, so its swipe behaves as before. */
+export function defersToActivePreview(
+  activeKind: Tab["kind"] | undefined,
+  target: Element | null,
+): boolean {
+  return activeKind === "html" && target === null;
 }

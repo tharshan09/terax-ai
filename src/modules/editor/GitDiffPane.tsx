@@ -1,6 +1,8 @@
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
+import { cn } from "@/lib/utils";
+import { usePaneFrameClass } from "@/modules/zen";
 import { unifiedMergeView } from "@codemirror/merge";
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
@@ -125,6 +127,7 @@ function loadStateFromCache(
 }
 
 export function GitDiffPane({ source, chipLabel, active }: Props) {
+  const frameClass = usePaneFrameClass();
   const cmRef = useRef<ReactCodeMirrorRef>(null);
   const themeExt = useEditorThemeExt();
   const [state, setState] = useState<LoadState>(() =>
@@ -244,7 +247,9 @@ export function GitDiffPane({ source, chipLabel, active }: Props) {
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col rounded-md border border-border/60 bg-background">
+    <div
+      className={cn("flex h-full min-h-0 flex-col bg-background", frameClass)}
+    >
       <div className="flex h-10 shrink-0 items-center justify-between gap-3 border-b border-border/60 px-3">
         <div className="flex min-w-0 items-center gap-2">
           <Badge
