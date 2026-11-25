@@ -1546,6 +1546,43 @@ pub fn stat(host: &str, path: &str) -> Result<crate::modules::fs::file::FileStat
     serde_json::from_value(data).map_err(|e| format!("bad stat response: {e}"))
 }
 
+/// Failure kind of a typed remote read; `read_bytes` keeps its text error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteReadError {
+    Unreachable(String),
+    TimedOut(String),
+    Failed(String),
+    Missing,
+    NotRegularFile,
+    TooLarge,
+}
+
+/// `read_bytes` with the failure kind kept; `budget` bounds the whole `ssh` call.
+pub fn read_bytes_typed(
+    host: &str,
+    path: &str,
+    limit: u64,
+    budget: std::time::Duration,
+) -> Result<RemoteFileBytes, RemoteReadError> {
+    let _ = (host, path, limit, budget);
+    Err(RemoteReadError::Failed("not implemented".to_string()))
+}
+
+/// `realpath` with the failure kind kept.
+pub fn realpath_typed(host: &str, path: &str) -> Result<String, RemoteReadError> {
+    let _ = (host, path);
+    Err(RemoteReadError::Failed("not implemented".to_string()))
+}
+
+/// `stat` with the failure kind kept.
+pub fn stat_typed(
+    host: &str,
+    path: &str,
+) -> Result<crate::modules::fs::file::FileStat, RemoteReadError> {
+    let _ = (host, path);
+    Err(RemoteReadError::Failed("not implemented".to_string()))
+}
+
 /// Remote `fs_search`. The host helper walks + subsequence-prefilters; we
 /// fuzzy-rank the returned candidates locally so ordering matches the local
 /// path exactly.

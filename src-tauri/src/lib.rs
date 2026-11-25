@@ -3,8 +3,8 @@ pub mod modules;
 #[cfg(target_os = "macos")]
 use modules::app_menu;
 use modules::{
-    agent, claude, fs, git, history, net, ports, pty, secrets, shell, ssh, test_bridge, tmux,
-    variant, workspace,
+    agent, claude, fs, git, history, net, ports, preview_server, pty, secrets, shell, ssh,
+    test_bridge, tmux, variant, workspace, zen_escape,
 };
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -370,6 +370,9 @@ pub fn run() {
             // Native two-finger trackpad swipe -> tab switch (macOS only).
             #[cfg(target_os = "macos")]
             install_tab_swipe_monitor(_app.handle());
+            // Esc leaves zen over a preview even with focus in its iframe (macOS only).
+            #[cfg(target_os = "macos")]
+            zen_escape::install_zen_escape_monitor(_app.handle());
             // Dev-only e2e bridge; no-op unless TERAX_TEST_BRIDGE is set in a
             // debug build.
             test_bridge::spawn(_app.handle());
@@ -390,6 +393,7 @@ pub fn run() {
             registry
         })
         .manage(LaunchDir(Mutex::new(cli_dir)))
+        .manage(preview_server::PreviewServer::default())
         .invoke_handler(tauri::generate_handler![
             app_close_declined,
             clipboard_write_text,
@@ -496,6 +500,9 @@ pub fn run() {
             history::history_commands,
             history::history_record,
             history::history_list,
+            preview_server::preview_open_in_browser,
+            preview_server::preview_frame_source,
+            zen_escape::zen_escape_arm,
         ])
         .build(context)
         .expect("error while building tauri application")
