@@ -1,6 +1,8 @@
 import { isLoopbackUrl } from "@/lib/loopback";
+import { cn } from "@/lib/utils";
 import { portsAvailable } from "@/modules/ports";
 import { useWorkspaceEnvStore } from "@/modules/workspace";
+import { usePaneFrameClass } from "@/modules/zen";
 import { Alert02Icon, Globe02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
@@ -33,6 +35,7 @@ const SUSPEND_AFTER_MS = 30_000;
 
 export const PreviewPane = forwardRef<PreviewPaneHandle, Props>(
   function PreviewPane({ url, visible, onUrlChange }, ref) {
+    const frameClass = usePaneFrameClass();
     // `nonce` is part of the iframe `key`. Bumping it remounts the iframe,
     // which is the only reliable cross-origin reload (calling
     // contentWindow.location.reload() throws on cross-origin frames).
@@ -66,7 +69,10 @@ export const PreviewPane = forwardRef<PreviewPaneHandle, Props>(
 
     return (
       <div
-        className="flex h-full w-full flex-col overflow-hidden rounded-md border border-border/60 bg-background"
+        className={cn(
+          "flex h-full w-full flex-col overflow-hidden bg-background",
+          frameClass,
+        )}
         style={{
           visibility: visible ? "visible" : "hidden",
           pointerEvents: visible ? "auto" : "none",

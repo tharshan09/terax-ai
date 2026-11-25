@@ -38,6 +38,9 @@ type Props = {
   panelOpen: boolean;
   keysLoaded: boolean;
   onConnect: () => void;
+  /** Zen hides the bar in this tab kind. It stays mounted (a draft survives),
+   *  it is only not displayed. */
+  hiddenInZen?: boolean;
 };
 
 export function WorkspaceInputBar({
@@ -50,6 +53,7 @@ export function WorkspaceInputBar({
   panelOpen,
   keysLoaded,
   onConnect,
+  hiddenInZen = false,
 }: Props) {
   const c = useComposer();
   const { resolvedMode, themeId, customThemes } = useTheme();
@@ -189,6 +193,7 @@ export function WorkspaceInputBar({
       data-state={open ? "open" : "closed"}
       className="terax-reveal"
       aria-hidden={!open}
+      hidden={hiddenInZen || undefined}
     >
       <div>{content}</div>
     </div>
