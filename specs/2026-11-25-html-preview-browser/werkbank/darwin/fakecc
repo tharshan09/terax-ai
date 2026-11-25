@@ -1,0 +1,8 @@
+#!/bin/sh
+# Attrappe: tut so, als kompiliere sie. Reicht fuer `cargo check` (kein Linken).
+out=""; prev=""
+for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
+case " $* " in *" --version "*|*" -dumpversion "*|*" -v "*) echo "Apple clang version 15.0.0 (clang-1500.0.40.1)"; echo "Target: arm64-apple-darwin"; exit 0;; esac
+case " $* " in *" -E "*) echo "#define __clang__ 1"; exit 0;; esac
+[ -n "$out" ] && : > "$out"
+exit 0
