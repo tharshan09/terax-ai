@@ -35,6 +35,7 @@ Stand: 25.11.2026, Branch `html-preview-browser` im Fork `tharshan09/terax-ai` (
 - [ ] PDF auf dem Server: in Terax die Karte „preview not available over SSH" mit Kopfzeile; „Open in Browser" zeigt die PDF (N-24).
 - [ ] Verbindung trennen (N-20): `ssh -O exit {host}`, Seite im Browser neu laden: Textseite mit Dateiname und Host, ohne rohen Fehlertext des Servers. Terminal-Tab zum Host öffnen, neu laden: Seite da.
 - [ ] Last (N-25, N-4): auf dem Server `sshd -T | grep -i maxsessions` notieren. 7 SSH-Terminal-Tabs zum Host offen, dann eine Seite mit 30 Bildern per „Open in Browser": alle Bilder da; dabei einen weiteren Terminal-Tab öffnen und die Quellcodeverwaltung aktualisieren: beides ohne Fehler. Ladezeit notieren (ein Lesevorgang je Host zugleich: bei spürbarer Wartezeit melden, die Grenze ist einstellbar).
+- [ ] Strenges Öffnen auf dem Server: eine HTML-Datei in einem Ordner, dessen Elternordner für dein Konto nur Durchgangsrecht hat (`chmod 711` beim Besitzer eines anderen Kontos; nur falls es so einen Ordner gibt): notieren, ob „Open in Browser“ die Seite zeigt. Auf einem macOS-Server wird hier eine Fehlerseite erwartet, obwohl der Editor die Datei lesen kann; auf Linux-Servern soll es gehen.
 - [ ] Hängender Lesevorgang: nicht leicht nachzustellen; falls eine Seite über SSH einmal hängt, notieren, nach wie vielen Sekunden die Fehlerseite kommt (erwartet: spätestens rund 60 s je Datei).
 
 ## 3. HTML-Vorschau in Terax über den Mini-Server (Abnahme M-C, N-23, OB-19)
@@ -71,6 +72,8 @@ Die Konstante `HTML_PREVIEW_VIA_SERVER` ist an. Bleibt die Vorschau weiß, ist d
 - [ ] Esc im Einstellungsfenster, während das Hauptfenster im Zen über einer Vorschau steht: Zen bleibt (OB-4).
 - [ ] Esc im Zen in einem Terminal-Tab mit laufendem Claude Code: Claude Code bricht ab, Zen bleibt (N-21).
 - [ ] Esc bei offenem Dialog oder Menü über der Vorschau: schließt nur den Dialog, Zen bleibt.
+- [ ] Im Zen über einer HTML-Vorschau mit Eingabefeld eine halbe Minute lang schnell in die Seite tippen: nichts hakt, nichts stürzt ab (der Tastenmonitor läuft im Zen bei jedem Tastendruck mit). Die Seite selbst bekommt Esc weiterhin (z. B. schließt ein Dialog IN der Seite).
+- [ ] Esc mit Feststelltaste an, Esc gehalten, Esc während einer Eingabe mit Akzent-Auswahl (langes Drücken auf `e`): Zen endet in den ersten beiden Fällen; im dritten notieren, was passiert.
 - [ ] Seitenleiste auf rund 300 px ziehen, Zen an und aus: wieder 300 px; im Zen lässt sich die Kante nicht ziehen; App neu starten: Leiste offen (N-22).
 - [ ] KI-Leiste umschalten (Kürzel und Befehlspalette) im Zen über einer Vorschau: nichts passiert; nach Zen ist der Zustand wie vorher.
 - [ ] Tab-Wechsel im Zen zwischen Vorschau und Terminal: Eingabezeile erscheint und verschwindet passend; Esc wirkt nur im Vorschau-Tab.
