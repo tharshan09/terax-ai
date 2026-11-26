@@ -90,10 +90,16 @@ export function useSidebarPanel(
     }
   }, []);
 
+  // Set between collapseForZen and restoreAfterZen: what the sidebar looked
+  // like before zen. While set, collapse state changes are not persisted, so
+  // zen never overwrites the user's choice for the next launch.
+  const beforeZenRef = useRef<{ collapsed: boolean } | null>(null);
+
   const persistSidebarCollapsed = useCallback((collapsed: boolean) => {
     if (collapsedRef.current === collapsed) return;
     collapsedRef.current = collapsed;
     setSidebarCollapsed(collapsed);
+    if (beforeZenRef.current) return;
     try {
       window.localStorage.setItem(
         SIDEBAR_COLLAPSED_STORAGE_KEY,
@@ -102,6 +108,40 @@ export function useSidebarPanel(
     } catch {
       // storage may fail in private mode
     }
+  }, []);
+
+  // Zen hides the sidebar by collapsing it to 0 px (the explorer stays
+  // mounted). The collapse is mirrored in `sidebarCollapsed` right away, so
+  // watchers and git refreshes pause as for any collapse, but it is not
+  // written to storage.
+  const collapseForZen = useCallback(() => {
+    if (beforeZenRef.current) return;
+    const panel = sidebarRef.current;
+    const open = panel ? panel.getSize().inPixels > 0 : !collapsedRef.current;
+    beforeZenRef.current = { collapsed: !open };
+    if (!open) return;
+    collapsedRef.current = true;
+    setSidebarCollapsed(true);
+    panel?.collapse();
+  }, []);
+
+  // Leaving zen restores the sidebar as it was before: open at the width the
+  // user last set (the one persisted, so display and storage agree), or still
+  // collapsed (no resize) if it was collapsed.
+  const restoreAfterZen = useCallback(() => {
+    const before = beforeZenRef.current;
+    if (!before) return;
+    beforeZenRef.current = null;
+    const panel = sidebarRef.current;
+    if (before.collapsed) {
+      // Opened by hand during zen: back to the collapsed state that storage
+      // still holds.
+      if (panel && panel.getSize().inPixels > 0) panel.collapse();
+      return;
+    }
+    collapsedRef.current = false;
+    setSidebarCollapsed(false);
+    panel?.resize(`${sidebarWidthRef.current}px`);
   }, []);
 
   const toggleSidebar = useCallback(() => {
@@ -196,6 +236,8 @@ export function useSidebarPanel(
     initialSidebarCollapsed,
     persistSidebarView,
     persistSidebarCollapsed,
+    collapseForZen,
+    restoreAfterZen,
     toggleSidebar,
     cycleSidebarView,
     persistSidebarWidth,

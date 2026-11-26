@@ -6,6 +6,7 @@ import { DocStack } from "@/modules/doc";
 import { PreviewStack } from "@/modules/preview";
 import type { Tab } from "@/modules/tabs";
 import { TerminalStack } from "@/modules/terminal";
+import { useZenStore, zenChrome } from "@/modules/zen";
 
 type TerminalStackProps = ComponentProps<typeof TerminalStack>;
 type EditorStackProps = ComponentProps<typeof EditorStack>;
@@ -81,12 +82,19 @@ export const WorkspaceSurface = memo(function WorkspaceSurface({
   const isAiDiffTab = kind === "ai-diff";
   const isGitDiffTab = kind === "git-diff" || kind === "git-commit-file";
   const isGitHistoryTab = kind === "git-history";
+  // Zen drops the padding around every padded layer (the git history layer
+  // has none either way).
+  const zenOn = useZenStore((s) => s.on);
+  const padding = zenChrome(zenOn, kind).surfacePadding
+    ? "px-3 pt-2 pb-2"
+    : undefined;
 
   return (
     <div className="relative h-full min-h-0">
       <div
         className={cn(
-          "absolute inset-0 px-3 pt-2 pb-2",
+          "absolute inset-0",
+          padding,
           !isTerminalTab && "invisible pointer-events-none",
         )}
         aria-hidden={!isTerminalTab}
@@ -106,7 +114,8 @@ export const WorkspaceSurface = memo(function WorkspaceSurface({
       </div>
       <div
         className={cn(
-          "absolute inset-0 px-3 pt-2 pb-2",
+          "absolute inset-0",
+          padding,
           !isEditorTab && "invisible pointer-events-none",
         )}
         aria-hidden={!isEditorTab}
@@ -122,7 +131,8 @@ export const WorkspaceSurface = memo(function WorkspaceSurface({
       </div>
       <div
         className={cn(
-          "absolute inset-0 px-3 pt-2 pb-2",
+          "absolute inset-0",
+          padding,
           !isPreviewTab && "invisible pointer-events-none",
         )}
         aria-hidden={!isPreviewTab}
@@ -136,7 +146,8 @@ export const WorkspaceSurface = memo(function WorkspaceSurface({
       </div>
       <div
         className={cn(
-          "absolute inset-0 px-3 pt-2 pb-2",
+          "absolute inset-0",
+          padding,
           !isMarkdownTab && "invisible pointer-events-none",
         )}
         aria-hidden={!isMarkdownTab}
@@ -150,7 +161,8 @@ export const WorkspaceSurface = memo(function WorkspaceSurface({
       </div>
       <div
         className={cn(
-          "absolute inset-0 px-3 pt-2 pb-2",
+          "absolute inset-0",
+          padding,
           !isHtmlTab && "invisible pointer-events-none",
         )}
         aria-hidden={!isHtmlTab}
@@ -164,7 +176,8 @@ export const WorkspaceSurface = memo(function WorkspaceSurface({
       </div>
       <div
         className={cn(
-          "absolute inset-0 px-3 pt-2 pb-2",
+          "absolute inset-0",
+          padding,
           !isAiDiffTab && "invisible pointer-events-none",
         )}
         aria-hidden={!isAiDiffTab}
@@ -178,7 +191,8 @@ export const WorkspaceSurface = memo(function WorkspaceSurface({
       </div>
       <div
         className={cn(
-          "absolute inset-0 px-3 pt-2 pb-2",
+          "absolute inset-0",
+          padding,
           !isGitDiffTab && "invisible pointer-events-none",
         )}
         aria-hidden={!isGitDiffTab}

@@ -3,8 +3,8 @@ pub mod modules;
 #[cfg(target_os = "macos")]
 use modules::app_menu;
 use modules::{
-    agent, claude, fs, git, history, net, ports, pty, secrets, shell, ssh, test_bridge, tmux,
-    variant, workspace,
+    agent, claude, fs, git, history, net, ports, preview_server, pty, secrets, shell, ssh,
+    test_bridge, tmux, variant, workspace, zen_escape,
 };
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -281,9 +281,85 @@ fn install_panic_logger() {
     }));
 }
 
+/// Soft limit of open files the app asks for at start.
+#[cfg(unix)]
+const OPEN_FILE_LIMIT: u64 = 8192;
+
+/// Raises the soft `RLIMIT_NOFILE` to [`OPEN_FILE_LIMIT`] (never above the
+/// hard limit, never lower than it is). An app started from Finder or the Dock
+/// gets 256 from launchd, and every preview link holds its own listening
+/// socket: at 256 links plus the app's own files the process would run out
+/// and could open nothing else (terminals, explorer, git) until restart.
+/// Returns the soft limit in effect afterwards.
+#[cfg(unix)]
+fn raise_open_file_limit() -> Option<u64> {
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit/setrlimit only read and write the struct we pass.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 {
+            return None;
+        }
+        let want = OPEN_FILE_LIMIT.min(lim.rlim_max);
+        if lim.rlim_cur < want {
+            let raised = libc::rlimit {
+                rlim_cur: want,
+                rlim_max: lim.rlim_max,
+            };
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &raised) == 0 {
+                lim = raised;
+            } else {
+                log::warn!("could not raise the open file limit from {}", lim.rlim_cur);
+            }
+        }
+    }
+    Some(lim.rlim_cur)
+}
+
+#[cfg(not(unix))]
+fn raise_open_file_limit() -> Option<u64> {
+    None
+}
+
+#[cfg(all(test, unix))]
+mod open_file_limit_tests {
+    use super::*;
+
+    #[test]
+    fn raises_a_finder_style_limit_of_256() {
+        let mut orig = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: plain get/set of this process's limit, restored below.
+        unsafe {
+            assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &mut orig), 0);
+            let low = libc::rlimit {
+                rlim_cur: 256.min(orig.rlim_cur),
+                rlim_max: orig.rlim_max,
+            };
+            assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &low), 0);
+        }
+        let now = raise_open_file_limit().expect("limit readable");
+        let want = OPEN_FILE_LIMIT.min(orig.rlim_max);
+        // SAFETY: restore what the test process had.
+        unsafe {
+            let back = libc::rlimit {
+                rlim_cur: orig.rlim_cur.max(now),
+                rlim_max: orig.rlim_max,
+            };
+            libc::setrlimit(libc::RLIMIT_NOFILE, &back);
+        }
+        assert_eq!(now, want);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_panic_logger();
+    raise_open_file_limit();
 
     #[cfg(windows)]
     {
@@ -370,6 +446,9 @@ pub fn run() {
             // Native two-finger trackpad swipe -> tab switch (macOS only).
             #[cfg(target_os = "macos")]
             install_tab_swipe_monitor(_app.handle());
+            // Esc leaves zen over a preview even with focus in its iframe (macOS only).
+            #[cfg(target_os = "macos")]
+            zen_escape::install_zen_escape_monitor(_app.handle());
             // Dev-only e2e bridge; no-op unless TERAX_TEST_BRIDGE is set in a
             // debug build.
             test_bridge::spawn(_app.handle());
@@ -390,6 +469,7 @@ pub fn run() {
             registry
         })
         .manage(LaunchDir(Mutex::new(cli_dir)))
+        .manage(preview_server::PreviewServer::default())
         .invoke_handler(tauri::generate_handler![
             app_close_declined,
             clipboard_write_text,
@@ -496,6 +576,9 @@ pub fn run() {
             history::history_commands,
             history::history_record,
             history::history_list,
+            preview_server::preview_open_in_browser,
+            preview_server::preview_frame_source,
+            zen_escape::zen_escape_arm,
         ])
         .build(context)
         .expect("error while building tauri application")

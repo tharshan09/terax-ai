@@ -1,0 +1,3 @@
+/* Nachbardatei der Messseite: färbt Punkt 5 grün und setzt den Text auf "ja". */
+.state.nachbar-css { background: #1b7a3d; font-size: 0; }
+.state.nachbar-css::after { content: "ja"; font-size: 15px; }

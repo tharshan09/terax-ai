@@ -193,6 +193,12 @@ fn fs_read_remote_image_with(
 /// A genuine PDF begins with these magic bytes.
 const PDF_MAGIC: &[u8] = b"%PDF-";
 
+/// True only if `head` begins with the `%PDF-` magic bytes. The one place of
+/// this comparison, for `fs_is_pdf` and the preview server.
+pub(crate) fn is_pdf_magic(head: &[u8]) -> bool {
+    head.starts_with(PDF_MAGIC)
+}
+
 /// True only if the file at `path` really begins with the `%PDF-` magic bytes.
 ///
 /// The editor's PDF preview renders asset-served bytes in an iframe WITHOUT a
@@ -256,7 +262,7 @@ fn fs_is_pdf_impl(
             }
         }
     }
-    Ok(filled == buf.len() && &buf[..] == PDF_MAGIC)
+    Ok(is_pdf_magic(&buf[..filled]))
 }
 
 #[derive(Serialize, Clone)]
@@ -823,6 +829,14 @@ mod tests {
     }
 
     // --- fs_is_pdf: the magic-byte gate for the sandbox-less PDF iframe ---
+
+    #[test]
+    fn ac14_is_pdf_magic_needs_the_whole_magic() {
+        assert!(is_pdf_magic(b"%PDF-1.7\n"));
+        assert!(!is_pdf_magic(b"%PDF"));
+        assert!(!is_pdf_magic(b"<html>"));
+        assert!(!is_pdf_magic(b""));
+    }
 
     #[test]
     fn is_pdf_true_for_real_pdf_magic() {

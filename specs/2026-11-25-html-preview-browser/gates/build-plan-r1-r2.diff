@@ -1,0 +1,283 @@
+--- /tmp/claude-1002/-home-claude-litha-produkte-terax/62f81867-7ace-435c-ba6f-1f0a2295e1ca/scratchpad/plan/build-plan-backup-r1.md	2026-11-25 18:52:00.561723107 +0000
++++ /home/claude/litha/produkte/terax/terax-ai/specs/2026-11-25-html-preview-browser/build-plan.md	2026-11-25 18:59:46.766885720 +0000
+@@ -197,15 +197,18 @@
+ 
+ ## Entscheidungen ohne Vorgabe
+ 
+-- Offen: Für welche Bilddateien es „Open in Browser" gibt (Taste in der Kopfzeile und Eintrag im Explorer-Menü) · Wahl: `png`, `jpg`, `jpeg`, `gif`, `webp`, `ico` und `svg`, also genau die Bildarten, die Terax heute schon als Bild anzeigt; dazu `html`, `htm` und `pdf` · Grund: die Architektur sagt nur „Rasterbilder" (SVC-12); die Liste folgt der Bild-Vorschau des Editors (`src/modules/editor/lib/binaryPreview.ts:5-13`) · Alternative: zusätzlich `avif` und `bmp`; dann bietet das Explorer-Menü den Eintrag auch für Bilder an, die Terax selbst nur als „Binary file" zeigt (als Nachbardatei einer HTML-Seite liefert der Server beide Arten in jedem Fall aus) · Wirkung: fachlich · Anforderungen: SVC-12, SVC-5, BR-9, BR-25, UI-1, UI-5
+-- Offen: Was die HTML-Vorschau in Terax zeigt, wenn der Mini-Server die Datei für die Vorschau ablehnt oder nicht liefern kann (zum Beispiel eine Datei in einem geschützten Ordner wie `.aws`, eine lokale HTML-Datei über 10 MB, 256 offene Links, SSH-Server nicht erreichbar) · Wahl: diese eine Vorschau lädt auf dem heutigen Weg (lokal über das Asset-Protokoll, über SSH als Text ohne Nachbardateien), genau wie bei ausgeschalteter Konstante · Grund: die Architektur regelt nur den Fall „Rahmen bleibt weiß" (Konstante vor dem Merge), nicht die Antworten `refused`, `too_large`, `unreachable` und `limit_reached` von `preview_frame_source`; so zeigt die App nie weniger als heute · Alternative: eine Meldung statt der Vorschau; eine lokale HTML-Datei über 10 MB oder in einem geschützten Ordner wäre dann in der App nicht mehr zu sehen · Wirkung: fachlich · Anforderungen: SVC-19, API-8, BR-7, BR-24
+-- Offen: Wie lange eine Datei über SSH auf den einzigen Lese-Platz ihres Servers wartet (Auflage OB-12) · Wahl: höchstens 30 Sekunden ohne Fortschritt; jeder fertige Lesevorgang dieses Servers startet die Frist neu; danach bekommt der Browser für diese Datei die Textseite „Terax could not read {name} from {host}: timed out" (`504`). Ein hängender Lesevorgang hält den Platz bis zu seinem eigenen Zeitbudget (bis 244 s, SEC-16); so lange fehlen weitere Dateien dieses Servers nach je 30 s, Dateien anderer Server laden normal · Grund: ein Lesevorgang je Server (Q&A 35) und das Zeitbudget wie beim heutigen Bild-Lesen (SEC-16) stehen fest; OB-12 verlangt nur eine Frist, die am Fortschritt der Reihe misst · Alternative: den hängenden Lesevorgang selbst schon nach 30 s abbrechen; dann scheitern auch große Dateien über langsame Leitungen · Wirkung: fachlich · Anforderungen: OB-12, SEC-14, SEC-16, NFR-3
+-- Offen: Wortlaut des Grunds, wenn der SSH-Server eine weitere Sitzung ablehnt (Auflage OB-14); der Text erscheint auf der Fehlerseite im Browser und im Toast · Wahl: „the SSH server refused another session (MaxSessions limit)" · Grund: OB-14 verlangt nur, dass der Grund die Sitzungsgrenze des Servers nennt statt des Anmelde-Hinweises „open a terminal first" · Alternative: der rohe Fehlertext von `ssh` · Wirkung: fachlich · Anforderungen: OB-14, NFR-4, EP-6
+-- Offen: Welcher Grund im Toast „{name} can't be opened in the browser: {reason}" steht (Antwort `refused`) und was ein abgebrochener Aufruf zeigt · Wahl: der Text der Sperrliste ohne das vorangestellte „refused: " (zum Beispiel „path is inside a protected directory (.ssh)"), bei `.git` „path is inside a .git folder", bei einer unechten PDF „not a real PDF"; ein abgebrochener Aufruf (Fehler statt Antwort) zeigt „Could not open the browser: {Fehlertext}" · Grund: Q&A 11 legt nur die Vorlagen fest; die Sperrliste hat schon verständliche Texte (`src-tauri/src/modules/fs/guard.rs:172-207`) · Alternative: ein fester Grund „blocked by Terax" ohne Einzelheit · Wirkung: fachlich · Anforderungen: SVC-13, VAL-7, VAL-9, EP-6
+-- Offen: Wie die Fehlerseite im Browser aussieht, wenn eine Datei über SSH nicht lesbar ist · Wahl: `{name}` ist der Dateiname der angefragten Datei (letztes Pfadsegment), `{host}` der SSH-Host der Freigabe; die Seite ist reiner Text (`text/plain; charset=utf-8`) mit denselben Schutz-Kopfzeilen wie Bilder (Abschottung, `nosniff`, `no-store`, `no-referrer`) · Grund: die Fehlertabelle der Architektur nennt nur den Wortlaut; die Seite gibt einen Teil der Adresse wieder und darf nie als HTML laufen · Alternative: der relative Pfad im Ordner statt des Dateinamens · Wirkung: fachlich · Anforderungen: NFR-4, SEC-7, SVC-8
+-- Offen: Wie beim Klick „Open in Browser" eine Datei über SSH auf die 10-MB-Grenze geprüft wird · Wahl: nach dem Auflösen des Pfads (`ssh::realpath`) eine Größenabfrage (`ssh::stat`) auf das aufgelöste Ziel; über 10 MB kommt der Toast „{name} is larger than 10 MB and can't be opened in the browser.", scheitert eine der beiden Abfragen, der Toast „Could not read {name} from {host}: {reason}"; die PDF-Echtheit prüft über SSH erst jede Anfrage des Browsers · Grund: API-1 nennt die Größenprüfung, aber keinen Weg über SSH · Alternative: keine Größenprüfung beim Klick über SSH; dann öffnet sich der Browser und zeigt die Textseite „Larger than 10 MB" · Wirkung: fachlich · Anforderungen: API-1, VAL-8, BR-12, EP-6
+-- Offen: Name der Zen-Taste · Wahl: Tooltip und Name „Toggle zen mode" mit dem Kürzel aus den Einstellungen, wie der bestehende Befehl `view.zenMode` (`src/modules/shortcuts/shortcuts.ts:317-321`); ob Zen an ist, zeigt die Taste über `aria-pressed` · Grund: Discovery und Architektur nennen nur „Zen" · Alternative: „Zen" · Wirkung: fachlich · Anforderungen: UI-4
++- Offen: Für welche Bilddateien es „Open in Browser" gibt (Taste in der Kopfzeile und Eintrag im Explorer-Menü) · Wahl: `png`, `jpg`, `jpeg`, `gif`, `webp`, `ico` und `svg`, also genau die Bildarten, die Terax heute schon als Bild anzeigt; dazu `html`, `htm` und `pdf` · Grund: die Architektur sagt nur „Rasterbilder" (SVC-12); die Liste folgt der Bild-Vorschau des Editors (`src/modules/editor/lib/binaryPreview.ts:5-13`) · Alternative: zusätzlich `avif` und `bmp`; dann bietet das Explorer-Menü den Eintrag auch für Bilder an, die Terax selbst nur als „Binary file" zeigt (als Nachbardatei einer HTML-Seite liefert der Server beide Arten in jedem Fall aus) · Wirkung: fachlich · Anforderungen: SVC-12, SVC-5, BR-9, BR-25, UI-1, UI-5 · entschieden: User, 25.11.2026
++- Offen: Was die HTML-Vorschau in Terax zeigt, wenn der Mini-Server die Datei für die Vorschau ablehnt oder nicht liefern kann (zum Beispiel eine Datei in einem geschützten Ordner wie `.aws`, eine lokale HTML-Datei über 10 MB, 256 offene Links, SSH-Server nicht erreichbar) · Wahl: diese eine Vorschau lädt auf dem heutigen Weg (lokal über das Asset-Protokoll, über SSH als Text ohne Nachbardateien), genau wie bei ausgeschalteter Konstante · Grund: die Architektur regelt nur den Fall „Rahmen bleibt weiß" (Konstante vor dem Merge), nicht die Antworten `refused`, `too_large`, `unreachable` und `limit_reached` von `preview_frame_source`; so zeigt die App nie weniger als heute · Alternative: eine Meldung statt der Vorschau; eine lokale HTML-Datei über 10 MB oder in einem geschützten Ordner wäre dann in der App nicht mehr zu sehen · Wirkung: fachlich · Anforderungen: SVC-19, API-8, BR-7, BR-24 · entschieden: User, 25.11.2026
++- Offen: Wie lange eine Datei über SSH auf den einzigen Lese-Platz ihres Servers wartet und wie lange ein hängender Lesevorgang diesen Platz hält (Auflage OB-12, Befund PR-01) · Wahl: eine wartende Datei wartet höchstens 30 Sekunden ohne Fortschritt; jeder fertige Lesevorgang dieses Servers startet die Frist neu; danach bekommt der Browser für diese Datei die Textseite „Terax could not read {name} from {host}: timed out" (`504`). Der Mini-Server bricht jeden SSH-Lesevorgang nach 60 Sekunden ab (Antwort `504` mit demselben Text); ein Hänger hält den Platz also höchstens 60 s, danach laden die übrigen Dateien dieses Servers wieder. Das heutige Lesen im Editor (`read_bytes`, `fs_read_remote_image`) behält sein Budget · Grund: ein Lesevorgang je Server (Q&A 35) steht fest; OB-12 schließt aus, dass ein Hänger den Platz bis zum Budget von `read_bytes` (bis 244 s bei 10 MiB, `ssh.rs:1506-1509`, `:902-908`) blockiert · Alternative: Budget wie `read_bytes` (bis 244 s); dann fehlen bei einem Hänger bis zu vier Minuten alle übrigen Dateien dieses Servers · Wirkung: fachlich · Anforderungen: OB-12, SEC-14, SEC-16, NFR-3 · weicht ab: SEC-16 · entschieden: User, 25.11.2026 (Abbruch nach 60 s; hingenommen: eine große Datei über eine sehr langsame Leitung lädt nicht)
++- Offen: Wortlaut des Grunds, wenn der SSH-Server eine weitere Sitzung ablehnt (Auflage OB-14); der Text erscheint auf der Fehlerseite im Browser und im Toast · Wahl: „the SSH server refused another session (MaxSessions limit)" · Grund: OB-14 verlangt nur, dass der Grund die Sitzungsgrenze des Servers nennt statt des Anmelde-Hinweises „open a terminal first" · Alternative: der rohe Fehlertext von `ssh` · Wirkung: fachlich · Anforderungen: OB-14, NFR-4, EP-6 · entschieden: User, 25.11.2026
++- Offen: Welcher Grund im Toast „{name} can't be opened in the browser: {reason}" steht (Antwort `refused`) und was ein abgebrochener Aufruf zeigt · Wahl: der Text der Sperrliste ohne das vorangestellte „refused: " (zum Beispiel „path is inside a protected directory (.ssh)"), bei `.git` „path is inside a .git folder", bei einer unechten PDF „not a real PDF"; ein abgebrochener Aufruf (Fehler statt Antwort) zeigt „Could not open the browser: {Fehlertext}" · Grund: Q&A 11 legt nur die Vorlagen fest; die Sperrliste hat schon verständliche Texte (`src-tauri/src/modules/fs/guard.rs:172-207`) · Alternative: ein fester Grund „blocked by Terax" ohne Einzelheit · Wirkung: fachlich · Anforderungen: SVC-13, VAL-7, VAL-9, EP-6 · entschieden: User, 25.11.2026
++- Offen: Wie die Fehlerseite im Browser aussieht, wenn eine Datei über SSH nicht lesbar ist · Wahl: `{name}` ist der Dateiname der angefragten Datei (letztes Pfadsegment), `{host}` der SSH-Host der Freigabe; die Seite ist reiner Text (`text/plain; charset=utf-8`) mit denselben Schutz-Kopfzeilen wie Bilder (Abschottung, `nosniff`, `no-store`, `no-referrer`) · Grund: die Fehlertabelle der Architektur nennt nur den Wortlaut; die Seite gibt einen Teil der Adresse wieder und darf nie als HTML laufen · Alternative: der relative Pfad im Ordner statt des Dateinamens · Wirkung: fachlich · Anforderungen: NFR-4, SEC-7, SVC-8 · entschieden: User, 25.11.2026
++- Offen: Wie beim Klick „Open in Browser" eine Datei über SSH auf die 10-MB-Grenze geprüft wird · Wahl: nach dem Auflösen des Pfads (`ssh::realpath`) eine Größenabfrage (`ssh::stat`) auf das aufgelöste Ziel; über 10 MB kommt der Toast „{name} is larger than 10 MB and can't be opened in the browser.", scheitert eine der beiden Abfragen, der Toast „Could not read {name} from {host}: {reason}"; die PDF-Echtheit prüft über SSH erst jede Anfrage des Browsers · Grund: API-1 nennt die Größenprüfung, aber keinen Weg über SSH · Alternative: keine Größenprüfung beim Klick über SSH; dann öffnet sich der Browser und zeigt die Textseite „Larger than 10 MB" · Wirkung: fachlich · Anforderungen: API-1, VAL-8, BR-12, EP-6 · entschieden: User, 25.11.2026
++- Offen: Name der Zen-Taste · Wahl: Tooltip und Name „Toggle zen mode" mit dem Kürzel aus den Einstellungen, wie der bestehende Befehl `view.zenMode` (`src/modules/shortcuts/shortcuts.ts:317-321`); ob Zen an ist, zeigt die Taste über `aria-pressed` · Grund: Discovery und Architektur nennen nur „Zen" · Alternative: „Zen" · Wirkung: fachlich · Anforderungen: UI-4 · entschieden: User, 25.11.2026
+ - Offen: Antwort bei fehlender oder doppelter `Host`-Kopfzeile · Wahl: `400` nach Auflage OB-10 (wie RFC 9112 §3.2); `421` bleibt für einen falschen Wert · Grund: VAL-1 und Sicherheitsmodell Zeile 5 nennen für den fehlenden Host `421`, die spätere Auflage OB-10 `400` · Alternative: `421` wie VAL-1 · Wirkung: technisch · Anforderungen: VAL-1, OB-10 · weicht ab: VAL-1
++- Offen: Wo die 60-s-Grenze des SSH-Lesens technisch sitzt (Befund PR-01) · Wahl: als vierter Parameter `budget` von `ssh::read_bytes_typed` an Stelle der erwarteten Größe; der Mini-Server (slice-01-preview-server) übergibt den Wert `ssh_read_budget` aus seiner Grenzen-Struktur (60 s); `read_bytes_typed` (slice-02-ssh-read-esc-monitor) gibt genau dieses Budget an `wait_child` (`ssh.rs:999-1028`), das den `ssh`-Prozess danach beendet, und meldet `TimedOut`; der Server antwortet `504` und gibt den Platz des Hosts frei, sobald der Leser zurückkehrt · Grund: nur ein beendeter Prozess gibt die Sitzung am Server wirklich frei; ein Abbruch nur im Server ließe den `ssh`-Prozess weiterlaufen, und der nächste Lesevorgang wäre eine zweite Sitzung desselben Hosts (gegen SEC-14) · Alternative: Zeitgrenze nur im Server um den Blocking-Thread · Wirkung: technisch · Anforderungen: SEC-16, SVC-8, SVC-22, OB-12 · weicht ab: SVC-8, SVC-22
++- Offen: Wie der MaxSessions-Grund aus OB-14 den Toast beim Klick über SSH erreicht (Befund PR-02) · Wahl: `ssh::realpath_typed` und `ssh::stat_typed` (Vertrag aus Slice-00, gebaut in slice-02-ssh-read-esc-monitor) laufen über dieselbe Ausführung und dieselbe Einordnung wie `read_bytes_typed`; der Klick und das Home des Hosts nutzen sie an Stelle von `ssh::realpath` und `ssh::stat` (gilt auch für die Zeile zur Größenprüfung beim Klick über SSH); `classify_ssh_error` bleibt für alle übrigen Aufrufer unverändert · Grund: `realpath` und `stat` laufen über `run_remote_json`, `read_envelope`, `exit_error` und `classify_ssh_error` (`ssh.rs:1465-1472`, `:1540-1547`, `:1213-1220`, `:1092-1115`, `:950-960`) und machen aus „Permission denied" den Anmelde-Hinweis · Alternative: die Aussage „und im Toast" streichen und den Anmelde-Hinweis im Toast als Entscheidung führen · Wirkung: technisch · Anforderungen: OB-14, API-1, SVC-2 · weicht ab: API-1, SVC-2
++- Offen: Was mit einer Fehlermeldung des Openers geschieht, die die Eintritts-Adresse enthält (Auflage PR-07: Geheimnis nie in einem Toast) · Wahl: der Server ersetzt im Grund von `open_failed` jedes Vorkommen der Eintritts-Adresse durch `<link>`, bevor er antwortet; die Vorlage „Could not open the browser: {reason}" bleibt · Grund: ein Opener-Fehler kann die gestartete Kommandozeile samt Adresse nennen; `BrowserOpen` darf laut DTO-Tabelle nie Adresse oder Geheimnis tragen · Alternative: fester Grund ohne den Fehlertext des Openers · Wirkung: technisch · Anforderungen: SVC-11, SEC-1, SEC-8
+ - Offen: Grenze „zu viele Kopfzeilen" (OB-10) · Wahl: höchstens 64 Kopfzeilen je Anfrage, mehr ergibt `431` · Grund: OB-10 nennt keine Zahl; Browser schicken rund 15 · Alternative: 100 · Wirkung: technisch · Anforderungen: OB-10, SEC-13
+ - Offen: Zeichensatz des Dateinamens in der Eintritts-Adresse (OB-9) · Wahl: UTF-8, jedes Byte außer `A-Z`, `a-z`, `0-9`, `-`, `.`, `_`, `~` prozentkodiert (Leerzeichen `%20`, `ä` `%C3%A4`) · Grund: OB-9 verlangt eine Festlegung; die Menge entspricht den „unreserved" Zeichen aus RFC 3986 · Alternative: nur Leerzeichen, `%`, `?` und `#` kodieren · Wirkung: technisch · Anforderungen: OB-9, DF-1
+ - Offen: Pause vor der einen Wiederholung nach `Unreachable` (SEC-14) · Wahl: 250 ms · Grund: SEC-14 sagt nur „kurze Pause" · Alternative: 1 s · Wirkung: technisch · Anforderungen: SEC-14
+@@ -242,12 +245,13 @@
+ - `src-tauri/Cargo.lock` (NFR-2): nur die Abhängigkeitsliste des Pakets `terax` wächst um `getrandom 0.4.3`, `httparse` und `percent-encoding`; kein neuer `[[package]]`-Block (vorher und nachher 578, Prüfung `grep -c '^\[\[package\]\]' src-tauri/Cargo.lock`). Das Lockfile wird ohne Netz aus dem vorhandenen Register-Cache nachgezogen.
+ - `src-tauri/src/modules/mod.rs` (MIG-2): `pub mod preview_server;` und `pub mod zen_escape;`, beide ohne `cfg` (die Plattform-Arme stehen in den Dateien).
+ - `src-tauri/src/lib.rs` (MIG-3): `.manage(preview_server::PreviewServer::default())`; im `generate_handler!` die Commands `preview_server::preview_open_in_browser`, `preview_server::preview_frame_source` und `zen_escape::zen_escape_arm`; in `setup` unter `cfg(target_os = "macos")` direkt nach `install_tab_swipe_monitor` der Aufruf `zen_escape::install_zen_escape_monitor(_app.handle())`. Der Exit-Pfad (`lib.rs:502-508`) bleibt unverändert.
+-- `TERAX.md` (MIG-16): im Abschnitt „Two-process model" ein Eintrag `preview_server::*` (`preview_open_in_browser`, `preview_frame_source`: Freigabe je Ort, Datei und Klasse mit eigenem Listener auf `127.0.0.1:0`, Geheimnis als erstes Pfadsegment, Prüfkette ohne `trusted`, SSH über `ssh::read_bytes_typed` mit einem Lesevorgang je Host, Kopfzeilen je Art, Adresse nie in der Webview, Ende mit dem Prozess) und ein Eintrag `zen_escape::zen_escape_arm`; im Abschnitt „Frontend" die Tab-Art `html` und das Zen-Verhalten samt Esc-Regel; in „Module layout" die Module `preview-server/` und `zen/` und bei `tabs/` die Wisch-Ausnahme über der HTML-Vorschau. Quelle: Architektur „Kernentscheidungen", „Nahtstellen", „Sicherheitsmodell". Ohne Gedankenstrich (Konvention in `TERAX.md`).
++- `TERAX.md` (MIG-16): im Abschnitt „Two-process model" ein Eintrag `preview_server::*` (`preview_open_in_browser`, `preview_frame_source`: Freigabe je Ort, Datei und Klasse mit eigenem Listener auf `127.0.0.1:0`, Geheimnis als erstes Pfadsegment, Prüfkette ohne `trusted`, SSH über `ssh::read_bytes_typed` mit einem Lesevorgang je Host und Abbruch nach 60 s, Klick über SSH über `ssh::realpath_typed` und `ssh::stat_typed`, Kopfzeilen je Art, Adresse nie in der Webview, Ende mit dem Prozess) und ein Eintrag `zen_escape::zen_escape_arm`; im Abschnitt „Frontend" die Tab-Art `html` und das Zen-Verhalten samt Esc-Regel; in „Module layout" die Module `preview-server/` und `zen/` und bei `tabs/` die Wisch-Ausnahme über der HTML-Vorschau. Quelle: Architektur „Kernentscheidungen", „Nahtstellen", „Sicherheitsmodell". Ohne Gedankenstrich (Konvention in `TERAX.md`).
+ - Rümpfe in fremden Bereichen, neutral wie auf `cf07327`:
+   - `preview_server/mod.rs` (Bereich slice-01): `PreviewServer` ohne Freigaben und ohne Socket; Typen und Commands der Tabelle „Liefert"; `preview_open_in_browser` antwortet `{ status: unsupported, reason: null }`, `preview_frame_source` `{ status: unsupported, url: null, reason: null }`; `pub mod policy;`.
+   - `preview_server/policy.rs` (Bereich slice-01): nur `ENTRY_EXTENSIONS` mit den endgültigen Werten der Welle 1.
+-  - `ssh.rs` (Bereich slice-02): nur der Zusatz `RemoteReadError` und `read_bytes_typed` mit dem Rumpf `Err(RemoteReadError::Failed("not implemented"))`; keine andere Zeile geändert.
++  - `ssh.rs` (Bereich slice-02): nur der Zusatz `RemoteReadError`, `read_bytes_typed`, `realpath_typed` und `stat_typed`, jeder Rumpf `Err(RemoteReadError::Failed("not implemented".to_string()))`; keine andere Zeile geändert.
+   - `zen_escape.rs` (Bereich slice-02): `zen_escape_arm` ohne Wirkung, `install_zen_escape_monitor` nur unter `cfg(target_os = "macos")` und leer.
++  - Clippy-fest mit `-D warnings` (PR-05): jeder Rumpf verbraucht seine Parameter mit einer ersten Zeile `let _ = (…);` (zum Beispiel `let _ = (app, path, workspace);`, `let _ = armed;`, `let _ = (host, path, limit, budget);`); die Parameter der Tauri-Commands behalten ihre Namen `app`, `path`, `workspace`, `armed`, weil `path`, `workspace` und `armed` die IPC-Schlüssel sind. Kein `#[allow(...)]` und kein Unterstrich-Präfix an Command-Parametern.
+ - `src/modules/preview-server/types.ts`: die TS-Typen der Tabelle „Liefert", wörtlich nach Architektur „Nahtstellen", Typen an der Grenze.
+ - Keine Änderung an `src-tauri/capabilities/*.json`, `src-tauri/tauri.conf.json` und `src-tauri/src/modules/fs/asset.rs` (Nahtstellen „Unverändert, bewusst"); keine bestehende Testdatei wird geändert.
+ 
+@@ -264,7 +268,9 @@
+ | `preview_frame_source` | `#[tauri::command] pub async fn preview_frame_source(app: tauri::AppHandle, path: String, workspace: Option<WorkspaceEnv>) -> Result<FrameSource, String>` | `src-tauri/src/modules/preview_server/mod.rs` | slice-01-preview-server (Rumpf füllen), slice-04-preview-surfaces (einziger Aufrufer `HtmlPreviewPane.tsx`) |
+ | `ENTRY_EXTENSIONS` | `pub const ENTRY_EXTENSIONS: &[&str]` mit genau `"html", "htm", "png", "jpg", "jpeg", "gif", "webp", "ico", "svg", "pdf"` (Bezugsdateien der Welle 1; Name, Typ und Werte bleiben, der Guard-Test in slice-04 liest sie aus dem Quelltext) | `src-tauri/src/modules/preview_server/policy.rs` | slice-01-preview-server, slice-04-preview-surfaces |
+ | `RemoteReadError` | `#[derive(Debug, Clone, PartialEq, Eq)] pub enum RemoteReadError { Unreachable(String), TimedOut(String), Failed(String), Missing, NotRegularFile, TooLarge }` | `src-tauri/src/modules/ssh.rs` | slice-01-preview-server, slice-02-ssh-read-esc-monitor |
+-| `read_bytes_typed` | `pub fn read_bytes_typed(host: &str, path: &str, limit: u64, expected_size: Option<u64>) -> Result<RemoteFileBytes, RemoteReadError>` (synchron wie `read_bytes`) | `src-tauri/src/modules/ssh.rs` | slice-01-preview-server (Leser im Betrieb), slice-02-ssh-read-esc-monitor (Rumpf füllen) |
++| `read_bytes_typed` | `pub fn read_bytes_typed(host: &str, path: &str, limit: u64, budget: std::time::Duration) -> Result<RemoteFileBytes, RemoteReadError>` (synchron wie `read_bytes`; `budget` ist das ganze Zeitbudget des `ssh`-Aufrufs, danach `TimedOut`) | `src-tauri/src/modules/ssh.rs` | slice-01-preview-server (Leser im Betrieb, übergibt 60 s), slice-02-ssh-read-esc-monitor (Rumpf füllen) |
++| `realpath_typed` | `pub fn realpath_typed(host: &str, path: &str) -> Result<String, RemoteReadError>` (Helfer-Operation `realpath`, Budget wie `realpath`) | `src-tauri/src/modules/ssh.rs` | slice-01-preview-server (Klick über SSH, Home des Hosts), slice-02-ssh-read-esc-monitor (Rumpf füllen) |
++| `stat_typed` | `pub fn stat_typed(host: &str, path: &str) -> Result<crate::modules::fs::file::FileStat, RemoteReadError>` (Helfer-Operation `stat`, Budget wie `stat`) | `src-tauri/src/modules/ssh.rs` | slice-01-preview-server (Größe beim Klick über SSH), slice-02-ssh-read-esc-monitor (Rumpf füllen) |
+ | `zen_escape_arm` | `#[tauri::command] pub fn zen_escape_arm(armed: bool)` | `src-tauri/src/modules/zen_escape.rs` | slice-02-ssh-read-esc-monitor (Rumpf füllen), slice-03-zen-swipe (einziger Aufrufer `useZenEscape.ts`) |
+ | `install_zen_escape_monitor` | `#[cfg(target_os = "macos")] pub fn install_zen_escape_monitor(app: &tauri::AppHandle)` | `src-tauri/src/modules/zen_escape.rs` | slice-02-ssh-read-esc-monitor, `lib.rs` |
+ | `terax:zen-escape` | Tauri-Event Rust an Webview, Nutzlast `()`; TS `listen<null>("terax:zen-escape", …)` | `src-tauri/src/modules/zen_escape.rs` | slice-02-ssh-read-esc-monitor (sendet), slice-03-zen-swipe (hört, nur `useZenEscape.ts`) |
+@@ -274,7 +280,8 @@
+ **Bedeutung der Verträge**
+ 
+ - `reason` in `BrowserOpen` gibt es nur bei `refused`, `unreachable` und `open_failed`; `url` in `FrameSource` nur bei `ready`. Sonst tragen beide nie Adresse, Port oder Geheimnis (Architektur „DTOs"). `Err(String)` nur bei einem inneren Fehler (Aufgabe abgebrochen).
+-- `RemoteReadError`: `Missing`, `NotRegularFile` und `TooLarge` kommen aus der festen Art des Helfers, `Unreachable` aus `RemoteError::Transport`, `TimedOut` aus `RemoteError::TimedOut`, `Failed` aus `RemoteError::Failed` und `RemoteError::Killed` (SVC-22).
++- `RemoteReadError`: `Missing`, `NotRegularFile` und `TooLarge` kommen aus der festen Art des Helfers, `Unreachable` aus `RemoteError::Transport`, `TimedOut` aus `RemoteError::TimedOut`, `Failed` aus `RemoteError::Failed` und `RemoteError::Killed` (SVC-22). `read_bytes_typed`, `realpath_typed` und `stat_typed` ordnen mit derselben Funktion ein; eine vom Server abgelehnte Sitzung wird `Unreachable("the SSH server refused another session (MaxSessions limit)")` (OB-14).
++- `budget` in `read_bytes_typed`: der Mini-Server übergibt 60 s (Entscheidung des Users vom 25.11.2026); nach Ablauf ist der `ssh`-Prozess beendet und das Ergebnis `TimedOut`.
+ - `zen_escape_arm(true)` schaltet den Esc-Monitor scharf; nur dann sendet er `terax:zen-escape`, und zwar bei Esc ohne Modifier im Hauptfenster.
+ 
+ **Braucht**
+@@ -293,7 +300,7 @@
+ 
+ 2) GIVEN dieselben Rümpfe
+    WHEN `preview_contracts.rs` `ENTRY_EXTENSIONS` und `RemoteReadError` prüft
+-   THEN ist `ENTRY_EXTENSIONS` als Menge genau {`html`, `htm`, `png`, `jpg`, `jpeg`, `gif`, `webp`, `ico`, `svg`, `pdf`}, und ein erschöpfendes `match` über die sechs Varianten `Unreachable`, `TimedOut`, `Failed`, `Missing`, `NotRegularFile`, `TooLarge` kompiliert ohne Platzhalter-Arm
++   THEN ist `ENTRY_EXTENSIONS` als Menge genau {`html`, `htm`, `png`, `jpg`, `jpeg`, `gif`, `webp`, `ico`, `svg`, `pdf`}, ein erschöpfendes `match` über die sechs Varianten `Unreachable`, `TimedOut`, `Failed`, `Missing`, `NotRegularFile`, `TooLarge` kompiliert ohne Platzhalter-Arm, und `read_bytes_typed`, `realpath_typed` und `stat_typed` lassen sich Funktionszeigern mit genau den Signaturen der Tabelle „Liefert" zuweisen (ohne sie aufzurufen)
+    [Source: --]
+    Test: `src-tauri/tests/preview_contracts.rs`
+ 
+@@ -335,11 +342,11 @@
+ - Dateien nach Architektur „Nahtstellen", Neue Dateien Bereich A: `grant.rs` (`Grant`, `grant_scope`, `new_token`, `token_matches`), `request.rs` (`parse_request`, `split_target`), `policy.rs` (`served_type`, `response_headers`, `ENTRY_EXTENSIONS` aus Slice-00 unverändert), `source.rs` (`read_local`, `read_remote`, `within`, `opened_path`), `listener.rs` (`serve_listener`), `mod.rs` (`PreviewServer`, beide Commands, `open_entry`). Freigaben werden bis zum Prozessende nie entfernt und nirgends gespeichert.
+ - `src-tauri/src/modules/fs/file.rs` (MIG-4): `is_pdf_magic` (SVC-21) ist der einzige Ort des `%PDF-`-Vergleichs; `fs_is_pdf` nutzt sie mit unverändertem Verhalten. Sweep-Kriterium der Migration Map: `grep -rn 'const PDF_MAGIC\|b"%PDF-"' src-tauri/src --include=*.rs` außerhalb von `#[cfg(test)]` genau ein Treffer in `file.rs`, `grep -rn '%PDF-' src-tauri/src/modules/preview_server` außerhalb von `#[cfg(test)]` keiner.
+ - Der Leser im Betrieb ist `ssh::read_bytes_typed` (Vertrag aus Slice-00, gebaut in slice-02-ssh-read-esc-monitor); Commands und Listener rufen ihn immer über einen Blocking-Thread (`spawn_blocking`, OB-1). Tests übergeben einen Host-Ersatz nach dem Muster `file.rs:753-764`. Das Öffnen des Browsers ist ebenfalls übergeben (Muster `view_with`, `ports/chrome.rs:509-527`), im Betrieb `tauri_plugin_opener::open_url(url, None::<&str>)`.
+-- Klick über SSH: `ssh::realpath` für die Bezugsdatei, `ssh::stat` auf das Ziel für die Größe, Home des Hosts über `ssh::realpath(host, "~")` einmal je Host gemerkt (SVC-2).
+-- Grenzen als benannte Werte einer Grenzen-Struktur, im Betrieb nach Architektur: 16 Verbindungen je Freigabe und 64 insgesamt (SEC-12); Kopf höchstens 64 KiB, 64 Kopfzeilen und 10 s (SEC-13, OB-10); 8 Lesevorgänge insgesamt, davon 1 je SSH-Host, eine Wiederholung nach `Unreachable` nach 250 ms (SEC-14); Wartegrenze auf den Platz eines Hosts 30 s ohne Fortschritt (OB-12); Schreiben 30 s (SEC-15); 256 Freigaben über beide Klassen (VAL-11). Tests verkürzen nur die Zeiten.
++- Klick über SSH: `ssh::realpath_typed` für die Bezugsdatei, `ssh::stat_typed` auf das Ziel für die Größe, Home des Hosts über `ssh::realpath_typed(host, "~")` einmal je Host gemerkt (SVC-2); jeder Fehler daraus wird `unreachable` mit dem Text der Variante als Grund, so erreicht der MaxSessions-Grund den Toast (Befund PR-02). `ssh::realpath` und `ssh::stat` nutzt der Server nicht.
++- Grenzen als benannte Werte einer Grenzen-Struktur, im Betrieb nach Architektur: 16 Verbindungen je Freigabe und 64 insgesamt (SEC-12); Kopf höchstens 64 KiB, 64 Kopfzeilen und 10 s (SEC-13, OB-10); 8 Lesevorgänge insgesamt, davon 1 je SSH-Host, eine Wiederholung nach `Unreachable` nach 250 ms (SEC-14); Wartegrenze auf den Platz eines Hosts 30 s ohne Fortschritt (OB-12); Schreiben 30 s (SEC-15); 256 Freigaben über beide Klassen (VAL-11). Dazu `ssh_read_budget` = 60 s (Entscheidung des Users vom 25.11.2026, weicht ab von SEC-16): `read_remote` übergibt diesen Wert als `budget` an `read_bytes_typed`; der Platz des Hosts bleibt belegt, bis der Leser zurückkehrt, und wird dann freigegeben. Tests verkürzen nur die Zeiten.
+ - Schalter für die Mac-Messung M-C (Architektur „In-App-Vorschau über den Mini-Server", Auflage OB-19) als Konstanten: Fallback-Adresse `localhost` für die Klasse `frame` (aus) und `frame-ancestors` an der Klasse `frame` (an). Mit Fallback bindet die Freigabe zusätzlich `[::1]` am selben Port; ist er dort belegt, wird der erste Socket freigegeben und ein Port gesucht, der auf beiden Adressen frei ist (Muster `TERAX.md:44`); ohne IPv6-Loopback nur `127.0.0.1`.
+ - Fehlerseiten für `502` und `504` als `text/plain; charset=utf-8` mit den Kopfzeilen der trägen Arten (Entscheidung); alle übrigen Ablehnungen ohne Rumpf; jede Antwort mit `Connection: close`.
+-- Kein Log und keine Fehlermeldung enthält Geheimnis oder Eintritts-Adresse; Log-Stufen nach „Error Handling Strategy".
++- Geheimnis, Eintritts-Adresse und Rahmen-Adresse erscheinen nie in einem Log-Eintrag, in einem `reason` von `BrowserOpen` oder `FrameSource` und in keiner Fehlermeldung (Auflage PR-07, SEC-1); ein Opener-Fehler, der die Adresse enthält, bekommt sie im Grund als `<link>` ersetzt (Entscheidung); Log-Stufen nach „Error Handling Strategy". Das Code-Review prüft jede `log::`-Zeile unter `preview_server/`.
+ - Plattform-Arme: `opened_path` mit macOS (`F_GETPATH`), Linux (`/proc/self/fd`) und Windows (erneutes Auflösen); `within` und `opened_path` vergleichen unter Windows über `fs::to_canon`; Symlink-Tests stehen unter `cfg(unix)`. Das ist der Windows-Teil der Auflage OB-2; deren Nachweis per Clippy und Review der `cfg`-Zweige führt slice-02-ssh-read-esc-monitor.
+ - Welle-2-Vorbereitung nach Architektur „Welle 2: Markdown im Browser", Zeile „Was Welle 1 dafür bereithält": Art `markdown` und die laufende Welle als Konstante in `policy.rs`, Ordner-Bereich für die Art `markdown` in `grant_scope`, Kopfzeilen-Zeile für gerendertes Markdown in `response_headers`. In Welle 1 ist nichts davon über Adresse oder Command erreichbar (`md` ist keine Bezugsdatei).
+ - NFR-7: Zu den Zeilen 1, 3 bis 11, 13 bis 19 und 23 des Sicherheitsmodells gibt es mindestens einen `cargo test` in diesem Slice; ein Doc-Kommentar am Test nennt die Zeile (`/// Sicherheitsmodell 6`). Zeile 2 ist Zeile 1, Zeile 12 ist Mac N-18, die Zeilen 20 bis 22 prüft slice-04-preview-surfaces, Zeile 24 hat laut Architektur keinen Test.
+@@ -365,6 +372,8 @@
+ | `ENTRY_EXTENSIONS` | slice-00-contracts |
+ | `RemoteReadError` | slice-00-contracts |
+ | `read_bytes_typed` | slice-00-contracts |
++| `realpath_typed` | slice-00-contracts |
++| `stat_typed` | slice-00-contracts |
+ 
+ **Akzeptanzkriterien**
+ 
+@@ -430,10 +439,10 @@
+     [Source: SVC-6, SEC-7, BR-14, API-9]
+     Test: `src-tauri/src/modules/preview_server/policy.rs`
+ 
+-11) GIVEN (Unix) eine HTML-Freigabe mit Bereich `p`, darin `sub/y.png`, `in.png` als Symlink auf `sub/y.png`, `out.png` als Symlink auf `../x.png`, `key.png` als Symlink auf `.ssh/id_rsa` neben `p` und `linkdir` als Symlink auf einen Ordner außerhalb
+-    WHEN `read_local` `sub/y.png`, `in.png`, `out.png`, `key.png` und `linkdir/z.png` liest
+-    THEN liefert es zweimal die Bytes von `y.png` und dann dreimal `403` „Refused by Terax"; `opened_path` der über `in.png` geöffneten Datei ist der aufgelöste Pfad von `sub/y.png`
+-    [Source: SVC-7, VAL-6, BR-11, EP-3]
++11) GIVEN (Unix) eine HTML-Freigabe mit Bereich `p`, darin `sub/y.png`, `in.png` als Symlink auf `sub/y.png`, `out.png` als Symlink auf `../x.png`, `key.png` als Symlink auf `.ssh/id_rsa` neben `p`, `linkdir` als Symlink auf einen Ordner außerhalb, und drei Symlinks, deren Ziel im Bereich liegt, aber auf der Sperrliste steht: `ok.png` auf `p/.env`, `logo.png` auf `p/.git/config` und `icon.png` auf `p/.ssh/id_ed25519`
++    WHEN `read_local` `sub/y.png`, `in.png`, `out.png`, `key.png`, `linkdir/z.png`, `ok.png`, `logo.png` und `icon.png` liest
++    THEN liefert es zweimal die Bytes von `y.png` und dann sechsmal `403` „Refused by Terax" (die letzten drei, weil die Sperrliste auf dem aufgelösten Ziel greift, obwohl der Bereich stimmt); `opened_path` der über `in.png` geöffneten Datei ist der aufgelöste Pfad von `sub/y.png`
++    [Source: SVC-7, VAL-6, VAL-7, BR-11, EP-3]
+     Test: `src-tauri/src/modules/preview_server/source.rs`
+ 
+ 12) GIVEN eine HTML-Freigabe mit `.env`, `id_ed25519`, `.ssh/config` und `.git/config` im Bereich und eine Bild-Freigabe nur für `b.png`
+@@ -455,9 +464,9 @@
+     Test: `src-tauri/src/modules/fs/file.rs`
+ 
+ 15) GIVEN eine SSH-Freigabe für Host `devbox` mit Bereich `/srv/p` und ein Host-Ersatz
+-    WHEN `read_remote` `sub/y.png` (gemeldetes Ziel `/srv/p/sub/y.png`), `link.png` (Ziel `/srv/other/x.png`), `pic.png` (Ziel `/home/u/.ssh/id_rsa`) und `.env` liest
+-    THEN liefert es Bytes, `403` „Refused by Terax", `403` „Refused by Terax" und für `.env` `403`, ohne den Host-Ersatz aufzurufen; jeder Aufruf des Host-Ersatzes nennt Host `devbox` und Grenze 10 485 760
+-    [Source: SVC-8, SEC-5, DF-3, BR-5, BR-11]
++    WHEN `read_remote` `sub/y.png` (gemeldetes Ziel `/srv/p/sub/y.png`), `link.png` (Ziel `/srv/other/x.png`), `pic.png` (Ziel `/home/u/.ssh/id_rsa`), die Namen `.env`, `id_ed25519`, `.ssh/config` und `.git/config` sowie `a.png` (Ziel `/srv/p/.env`), `b.png` (Ziel `/srv/p/.git/config`) und `c.png` (Ziel `/srv/p/keys/id_ed25519`) liest
++    THEN liefert es Bytes, `403` „Refused by Terax", `403` „Refused by Terax", für `.env`, `id_ed25519`, `.ssh/config` und `.git/config` je `403`, ohne den Host-Ersatz aufzurufen (Sperrliste auf dem Pfad-Text vor dem Senden), und für `a.png`, `b.png` und `c.png` je `403`, obwohl das gemeldete Ziel im Bereich liegt (Sperrliste auf dem gemeldeten Ziel); jeder Aufruf des Host-Ersatzes nennt Host `devbox` und Grenze 10 485 760
++    [Source: SVC-8, SEC-5, SEC-6, VAL-7, DF-3, BR-5, BR-10, BR-11]
+     Test: `src-tauri/src/modules/preview_server/source.rs`
+ 
+ 16) GIVEN dieselbe SSH-Freigabe und die Anfrage `y.png`
+@@ -532,9 +541,9 @@
+     [Source: VAL-11, BR-15]
+     Test: `src-tauri/src/modules/preview_server/mod.rs`
+ 
+-28) GIVEN die SSH-Dateien `/srv/p/report.html` und `/srv/p/zwei.html` auf Host `devbox` und ein Host-Ersatz für `realpath`, `stat` und das Lesen
+-    WHEN `preview_open_in_browser` für beide Dateien läuft, danach für eine Datei, deren `realpath` mit `gone` scheitert, und für eine, deren `stat` 10 485 761 Byte meldet
+-    THEN sind die ersten beiden Antworten `opened`, die Freigabe hat den Bereich `/srv/p` und den Host `devbox`, `realpath("~")` lief für `devbox` genau einmal; danach `unreachable` mit Grund `gone` und `too_large`
++28) GIVEN die SSH-Dateien `/srv/p/report.html` und `/srv/p/zwei.html` auf Host `devbox` und ein Host-Ersatz für `realpath_typed`, `stat_typed` und das Lesen
++    WHEN `preview_open_in_browser` für beide Dateien läuft, danach für eine Datei, deren `realpath_typed` mit `Unreachable("gone")` scheitert, und für eine, deren `stat_typed` 10 485 761 Byte meldet
++    THEN sind die ersten beiden Antworten `opened`, die Freigabe hat den Bereich `/srv/p` und den Host `devbox`, `realpath_typed("~")` lief für `devbox` genau einmal; danach `unreachable` mit Grund `gone` und `too_large`
+     [Source: API-1, SVC-2, BR-5, DF-3]
+     Test: `src-tauri/src/modules/preview_server/mod.rs`
+ 
+@@ -561,6 +570,30 @@
+     THEN öffnet der Standard-Browser `http://127.0.0.1:{port}/…` ohne Firewall-Nachfrage, vom iPhone über die LAN-IP gibt es keine Verbindung (N-2, N-16); Neuladen zeigt den neuen Stand (N-3); nach dem Beenden lädt der Link nicht, nach dem Neustart braucht es einen neuen Klick (N-18); Messseite, PDF-Betrachter, Reichweite und Symlinks verhalten sich wie in N-8, N-17 und N-19
+     [Source: BR-8, EP-2, EP-4, TR-2, BR-6, BR-14, BR-12] [Prüfweg: QA]
+ 
++33) GIVEN eine Freigabe mit echtem Socket
++    WHEN der Test `POST /T/a.html`, `GET /T/a.html` ohne `Host`, `GET /T/a.html` mit zwei `Host`-Zeilen und `GET /T/a.html` mit 65 Kopfzeilen an den Listener schickt
++    THEN liest er vom Draht `405` mit `Allow: GET, HEAD`, `400`, `400` und `431`, jeweils mit leerem Rumpf und `Connection: close`
++    [Source: OB-10, VAL-1, VAL-2, VAL-3, SEC-10]
++    Test: `src-tauri/src/modules/preview_server/listener.rs`
++
++34) GIVEN eine SSH-Freigabe für `devbox`, `ssh_read_budget` im Test 300 ms, Wartegrenze 5 s, und ein Host-Ersatz, der das übergebene Budget notiert, beim ersten Lesevorgang hängt, bis genau dieses Budget abgelaufen ist, und dann `TimedOut` meldet
++    WHEN `a.png` und gleich danach `b.png` von `devbox` angefragt werden
++    THEN bekam der Host-Ersatz als Budget genau 300 ms; `a.png` endet nach dem Budget und vor 1 s mit `504` „Terax could not read a.png from devbox: timed out"; danach ist der Platz frei, und `b.png` lädt mit `200`, ohne die Wartegrenze zu erreichen; die Grenzen-Struktur hat im Betrieb `ssh_read_budget` = 60 s, Wartegrenze 30 s, Kopf 10 s, Schreiben 30 s, Pause 250 ms, 16 und 64 Verbindungen, 8 Lesevorgänge, 1 je Host, 64 KiB, 64 Kopfzeilen und 256 Freigaben
++    [Source: OB-12, SEC-14, SEC-16]
++    Test: `src-tauri/src/modules/preview_server/source.rs`
++
++35) GIVEN ein Host-Ersatz, dessen `realpath_typed` für `devbox` `Unreachable("the SSH server refused another session (MaxSessions limit)")` meldet, und ein zweiter Fall, in dem erst `stat_typed` so scheitert
++    WHEN `preview_open_in_browser` jeweils für `/srv/p/a.html` auf `devbox` läuft
++    THEN ist die Antwort beide Male `{ status: unreachable, reason: "the SSH server refused another session (MaxSessions limit)" }` (Grund aus OB-14, kein Anmelde-Hinweis), und es entsteht keine Freigabe
++    [Source: API-1, BR-5]
++    Test: `src-tauri/src/modules/preview_server/mod.rs`
++
++36) GIVEN ein Test-Logger, der alle `log`-Einträge ab `trace` sammelt, und ein Ersatz-Opener, der `Err("Launcher \"open\" \"<Eintritts-Adresse>\" failed")` mit der vollen Eintritts-Adresse meldet
++    WHEN `preview_open_in_browser` für `a.html`, `preview_frame_source` für `a.html`, ein `GET` mit falschem Geheimnis, ein `GET` auf eine Datei außerhalb des Bereichs (`403`) und ein `GET` mit SSH-Fehler (`502`) laufen
++    THEN enthält kein gesammelter Log-Eintrag das Geheimnis `T` einer der Freigaben, die Eintritts-Adresse oder die Rahmen-Adresse; die Klick-Antwort ist `open_failed` mit einem Grund, in dem die Adresse durch `<link>` ersetzt ist und `T` nicht vorkommt
++    [Source: SEC-1, SVC-11, API-1]
++    Test: `src-tauri/src/modules/preview_server/mod.rs`
++
+ **Nicht in diesem Slice**
+ 
+ - Keine Änderung an `ssh.rs`: das typisierte Lesen baut slice-02-ssh-read-esc-monitor; bis zu dessen Merge antwortet der Leser im Betrieb mit dem Rumpf aus Slice-00. Ebenso keine Änderung an `asset.rs`, `guard.rs`, Capabilities und `tauri.conf.json`.
+@@ -580,12 +613,14 @@
+ | **Abhängigkeiten** | `[slice-00-contracts, slice-01-preview-server]` |
+ | **Anforderungen** | `BR-13, API-3, SVC-18, SVC-22, NFR-6, MIG-21, OB-2, OB-4, OB-6, OB-14` |
+ 
+-**Ziel.** Füllt die beiden Rümpfe in Rust-Dateien außerhalb des Server-Moduls: `ssh::read_bytes_typed` mit Fehlerart aus dem Antwort-Umschlag des Helfers (SVC-22, MIG-21) und den macOS-Esc-Monitor samt Schalter (SVC-18, API-3). Die Änderung an der Kerndatei `ssh.rs` bleibt auf den neuen Weg begrenzt und vom übrigen Server-Code getrennt. Der Slice läuft nach slice-01-preview-server, weil Rust-Läufe auf der Werkbank seriell laufen und seine Linux-Prüfung (OB-2, NFR-6) dann den ganzen Server-Kern mit erfasst.
++**Ziel.** Füllt die Rümpfe in Rust-Dateien außerhalb des Server-Moduls: `ssh::read_bytes_typed` mit Fehlerart aus dem Antwort-Umschlag des Helfers und übergebenem Zeitbudget (SVC-22, MIG-21), dazu `ssh::realpath_typed` und `ssh::stat_typed` für den Klickweg mit derselben Einordnung (Befund PR-02), und den macOS-Esc-Monitor samt Schalter (SVC-18, API-3). Die Änderung an der Kerndatei `ssh.rs` bleibt auf den neuen Weg begrenzt und vom übrigen Server-Code getrennt. Der Slice läuft nach slice-01-preview-server, weil Rust-Läufe auf der Werkbank seriell laufen und seine Linux-Prüfung (OB-2, NFR-6) dann den ganzen Server-Kern mit erfasst.
+ 
+ **Deliverables**
+ 
+ - `ssh.rs` (MIG-21, Architektur SVC-22 und Migration Map MIG-21): Die Helfer-Operation `read_bytes` meldet bei fehlendem Pfad, bei einer Nicht-Datei und bei Überschreitung der Grenze zusätzlich eine feste Art (`missing`, `not_regular`, `too_large`) im Antwort-Umschlag; alle übrigen Helfer-Operationen bleiben unverändert. Der Ausführungsteil von `run_remote_json` (`ssh.rs:1142-1209`) wird intern so geteilt, dass `read_bytes_typed` Exit-Code, stdout und stderr erreicht; `read_bytes_typed` liest die Art selbst aus dem Umschlag. `RemoteError`, `helper_answer` und `run_remote_json` behalten Form und Verhalten, ebenso `read_bytes`, `fs_read_remote_image`, `classify_ssh_error` und die Kopier-Muster (`ssh.rs:1910-1925`, `:1990-1994`, `:2045-2054`). Die drei Art-Texte stehen einmal als Rust-Konstanten (Muster Konstanten-Abgleich `ssh.rs:2462-2467`).
+-- Der Grund für eine abgelehnte Sitzung (OB-14) entsteht nur im typisierten Weg; `classify_ssh_error` bleibt, wie es ist.
++- Zeitbudget (Entscheidung des Users vom 25.11.2026, Befund PR-01): `read_bytes_typed` gibt genau den übergebenen Parameter `budget` an den Ausführungsteil und damit an `wait_child` (`ssh.rs:999-1028`), nicht `read_bytes_timeout`; nach dem Budget ist der `ssh`-Prozess beendet und das Ergebnis `TimedOut`. Der Mini-Server übergibt 60 s. `read_bytes` und `fs_read_remote_image` behalten `read_bytes_timeout`.
++- `realpath_typed` und `stat_typed` (Befund PR-02): dieselbe Ausführung und dieselbe Einordnung wie `read_bytes_typed`, Budget `REMOTE_FS_TIMEOUT` wie `realpath` und `stat` (`ssh.rs:1465-1472`, `:1540-1547`); ein Helfer-Fehler ohne feste Art wird `Failed` mit dem Text des Helfers.
++- Der Grund für eine abgelehnte Sitzung (OB-14) entsteht in der gemeinsamen Einordnung der drei typisierten Funktionen; `classify_ssh_error` bleibt für alle übrigen Aufrufer, wie es ist.
+ - `zen_escape.rs` (SVC-18, API-3): Schalter als plattformneutrales `AtomicBool`; die reine Entscheidung (Taste, Modifier, Schalter, Fenster) ist eine öffentliche Funktion außerhalb von `cfg`; macOS-Arm: lokaler Monitor für `KeyDown` nach dem Muster `install_tab_swipe_monitor` (`lib.rs:58-131`), der nur Ereignisse des Hauptfensters `main` wertet (OB-4), jedes Ereignis unverändert weitergibt und bei positiver Entscheidung `terax:zen-escape` ohne Nutzlast sendet; auf anderen Plattformen kein Monitor.
+ - Rust-Tests tragen den Anker als Namensanfang `ac<n>_`.
+ 
+@@ -601,6 +636,8 @@
+ |---------|-----------|
+ | `RemoteReadError` | slice-00-contracts |
+ | `read_bytes_typed` | slice-00-contracts |
++| `realpath_typed` | slice-00-contracts |
++| `stat_typed` | slice-00-contracts |
+ | `zen_escape_arm` | slice-00-contracts |
+ | `install_zen_escape_monitor` | slice-00-contracts |
+ | `terax:zen-escape` | slice-00-contracts |
+@@ -626,14 +663,14 @@
+    Test: `src-tauri/src/modules/ssh.rs`
+ 
+ 4) GIVEN Exit 255 und stderr `mux_client_request_session: session request failed: Session open refused by peer` gefolgt von `Permission denied (publickey).`
+-   WHEN der typisierte Weg das einordnet
+-   THEN ist das Ergebnis `Unreachable("the SSH server refused another session (MaxSessions limit)")`, und der Grund enthält nicht `open a terminal`
++   WHEN die gemeinsame Einordnung der typisierten Funktionen das für `read_bytes_typed`, `realpath_typed` und `stat_typed` einordnet
++   THEN ist das Ergebnis jedes Mal `Unreachable("the SSH server refused another session (MaxSessions limit)")`, und der Grund enthält nicht `open a terminal`; `classify_ssh_error` liefert für denselben stderr weiter den heutigen Anmelde-Hinweis
+    [Source: OB-14]
+    Test: `src-tauri/src/modules/ssh.rs`
+ 
+-5) GIVEN `read_bytes_typed("devbox", "/srv/p/a.png", 10485760, None)`
++5) GIVEN `read_bytes_typed("devbox", "/srv/p/a.png", 10485760, Duration::from_secs(60))`
+    WHEN Anfrage und Zeitbudget bestimmt werden
+-   THEN ist die Anfrage die Helfer-Operation `read_bytes` mit `limit` 10485760 und das Budget `read_bytes_timeout(10485760, None)` gleich 244 s; die bestehenden Tests `embedded_helper_read_bytes_returns_exact_bytes_within_the_cap`, `read_bytes_budgets_for_the_known_size_and_falls_back_to_the_cap` und alle übrigen Tests in `ssh.rs` laufen unverändert grün
++   THEN ist die Anfrage die Helfer-Operation `read_bytes` mit `limit` 10485760 und das Budget des `ssh`-Aufrufs genau 60 s, nicht `read_bytes_timeout(10485760, None)` (244 s); `read_bytes` budgetiert weiter mit `read_bytes_timeout`; der bestehende Test `wait_child_kills_a_hung_child_after_the_budget` belegt das Beenden nach dem Budget; die bestehenden Tests `embedded_helper_read_bytes_returns_exact_bytes_within_the_cap`, `read_bytes_budgets_for_the_known_size_and_falls_back_to_the_cap` und alle übrigen Tests in `ssh.rs` laufen unverändert grün
+    [Source: BR-13, MIG-21]
+    Test: `src-tauri/src/modules/ssh.rs`
+ 
+@@ -660,6 +697,12 @@
+    THEN endet Zen im ersten Fall, im zweiten nicht, im dritten bricht Claude Code ab und Zen bleibt (N-10, N-21); alle Bilder laden, kein Terminal-Tab und kein Git-Aufruf scheitert, nach der Trennung zeigt der Browser „Terax could not read …" (N-4, N-20, N-25)
+    [Source: SVC-18, OB-4, BR-13] [Prüfweg: QA]
+ 
++10) GIVEN die Antwort-Einordnung von `realpath_typed` und `stat_typed`
++    WHEN sie Exit 0 mit `{"ok": true, "data": "/srv/p/a.html"}` (realpath), Exit 0 mit `{"ok": true, "data": {"size": 2048, "mtime": 1, "kind": "file"}}` (stat), Exit 0 mit `{"ok": false, "error": "[Errno 2] No such file or directory"}` und Exit 255 mit `ssh: connect to host devbox port 22: Connection refused` einordnet
++    THEN ergibt das `Ok("/srv/p/a.html")`, einen `FileStat` mit `size` 2048 und Art Datei, `Failed("[Errno 2] No such file or directory")` und `Unreachable(…)`; das Budget beider Aufrufe ist `REMOTE_FS_TIMEOUT` (30 s)
++    [Source: OB-14, SVC-22]
++    Test: `src-tauri/src/modules/ssh.rs`
++
+ **Nicht in diesem Slice**
+ 
+ - Keine Änderung an `read_bytes`, `fs_read_remote_image`, `classify_ssh_error` und den übrigen Helfer-Operationen; kein neuer Leseweg (Range, Streaming) und keine Änderung an den `ControlMaster`-Argumenten (Hinweis RT-D5 aus Gate 1 bleibt Hinweis).
+@@ -695,7 +738,7 @@
+ |---------|----------|-------|-------------|
+ | `useZenStore` | zustand-Hook; Zustand `{ on: boolean }`; Aktionen `enterZen(): void`, `exitZen(): void`, `toggleZen(): void`; einziger Schreiber des Zen-Zustands (API-7) | `src/modules/zen/lib/zenStore.ts` | slice-04-preview-surfaces (Kopfzeile im Zen), `App.tsx` |
+ | `usePaneFrameClass` | `() => string`: außerhalb von Zen `"rounded-md border border-border/60"`, im Zen `""` | `src/modules/zen/lib/usePaneFrameClass.ts` | slice-04-preview-surfaces (HTML, Markdown, Editor), Web-Vorschau, Git-Diff, KI-Diff |
+-| `ZenToggleButton` | `(props: { className?: string }) => JSX.Element`; `aria-pressed` gleich Zen an, Klick ruft `toggleZen` | `src/modules/zen/ZenToggleButton.tsx` | slice-04-preview-surfaces (Slot der Kopfzeile) |
++| `ZenToggleButton` | `(props: { className?: string }) => JSX.Element`; `aria-pressed` gleich Zen an, Klick ruft `toggleZen`; Name und `title` „Toggle zen mode" als HTML-Attribut wie `PreviewAddressBar.tsx:139`, kein Radix-`Tooltip` (braucht einen `TooltipProvider`, den `EditorPane.preview-env.test.tsx` nicht hat; Auflage PR-06), kein Tauri-Aufruf beim Rendern | `src/modules/zen/ZenToggleButton.tsx` | slice-04-preview-surfaces (Slot der Kopfzeile) |
+ 
+ **Braucht**
+ 
+@@ -736,9 +779,9 @@
+    [Source: API-4, FL-6, TR-4, TG-6, BR-20]
+    Test: `src/modules/zen/lib/useZenEscape.test.ts`
+ 
+-6) GIVEN `ZenToggleButton` bei Zen aus
++6) GIVEN `ZenToggleButton` bei Zen aus, gerendert ohne `TooltipProvider`
+    WHEN die Taste zweimal geklickt wird
+-   THEN hat sie den Namen „Toggle zen mode" und `aria-pressed="false"` (`off`), nach dem ersten Klick ist Zen an und `aria-pressed="true"` (`on`), nach dem zweiten wieder aus
++   THEN hat sie den Namen „Toggle zen mode", das Attribut `title` mit diesem Text und `aria-pressed="false"` (`off`), nach dem ersten Klick ist Zen an und `aria-pressed="true"` (`on`), nach dem zweiten wieder aus
+    [Source: UI-4, TR-3, FL-5, TG-6]
+    Test: `src/modules/zen/ZenToggleButton.test.tsx`
+ 
+@@ -809,6 +852,8 @@
+ - `src/modules/preview-server/index.ts`: Barrel mit `openInBrowser`, `browserOpenable`, `OpenInBrowserButton` und den Typen aus `types.ts`; `browserOpenable.ts` hält die laufende Welle als Konstante (Welle 1).
+ - Kopfzeile: Symbole und Wortwahl wie `src/modules/preview/PreviewAddressBar.tsx` („Reload" mit `ArrowReloadHorizontalIcon`, „Open in Browser" mit `LinkSquare02Icon`); Toasts mit `toast.error` aus `sonner` wie `PortsList.tsx:155-159`.
+ - `preview-server/`, `doc/` und die Panes importieren aus dem Editor-Modul nur reine Dateien, nie den Barrel `@/modules/editor`; `src/app/eager-budget.test.ts` bleibt grün (`FileExplorer` lädt beim Start).
++- Bestandstests mit Teil-Mocks (Auflage PR-06): `EditorPane.preview-env.test.tsx` rendert `EditorPane` ohne `TooltipProvider` (`:51`), `FileExplorer.test.tsx` ersetzt `@/modules/workspace` nur mit `currentWorkspaceEnv` und `useWorkspaceEnvStore`, `sonner` nur mit `toast.message` und `toast.error`, `@/lib/platform` nur mit `IS_MAC`, `@/modules/settings/preferences` ohne `shortcuts` und `@/modules/shortcuts` nur mit `useGlobalShortcuts` (`FileExplorer.test.tsx:41-52`). Deshalb: alle neuen Tasten (Reload, „Open in Browser", Rendered/Raw) nutzen `title` wie `PreviewAddressBar.tsx:139`, `:222`, keinen Radix-`Tooltip`; Dateien unter `src/modules/preview-server/` importieren aus `@/modules/workspace` nur mit `import type`; Toasts nur über `toast.error`; `FileExplorer.tsx` importiert direkt `@/modules/preview-server/lib/browserOpenable` und `@/modules/preview-server/lib/openInBrowser` (nicht den Barrel, nicht `OpenInBrowserButton`, nicht `ZenToggleButton`) und aus `@/modules/workspace` keinen weiteren Wert neben dem schon vorhandenen `useWorkspaceEnvStore` (`FileExplorer.tsx:58`).
++- Geheimnis und Rahmen-Adresse (Auflage PR-07, SEC-8): `FrameSource.url` lebt nur im Zustand der Pane; sie kommt in keinen Tab, keine Einstellung, keinen Toast und kein `console.*`; Fehler aus `preview_frame_source` führen nur zum Rückfall, ohne die Adresse zu melden. Das Code-Review prüft den Weg von `FrameSource.url`.
+ - Bestehende Testdateien bleiben unverändert; neue Tests stehen in neuen Dateien.
+ 
+ **Liefert**
+@@ -945,9 +990,23 @@
+     THEN sind in der App die Punkte 1, 2, 4, 5 und 6 grün, 7 und 8 rot (die Sandbox bleibt), Bilder, Styles und klassische Skripte aus dem Ordner laden auch über SSH (M-C, N-23; Abbruchkriterium nach Auflage OB-19 bei der QA); die SSH-PDF zeigt die Karte mit Kopfzeile, „Open in Browser" zeigt sie im Browser (N-24); Popups, Downloads und Zwischenablage sind notiert (N-14)
+     [Source: BR-24, BR-7, BR-23] [Prüfweg: QA]
+ 
++20) GIVEN slice-04 ist gemergt
++    WHEN `browserOpen.guard.test.ts` die Imports prüft und `pnpm vitest run src/modules/editor/EditorPane.preview-env.test.tsx src/modules/explorer/FileExplorer.test.tsx --maxWorkers=1` läuft
++    THEN importieren alle Dateien unter `src/modules/preview-server/` aus `@/modules/workspace` nur mit `import type`, `OpenInBrowserButton.tsx` und `PreviewHeader.tsx` importieren nichts aus `@/components/ui/tooltip`, und `FileExplorer.tsx` importiert aus `preview-server` nur `lib/browserOpenable` und `lib/openInBrowser`; beide Bestandstests laufen ohne jede Änderung grün
++    [Source: MIG-9, MIG-15]
++    Test: `src/modules/preview-server/browserOpen.guard.test.ts`
++    Bestand (unverändert, außerhalb des Dateibereichs): `src/modules/editor/EditorPane.preview-env.test.tsx`, `src/modules/explorer/FileExplorer.test.tsx`
++
++21) GIVEN `HtmlPreviewPane` auf dem Server-Weg aus AC 13 mit `url` `http://127.0.0.1:5000/T/a.html`, Spione auf `console.log`, `console.info`, `console.warn`, `console.error` und `toast`, dazu ein HTML-Tab für `/p/a.html` mit Workspace `local`
++    WHEN die Pane einhängt, „Reload" geklickt, `preview_frame_source` in einer zweiten Pane mit einem abgelehnten Aufruf beantwortet und danach `serializeTabs([tab])` aus `src/modules/spaces/lib/serialize.ts` gerufen wird
++    THEN enthält kein Aufruf von `console.*` oder `toast` die `url`, `127.0.0.1:5000` oder `T`; die zweite Pane lädt auf dem heutigen Weg; die Serialisierung des Tabs enthält `path` und `workspace`, aber weder `127.0.0.1` noch `T`
++    [Source: SEC-8, SVC-19]
++    Test: `src/modules/html/HtmlPreviewPane.test.tsx`
++
+ **Nicht in diesem Slice**
+ 
+ - Keine Rust-Änderung: Kopfzeilen, Prüfkette und Freigaben des Servers gehören slice-01-preview-server.
++- Kein Radix-`Tooltip` in den neuen Tasten und keine Werte-Importe, die die Teil-Mocks von `EditorPane.preview-env.test.tsx` und `FileExplorer.test.tsx` nicht bedienen (Auflage PR-06; Einzelheiten unter Deliverables); diese Bestandstests werden nicht angepasst.
+ - Kein Markdown im Browser (Welle 2: BR-17, FL-8, SVC-20); die Taste in der Markdown-Kopfzeile bleibt verborgen.
+ - Keine Änderung an `src/modules/doc/DocStack.tsx` (Props bleiben), `PreviewAddressBar.tsx`, `asset.rs` und der App-CSP.
+ - Keine Lockerung der Sandbox (FS-6): kein `allow-same-origin`, keine neuen Sandbox-Tokens; Popups, Downloads und Zwischenablage bleiben wie heute (N-14).

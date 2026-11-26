@@ -2,11 +2,14 @@ import { MarkdownCode } from "@/components/ai-elements/markdown-code";
 import { mathPlugin } from "@/components/ai-elements/markdown-math";
 import { cn } from "@/lib/utils";
 import type { ReadResult } from "@/modules/ai/lib/native";
+import { previewHeaderModel } from "@/modules/doc/lib/previewHeader";
+import { PreviewHeader } from "@/modules/doc/PreviewHeader";
+import { OpenInBrowserButton } from "@/modules/preview-server/OpenInBrowserButton";
 import type { WorkspaceEnv } from "@/modules/workspace";
+import { usePaneFrameClass, ZenToggleButton } from "@/modules/zen";
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Streamdown } from "streamdown";
-import { DocViewToggle } from "@/components/ui/DocViewToggle";
 
 type Status =
   | { kind: "loading" }
@@ -33,11 +36,25 @@ export function MarkdownPreviewPane({
   visible,
   onSetView,
 }: Props) {
+  const frameClass = usePaneFrameClass();
   const [status, setStatus] = useState<Status>({ kind: "loading" });
+  // Bumped by Reload; the read below depends on it.
+  const [reloadSeq, setReloadSeq] = useState(0);
+  const [reloading, setReloading] = useState(false);
+  // The file the shown content was read for; a reload of the same file keeps
+  // the content (and the scroll position) until the new read answers.
+  const readFor = useRef<{ path: string; workspace?: WorkspaceEnv } | null>(
+    null,
+  );
 
+  // A reload is done once the read answers, with content or an error.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reloadSeq re-runs the read on Reload
   useEffect(() => {
     let cancelled = false;
-    setStatus({ kind: "loading" });
+    const sameFile =
+      readFor.current?.path === path && readFor.current.workspace === workspace;
+    readFor.current = { path, workspace };
+    if (!sameFile) setStatus({ kind: "loading" });
     invoke<ReadResult>("fs_read_file", {
       path,
       workspace,
@@ -53,23 +70,41 @@ export function MarkdownPreviewPane({
         } else {
           setStatus({ kind: "toolarge", size: res.size, limit: res.limit });
         }
+        setReloading(false);
       })
       .catch((e) => {
-        if (!cancelled) setStatus({ kind: "error", message: String(e) });
+        if (cancelled) return;
+        setStatus({ kind: "error", message: String(e) });
+        setReloading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [path, workspace]);
+  }, [path, workspace, reloadSeq]);
+
+  const reload = () => {
+    setReloading(true);
+    setReloadSeq((n) => n + 1);
+  };
 
   return (
     <div
       className={cn(
-        "relative flex h-full w-full flex-col overflow-hidden rounded-md border border-border/60 bg-background",
+        "relative flex h-full w-full flex-col overflow-hidden bg-background",
+        frameClass,
         !visible && "pointer-events-none",
       )}
     >
-      <DocViewToggle mode="rendered" onChange={onSetView} />
+      <PreviewHeader
+        model={previewHeaderModel({ surface: "markdown", path, workspace })}
+        onSetView={onSetView}
+        onReload={reload}
+        reloading={reloading}
+        openInBrowser={
+          <OpenInBrowserButton path={path} workspace={workspace} />
+        }
+        zen={<ZenToggleButton />}
+      />
       <div className="flex-1 overflow-auto">
         <div className="px-8 py-6">
           {status.kind === "loading" && (

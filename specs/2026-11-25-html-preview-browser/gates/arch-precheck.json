@@ -1,0 +1,101 @@
+{
+  "gate": "arch_precheck",
+  "spec_path": "/home/claude/litha/produkte/terax/terax-ai/specs/2026-11-25-html-preview-browser",
+  "lines": 895,
+  "result": "PASS",
+  "findings": [],
+  "blocking": [],
+  "warnings": [],
+  "checks": [
+    {
+      "id": "AR-1",
+      "name": "ID-Marker architecture.md",
+      "status": "PASS",
+      "detail": "26 h2 konform"
+    },
+    {
+      "id": "AR-1d",
+      "name": "ID-Marker discovery.md",
+      "status": "PASS",
+      "detail": "konform"
+    },
+    {
+      "id": "AR-2",
+      "name": "ID-Existenz",
+      "status": "PASS",
+      "detail": "94 definierte IDs, 158 referenziert"
+    },
+    {
+      "id": "AR-3",
+      "name": "Anker pfad:zeile",
+      "status": "PASS",
+      "detail": "42 Anker aufgelöst"
+    },
+    {
+      "id": "AR-4",
+      "name": "Invarianten-Zeilen",
+      "status": "PASS",
+      "detail": "13 INV-Zeilen mit gültigen Enums"
+    },
+    {
+      "id": "AR-5",
+      "name": "Testnamen",
+      "status": "PASS",
+      "detail": "12 Testnamen in ihren Dateien gefunden"
+    },
+    {
+      "id": "AR-6",
+      "name": "Versionen",
+      "status": "PASS",
+      "detail": "15 Zeilen mit Version"
+    },
+    {
+      "id": "AR-7",
+      "name": "Scan-Plausibilität",
+      "status": "SKIP",
+      "detail": "kein codebase-scan.md"
+    },
+    {
+      "id": "AR-8",
+      "name": "Anti-Slop-Dispositionen",
+      "status": "PASS",
+      "detail": "0 Dispositionen formal vollständig"
+    },
+    {
+      "id": "AR-9",
+      "name": "Bindings-Exceptions",
+      "status": "SKIP",
+      "detail": "keine bindings.md"
+    },
+    {
+      "id": "AR-10",
+      "name": "Migration Map",
+      "status": "PASS",
+      "detail": "16 MIG-Zeilen mit Dateipfad"
+    },
+    {
+      "id": "AR-11",
+      "name": "Automatische Entscheide",
+      "status": "PASS",
+      "detail": "0 Assumptions „automatisch — zur PM-Durchsicht\""
+    },
+    {
+      "id": "AR-12",
+      "name": "Register",
+      "status": "PASS",
+      "detail": "kein neuer Fachbereich"
+    },
+    {
+      "id": "AR-13",
+      "name": "Anker-Inhalt",
+      "status": "PASS",
+      "detail": "3 Bezeichner in ihren Ankerzeilen gefunden"
+    },
+    {
+      "id": "AR-Q",
+      "name": "Q&A Anforderungen",
+      "status": "PASS",
+      "detail": "11 automatische fachliche Entscheidung(en) mit Anforderungsbezug"
+    }
+  ]
+}

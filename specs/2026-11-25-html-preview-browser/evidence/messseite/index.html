@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terax Messseite</title>
+<link rel="stylesheet" href="stil.css">
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1c1c1e; background: #fafaf7; }
+  header { padding: 14px 18px 6px; }
+  h1 { font-size: 19px; margin: 0 0 2px; }
+  h2 { font-size: 15px; margin: 22px 18px 8px; }
+  p.hint { margin: 0 18px 8px; color: #555; }
+  table.checks { border-collapse: collapse; margin: 0 18px; }
+  table.checks td { padding: 5px 12px 5px 0; vertical-align: top; }
+  td.nr { color: #777; width: 2em; }
+  .state { display: inline-block; min-width: 5.5em; padding: 1px 9px; border-radius: 4px; font-weight: 600; color: #fff; background: #b3261e; }
+  .state.ok { background: #1b7a3d; }
+  .inline-css { background: #1b7a3d; }
+  /* Lineal: zeigt die Breite ohne Skript. Die letzte sichtbare Zahl ist die Breite in Pixeln. */
+  .ruler { position: relative; height: 34px; margin: 0; overflow: hidden; border-top: 2px solid #1c1c1e; border-bottom: 1px solid #bbb;
+    background: repeating-linear-gradient(to right, #1c1c1e 0 1px, transparent 1px 100px), #fff; }
+  .ruler span { position: absolute; top: 8px; font-size: 12px; padding-left: 4px; }
+  .rand { margin: 0; height: 10px; background: linear-gradient(to right, #d33 0 6px, transparent 6px calc(100% - 6px), #d33 calc(100% - 6px)); }
+  .scroller { overflow-x: auto; margin: 0 18px; border: 1px solid #bbb; background: #fff; }
+  .scroller table { border-collapse: collapse; width: 3200px; }
+  .scroller td, .scroller th { border: 1px solid #ddd; padding: 6px 10px; text-align: left; white-space: nowrap; }
+  .actions { margin: 0 18px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .actions a, .actions button { font: inherit; padding: 5px 12px; border: 1px solid #888; border-radius: 5px; background: #fff; color: #1c1c1e; text-decoration: none; cursor: pointer; }
+  ol.filler { margin: 0 18px 40px 40px; color: #666; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Terax Messseite</h1>
+  <p class="hint" style="margin-left:0">Rot heißt „geht hier nicht“. Bitte einen Screenshot vom oberen Teil machen (bis einschließlich Punkt 13).</p>
+</header>
+
+<div class="rand" title="rote Marken = linker und rechter Rand der Seite"></div>
+<div class="ruler" aria-hidden="true">
+  <span style="left:100px">100</span><span style="left:200px">200</span><span style="left:300px">300</span><span style="left:400px">400</span>
+  <span style="left:500px">500</span><span style="left:600px">600</span><span style="left:700px">700</span><span style="left:800px">800</span>
+  <span style="left:900px">900</span><span style="left:1000px">1000</span><span style="left:1100px">1100</span><span style="left:1200px">1200</span>
+  <span style="left:1300px">1300</span><span style="left:1400px">1400</span><span style="left:1500px">1500</span><span style="left:1600px">1600</span>
+  <span style="left:1700px">1700</span><span style="left:1800px">1800</span><span style="left:1900px">1900</span><span style="left:2000px">2000</span>
+  <span style="left:2100px">2100</span><span style="left:2200px">2200</span><span style="left:2300px">2300</span><span style="left:2400px">2400</span>
+  <span style="left:2500px">2500</span><span style="left:2600px">2600</span><span style="left:2700px">2700</span><span style="left:2800px">2800</span>
+  <span style="left:2900px">2900</span><span style="left:3000px">3000</span><span style="left:3100px">3100</span><span style="left:3200px">3200</span>
+</div>
+<p class="hint" style="margin-top:6px">Das Lineal geht von Rand zu Rand. Die letzte sichtbare Zahl ist die Breite, die die App der Seite gibt. Die roten Marken darüber sitzen am linken und rechten Seitenrand.</p>
+
+<h2>Was geht in dieser Ansicht?</h2>
+<table class="checks">
+  <tr><td class="nr">1</td><td><span class="state" id="c1">nein</span></td><td>Skript direkt in der Seite läuft</td></tr>
+  <tr><td class="nr">2</td><td><span class="state" id="c2">nein</span></td><td>Skript aus Nachbardatei (<code>probe.js</code>) läuft</td></tr>
+  <tr><td class="nr">3</td><td><span class="state" id="c3">nein</span></td><td>Skript aus dem Internet (CDN) lädt</td></tr>
+  <tr><td class="nr">4</td><td><span class="state inline-css">ja</span></td><td>Style direkt in der Seite wirkt (dieses Feld ist grün, wenn ja)</td></tr>
+  <tr><td class="nr">5</td><td><span class="state nachbar-css">nein</span></td><td>Style aus Nachbardatei (<code>stil.css</code>) wirkt</td></tr>
+  <tr><td class="nr">6</td><td><img src="bild.svg" alt="FEHLT" width="88" height="24" style="vertical-align:middle;color:#b3261e;font-weight:600"></td><td>Bild aus Nachbardatei (<code>bild.svg</code>): grünes Feld „Bild da“, sonst Platzhalter</td></tr>
+  <tr><td class="nr">7</td><td><span class="state" id="c7">nein</span></td><td>Seite kann sich etwas merken (Speicher im Browser)</td></tr>
+  <tr><td class="nr">8</td><td><span class="state" id="c8">nein</span></td><td>Seite kann Daten nachladen (<code>daten.json</code>)</td></tr>
+  <tr><td class="nr">9</td><td colspan="2">Breite laut Skript: <b id="c9">unbekannt (Skript läuft nicht)</b></td></tr>
+  <tr><td class="nr">13</td><td><span class="state" id="c13" style="background:#777">?</span></td><td>Seite erreicht die Schnittstelle der App (Tauri-IPC). <b>Hier ist „nein“ richtig</b> (grün). Steht hier rot „JA“: bitte sofort melden, das wäre ein Sicherheitsproblem.</td></tr>
+</table>
+
+<h2>10 · Breite Tabelle: waagerecht wischen</h2>
+<p class="hint">Mit zwei Fingern nach links und rechts wischen, Zeiger über der Tabelle. Scrollt die Tabelle, oder wechselt der Tab?</p>
+<div class="scroller">
+  <table>
+    <tr><th>Spalte 1</th><th>Spalte 2</th><th>Spalte 3</th><th>Spalte 4</th><th>Spalte 5</th><th>Spalte 6</th><th>Spalte 7</th><th>Spalte 8</th><th>Spalte 9</th><th>Spalte 10</th><th>Spalte 11</th><th>Spalte 12</th><th>Spalte 13</th><th>Spalte 14</th><th>Spalte 15</th><th>Spalte 16 (Ende)</th></tr>
+    <tr><td>links</td><td>…</td><td>…</td><td>…</td><td>…</td><td>…</td><td>…</td><td>Mitte</td><td>…</td><td>…</td><td>…</td><td>…</td><td>…</td><td>…</td><td>…</td><td>rechts angekommen</td></tr>
+  </table>
+</div>
+
+<h2>11 · Klick-Tests (nur wenn du magst)</h2>
+<div class="actions">
+  <a href="https://example.com/" target="_blank" rel="noopener">Link in neuem Fenster</a>
+  <a href="data:text/plain;charset=utf-8,Terax%20Messseite" download="messseite.txt">Datei herunterladen</a>
+  <button type="button" id="clip">In Zwischenablage kopieren</button>
+  <span id="clipstate"></span>
+</div>
+
+<h2>12 · Lange Seite zum Scrollen</h2>
+<p class="hint">Für den Scroll-Hänger: in einen anderen Tab wechseln, zurückkommen, hier scrollen.</p>
+<ol class="filler">
+  <li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li>
+  <li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li>
+  <li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li>
+  <li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li>
+  <li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li>
+  <li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Zeile</li><li>Ende der Seite</li>
+</ol>
+
+<script src="probe.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dayjs/1.11.10/dayjs.min.js"></script>
+<script>
+  (function () {
+    function ok(id, text) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      el.textContent = text || "ja";
+      el.classList.add("ok");
+    }
+    ok("c1");
+    if (typeof window.dayjs === "function") ok("c3");
+    try {
+      window.localStorage.setItem("terax-messseite", "1");
+      if (window.localStorage.getItem("terax-messseite") === "1") ok("c7");
+      window.localStorage.removeItem("terax-messseite");
+    } catch (e) {
+      document.getElementById("c7").textContent = "nein";
+    }
+    try {
+      fetch("daten.json").then(function (r) {
+        return r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status));
+      }).then(function (d) {
+        if (d && d.messseite === "ok") ok("c8");
+      }).catch(function () { /* bleibt rot: Nachladen geht nicht */ });
+    } catch (e) { /* bleibt rot */ }
+    // Punkt 13: Kommt diese Seite an die Schnittstelle der App? Erwartet: nein.
+    (function () {
+      var el = document.getElementById("c13");
+      function safe(text) { el.textContent = text; el.style.background = "#1b7a3d"; }
+      function danger(text) { el.textContent = text; el.style.background = "#b3261e"; }
+      var seen = [];
+      try { if (window.__TAURI_INTERNALS__) seen.push("__TAURI_INTERNALS__"); } catch (e) {}
+      try { if (window.__TAURI__) seen.push("__TAURI__"); } catch (e) {}
+      try { if (window.ipc) seen.push("window.ipc"); } catch (e) {}
+      try {
+        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ipc) seen.push("webkit ipc");
+      } catch (e) {}
+      if (seen.length === 0) safe("nein");
+      else el.textContent = "Kanal sichtbar: " + seen.join(", ") + " …";
+      // Harmloser Aufruf (schaltet nur den Esc-Schalter aus). Wird er angenommen, ist die Schnittstelle offen.
+      var tried = false;
+      try {
+        if (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === "function") {
+          tried = true;
+          window.__TAURI_INTERNALS__.invoke("zen_escape_arm", { armed: false }).then(
+            function () { danger("JA: Aufruf angenommen (" + seen.join(", ") + ")"); },
+            function () { safe("nein (Aufruf abgelehnt; sichtbar: " + seen.join(", ") + ")"); }
+          );
+        }
+      } catch (e) { safe("nein (Aufruf wirft; sichtbar: " + seen.join(", ") + ")"); }
+      if (!tried && seen.length > 0) {
+        try {
+          fetch("ipc://localhost/zen_escape_arm", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{\"armed\":false}" }).then(
+            function (r) { if (r.ok) danger("JA: ipc:// antwortet mit " + r.status); else safe("nein (ipc:// " + r.status + "; sichtbar: " + seen.join(", ") + ")"); },
+            function () { safe("nein (ipc:// gesperrt; sichtbar: " + seen.join(", ") + ")"); }
+          );
+        } catch (e) { safe("nein (ipc:// wirft; sichtbar: " + seen.join(", ") + ")"); }
+      }
+    })();
+    function width() {
+      document.getElementById("c9").textContent =
+        window.innerWidth + " × " + window.innerHeight + " px Seite, Bildschirm " + screen.width + " px";
+    }
+    width();
+    window.addEventListener("resize", width);
+    document.getElementById("clip").addEventListener("click", function () {
+      var out = document.getElementById("clipstate");
+      try {
+        navigator.clipboard.writeText("Terax Messseite").then(
+          function () { out.textContent = "kopiert"; },
+          function () { out.textContent = "nicht erlaubt"; }
+        );
+      } catch (e) { out.textContent = "nicht erlaubt"; }
+    });
+  })();
+</script>
+</body>
+</html>

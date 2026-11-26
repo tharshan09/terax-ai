@@ -1,0 +1,1197 @@
+{
+  "gate": "build_plan_precheck",
+  "plan": "/home/claude/litha/produkte/terax/terax-ai/specs/2026-11-25-html-preview-browser/build-plan.md",
+  "result": "PASS",
+  "checks": [
+    {
+      "id": "B-1",
+      "name": "Kopf",
+      "status": "PASS",
+      "detail": "Spec + Stand"
+    },
+    {
+      "id": "B-2",
+      "name": "Anforderungen",
+      "status": "PASS",
+      "detail": "183 IDs"
+    },
+    {
+      "id": "B-3",
+      "name": "Abdeckung",
+      "status": "PASS",
+      "detail": "151 IDs abgedeckt"
+    },
+    {
+      "id": "B-4",
+      "name": "Slices",
+      "status": "PASS",
+      "detail": "5 Slices"
+    },
+    {
+      "id": "B-5",
+      "name": "Abhängigkeiten",
+      "status": "PASS",
+      "detail": "Reihenfolge slice-00-contracts → slice-01-preview-server → slice-02-ssh-read-esc-monitor → slice-03-zen-swipe → slice-04-preview-surfaces"
+    },
+    {
+      "id": "B-6",
+      "name": "Verträge",
+      "status": "PASS",
+      "detail": "20 Verträge, je ein Bauer"
+    },
+    {
+      "id": "B-7",
+      "name": "Dateibereiche",
+      "status": "PASS",
+      "detail": "disjunkt"
+    },
+    {
+      "id": "B-8",
+      "name": "Akzeptanzkriterien",
+      "status": "PASS",
+      "detail": "GIVEN/WHEN/THEN mit Source"
+    },
+    {
+      "id": "B-9",
+      "name": "Nicht in diesem Slice",
+      "status": "PASS",
+      "detail": "vorhanden"
+    },
+    {
+      "id": "B-11",
+      "name": "Wie gebaut",
+      "status": "PASS",
+      "detail": "vorhanden"
+    },
+    {
+      "id": "B-12",
+      "name": "Entscheidungen ohne Vorgabe",
+      "status": "PASS",
+      "detail": "29 Punkt(e)"
+    },
+    {
+      "id": "B-10",
+      "name": "Slice-00",
+      "status": "PASS",
+      "detail": "vorhanden"
+    }
+  ],
+  "blocking": [],
+  "warnings": [],
+  "slices": [
+    {
+      "id": "slice-00-contracts",
+      "title": "Verträge, geteilte Dateien und Doku",
+      "files": [
+        "src-tauri/Cargo.toml",
+        "src-tauri/Cargo.lock",
+        "src-tauri/src/lib.rs",
+        "src-tauri/src/modules/mod.rs",
+        "src-tauri/tests/preview_contracts.rs",
+        "src/modules/preview-server/types.ts",
+        "src/modules/preview-server/types.contract.test.ts",
+        "TERAX.md",
+        "src-tauri/src/modules/preview_server/mod.rs",
+        "src-tauri/src/modules/preview_server/policy.rs",
+        "src-tauri/src/modules/ssh.rs",
+        "src-tauri/src/modules/zen_escape.rs"
+      ],
+      "deps": [],
+      "requirements": [
+        "MIG-1",
+        "MIG-2",
+        "MIG-3",
+        "MIG-16",
+        "NFR-2"
+      ],
+      "provides": [
+        "PreviewServer",
+        "BrowserOpen (Rust)",
+        "BrowserOpenStatus",
+        "FrameSource (Rust)",
+        "FrameStatus",
+        "preview_open_in_browser",
+        "preview_frame_source",
+        "ENTRY_EXTENSIONS",
+        "RemoteReadError",
+        "read_bytes_typed",
+        "realpath_typed",
+        "stat_typed",
+        "zen_escape_arm",
+        "install_zen_escape_monitor",
+        "terax:zen-escape",
+        "BrowserOpen (TS)",
+        "FrameSource (TS)"
+      ],
+      "requires": [],
+      "built": false
+    },
+    {
+      "id": "slice-01-preview-server",
+      "title": "Rust-Kern des Mini-Servers",
+      "files": [
+        "src-tauri/src/modules/preview_server/mod.rs",
+        "src-tauri/src/modules/preview_server/grant.rs",
+        "src-tauri/src/modules/preview_server/request.rs",
+        "src-tauri/src/modules/preview_server/policy.rs",
+        "src-tauri/src/modules/preview_server/source.rs",
+        "src-tauri/src/modules/preview_server/listener.rs",
+        "src-tauri/src/modules/fs/file.rs"
+      ],
+      "deps": [
+        "slice-00-contracts"
+      ],
+      "requirements": [
+        "BR-1",
+        "BR-2",
+        "BR-3",
+        "BR-4",
+        "BR-5",
+        "BR-6",
+        "BR-8",
+        "BR-9",
+        "BR-10",
+        "BR-11",
+        "BR-12",
+        "BR-14",
+        "BR-15",
+        "FL-2",
+        "FL-3",
+        "EP-1",
+        "EP-2",
+        "EP-3",
+        "EP-4",
+        "EP-5",
+        "ST-1",
+        "ST-2",
+        "TR-1",
+        "TR-2",
+        "DF-1",
+        "DF-2",
+        "DF-3",
+        "DF-4",
+        "TG-3",
+        "TG-4",
+        "API-1",
+        "API-2",
+        "API-8",
+        "API-9",
+        "SVC-1",
+        "SVC-2",
+        "SVC-3",
+        "SVC-4",
+        "SVC-5",
+        "SVC-6",
+        "SVC-7",
+        "SVC-8",
+        "SVC-9",
+        "SVC-10",
+        "SVC-11",
+        "SVC-21",
+        "VAL-1",
+        "VAL-2",
+        "VAL-3",
+        "VAL-4",
+        "VAL-5",
+        "VAL-6",
+        "VAL-7",
+        "VAL-8",
+        "VAL-9",
+        "VAL-10",
+        "VAL-11",
+        "SEC-1",
+        "SEC-2",
+        "SEC-4",
+        "SEC-5",
+        "SEC-6",
+        "SEC-7",
+        "SEC-10",
+        "SEC-11",
+        "SEC-12",
+        "SEC-13",
+        "SEC-14",
+        "SEC-15",
+        "SEC-16",
+        "NFR-1",
+        "NFR-3",
+        "NFR-4",
+        "NFR-5",
+        "NFR-7",
+        "MIG-4",
+        "OB-1",
+        "OB-3",
+        "OB-7",
+        "OB-8",
+        "OB-9",
+        "OB-10",
+        "OB-11",
+        "OB-12",
+        "OB-13",
+        "OB-15"
+      ],
+      "provides": [],
+      "requires": [
+        "PreviewServer",
+        "BrowserOpen (Rust)",
+        "BrowserOpenStatus",
+        "FrameSource (Rust)",
+        "FrameStatus",
+        "preview_open_in_browser",
+        "preview_frame_source",
+        "ENTRY_EXTENSIONS",
+        "RemoteReadError",
+        "read_bytes_typed",
+        "realpath_typed",
+        "stat_typed"
+      ],
+      "built": false
+    },
+    {
+      "id": "slice-02-ssh-read-esc-monitor",
+      "title": "Typisiertes SSH-Lesen und Esc-Monitor",
+      "files": [
+        "src-tauri/src/modules/ssh.rs",
+        "src-tauri/src/modules/zen_escape.rs"
+      ],
+      "deps": [
+        "slice-00-contracts",
+        "slice-01-preview-server"
+      ],
+      "requirements": [
+        "BR-13",
+        "API-3",
+        "SVC-18",
+        "SVC-22",
+        "NFR-6",
+        "MIG-21",
+        "OB-2",
+        "OB-4",
+        "OB-6",
+        "OB-14"
+      ],
+      "provides": [],
+      "requires": [
+        "RemoteReadError",
+        "read_bytes_typed",
+        "realpath_typed",
+        "stat_typed",
+        "zen_escape_arm",
+        "install_zen_escape_monitor",
+        "terax:zen-escape"
+      ],
+      "built": false
+    },
+    {
+      "id": "slice-03-zen-swipe",
+      "title": "Zen-Modus und Wisch-Ausnahme",
+      "files": [
+        "src/modules/zen/index.ts",
+        "src/modules/zen/lib/zenStore.ts",
+        "src/modules/zen/lib/zenStore.test.ts",
+        "src/modules/zen/lib/zenChrome.ts",
+        "src/modules/zen/lib/zenChrome.test.ts",
+        "src/modules/zen/lib/usePaneFrameClass.ts",
+        "src/modules/zen/lib/usePaneFrameClass.test.ts",
+        "src/modules/zen/lib/zenEscape.ts",
+        "src/modules/zen/lib/zenEscape.test.ts",
+        "src/modules/zen/lib/useZenEscape.ts",
+        "src/modules/zen/lib/useZenEscape.test.ts",
+        "src/modules/zen/ZenToggleButton.tsx",
+        "src/modules/zen/ZenToggleButton.test.tsx",
+        "src/app/App.tsx",
+        "src/app/components/WorkspaceSurface.tsx",
+        "src/app/components/WorkspaceSurface.zen.test.tsx",
+        "src/app/components/WorkspaceInputBar.tsx",
+        "src/app/components/WorkspaceInputBar.zen.test.tsx",
+        "src/modules/sidebar/useSidebarPanel.ts",
+        "src/modules/sidebar/useSidebarPanel.zen.test.ts",
+        "src/modules/preview/PreviewPane.tsx",
+        "src/modules/editor/GitDiffPane.tsx",
+        "src/modules/editor/AiDiffPane.tsx",
+        "src/modules/tabs/lib/tabSwipe.ts",
+        "src/modules/tabs/lib/defersToActivePreview.test.ts",
+        "src/modules/tabs/lib/useTabSwipe.ts",
+        "src/modules/tabs/lib/useTabSwipe.test.ts"
+      ],
+      "deps": [
+        "slice-00-contracts"
+      ],
+      "requirements": [
+        "BR-18",
+        "BR-19",
+        "BR-20",
+        "FL-5",
+        "FL-6",
+        "FL-7",
+        "UI-4",
+        "ST-3",
+        "ST-4",
+        "TR-3",
+        "TR-4",
+        "TG-6",
+        "TG-7",
+        "API-4",
+        "API-7",
+        "SVC-15",
+        "SVC-16",
+        "SVC-17",
+        "MIG-10",
+        "MIG-11",
+        "MIG-12",
+        "MIG-13",
+        "MIG-14",
+        "MIG-17",
+        "MIG-18",
+        "MIG-19",
+        "MIG-20"
+      ],
+      "provides": [
+        "useZenStore",
+        "usePaneFrameClass",
+        "ZenToggleButton"
+      ],
+      "requires": [
+        "zen_escape_arm",
+        "terax:zen-escape"
+      ],
+      "built": false
+    },
+    {
+      "id": "slice-04-preview-surfaces",
+      "title": "Kopfzeile, Open in Browser, Neu laden und Vorschau über den Mini-Server",
+      "files": [
+        "src/modules/preview-server/index.ts",
+        "src/modules/preview-server/lib/browserOpenable.ts",
+        "src/modules/preview-server/lib/browserOpenable.test.ts",
+        "src/modules/preview-server/lib/browserOpenText.ts",
+        "src/modules/preview-server/lib/browserOpenText.test.ts",
+        "src/modules/preview-server/lib/openInBrowser.ts",
+        "src/modules/preview-server/lib/openInBrowser.test.ts",
+        "src/modules/preview-server/OpenInBrowserButton.tsx",
+        "src/modules/preview-server/OpenInBrowserButton.test.tsx",
+        "src/modules/preview-server/browserOpen.guard.test.ts",
+        "src/modules/doc/index.ts",
+        "src/modules/doc/PreviewHeader.tsx",
+        "src/modules/doc/PreviewHeader.test.tsx",
+        "src/modules/doc/lib/previewHeader.ts",
+        "src/modules/doc/lib/previewHeader.test.ts",
+        "src/components/ui/DocViewToggle.tsx",
+        "src/modules/html/HtmlPreviewPane.tsx",
+        "src/modules/html/HtmlPreviewPane.test.tsx",
+        "src/modules/html/HtmlPreviewPane.sandbox.test.ts",
+        "src/modules/html/lib/htmlPreviewSource.ts",
+        "src/modules/html/lib/htmlPreviewSource.test.ts",
+        "src/modules/markdown/MarkdownPreviewPane.tsx",
+        "src/modules/markdown/MarkdownPreviewPane.header.test.tsx",
+        "src/modules/editor/EditorStack.tsx",
+        "src/modules/editor/EditorStack.header.test.tsx",
+        "src/modules/editor/EditorPane.tsx",
+        "src/modules/editor/EditorPane.header.test.tsx",
+        "src/modules/explorer/FileExplorer.tsx",
+        "src/modules/explorer/FileExplorer.openInBrowser.test.tsx"
+      ],
+      "deps": [
+        "slice-00-contracts",
+        "slice-03-zen-swipe"
+      ],
+      "requirements": [
+        "BR-7",
+        "BR-16",
+        "BR-21",
+        "BR-22",
+        "BR-23",
+        "BR-24",
+        "BR-25",
+        "FL-1",
+        "FL-4",
+        "EP-6",
+        "UI-1",
+        "UI-2",
+        "UI-3",
+        "UI-5",
+        "TG-1",
+        "TG-2",
+        "TG-5",
+        "TG-8",
+        "API-5",
+        "API-6",
+        "SVC-12",
+        "SVC-13",
+        "SVC-14",
+        "SVC-19",
+        "SEC-3",
+        "SEC-8",
+        "SEC-9",
+        "NFR-8",
+        "MIG-5",
+        "MIG-6",
+        "MIG-7",
+        "MIG-8",
+        "MIG-9",
+        "MIG-15",
+        "OB-5",
+        "OB-18"
+      ],
+      "provides": [],
+      "requires": [
+        "BrowserOpen (TS)",
+        "FrameSource (TS)",
+        "preview_open_in_browser",
+        "preview_frame_source",
+        "ENTRY_EXTENSIONS",
+        "useZenStore",
+        "usePaneFrameClass",
+        "ZenToggleButton"
+      ],
+      "built": false
+    }
+  ],
+  "order": [
+    "slice-00-contracts",
+    "slice-01-preview-server",
+    "slice-02-ssh-read-esc-monitor",
+    "slice-03-zen-swipe",
+    "slice-04-preview-surfaces"
+  ],
+  "requirements": {
+    "BR-1": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "BR-2": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "BR-3": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "BR-4": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "BR-5": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "BR-6": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "BR-7": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "BR-8": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "BR-9": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "BR-10": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "BR-11": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "BR-12": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "BR-13": {
+      "slice": "slice-02-ssh-read-esc-monitor",
+      "proof": "AC"
+    },
+    "BR-14": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "BR-15": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "BR-16": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "BR-17": {
+      "slice": "nach dem Merge",
+      "proof": "--"
+    },
+    "BR-18": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "AC"
+    },
+    "BR-19": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "AC"
+    },
+    "BR-20": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "AC"
+    },
+    "BR-21": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "BR-22": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "BR-23": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "BR-24": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "BR-25": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "FL-1": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "FL-2": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "FL-3": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "FL-4": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "FL-5": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "AC"
+    },
+    "FL-6": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "AC"
+    },
+    "FL-7": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "AC"
+    },
+    "FL-8": {
+      "slice": "nach dem Merge",
+      "proof": "--"
+    },
+    "EP-1": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "EP-2": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "EP-3": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "EP-4": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "EP-5": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "EP-6": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "UI-1": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "UI-2": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "UI-3": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "UI-4": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "AC"
+    },
+    "UI-5": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "ST-1": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "ST-2": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "ST-3": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "AC"
+    },
+    "ST-4": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "AC"
+    },
+    "TR-1": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "TR-2": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "TR-3": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "AC"
+    },
+    "TR-4": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "AC"
+    },
+    "DF-1": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "DF-2": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "DF-3": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "DF-4": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "TG-1": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "TG-2": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "TG-3": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "TG-4": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "TG-5": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "TG-6": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "AC"
+    },
+    "TG-7": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "AC"
+    },
+    "TG-8": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "API-1": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "API-2": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "API-3": {
+      "slice": "slice-02-ssh-read-esc-monitor",
+      "proof": "AC"
+    },
+    "API-4": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "AC"
+    },
+    "API-5": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "API-6": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "API-7": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "AC"
+    },
+    "API-8": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "API-9": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SVC-1": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SVC-2": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SVC-3": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SVC-4": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SVC-5": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SVC-6": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SVC-7": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SVC-8": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SVC-9": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SVC-10": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SVC-11": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SVC-12": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "SVC-13": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "SVC-14": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "SVC-15": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "AC"
+    },
+    "SVC-16": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "AC"
+    },
+    "SVC-17": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "AC"
+    },
+    "SVC-18": {
+      "slice": "slice-02-ssh-read-esc-monitor",
+      "proof": "AC"
+    },
+    "SVC-19": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "SVC-20": {
+      "slice": "nach dem Merge",
+      "proof": "--"
+    },
+    "SVC-21": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SVC-22": {
+      "slice": "slice-02-ssh-read-esc-monitor",
+      "proof": "AC"
+    },
+    "VAL-1": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "VAL-2": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "VAL-3": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "VAL-4": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "VAL-5": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "VAL-6": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "VAL-7": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "VAL-8": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "VAL-9": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "VAL-10": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "VAL-11": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SEC-1": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SEC-2": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SEC-3": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "SEC-4": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SEC-5": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SEC-6": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SEC-7": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SEC-8": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "SEC-9": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "SEC-10": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SEC-11": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SEC-12": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SEC-13": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SEC-14": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SEC-15": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "SEC-16": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "NFR-1": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "NFR-2": {
+      "slice": "slice-00-contracts",
+      "proof": "Deliverable"
+    },
+    "NFR-3": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "NFR-4": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "NFR-5": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "NFR-6": {
+      "slice": "slice-02-ssh-read-esc-monitor",
+      "proof": "AC"
+    },
+    "NFR-7": {
+      "slice": "slice-01-preview-server",
+      "proof": "Deliverable"
+    },
+    "NFR-8": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "MIG-1": {
+      "slice": "slice-00-contracts",
+      "proof": "Deliverable"
+    },
+    "MIG-2": {
+      "slice": "slice-00-contracts",
+      "proof": "Deliverable"
+    },
+    "MIG-3": {
+      "slice": "slice-00-contracts",
+      "proof": "Deliverable"
+    },
+    "MIG-4": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "MIG-5": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "MIG-6": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "MIG-7": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "MIG-8": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "MIG-9": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "MIG-10": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "AC"
+    },
+    "MIG-11": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "Deliverable"
+    },
+    "MIG-12": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "AC"
+    },
+    "MIG-13": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "AC"
+    },
+    "MIG-14": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "AC"
+    },
+    "MIG-15": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "MIG-16": {
+      "slice": "slice-00-contracts",
+      "proof": "Deliverable"
+    },
+    "MIG-17": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "Deliverable"
+    },
+    "MIG-18": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "Deliverable"
+    },
+    "MIG-19": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "Deliverable"
+    },
+    "MIG-20": {
+      "slice": "slice-03-zen-swipe",
+      "proof": "AC"
+    },
+    "MIG-21": {
+      "slice": "slice-02-ssh-read-esc-monitor",
+      "proof": "AC"
+    },
+    "INV-1": {
+      "slice": "--",
+      "proof": "--"
+    },
+    "INV-2": {
+      "slice": "--",
+      "proof": "--"
+    },
+    "INV-3": {
+      "slice": "--",
+      "proof": "--"
+    },
+    "INV-4": {
+      "slice": "--",
+      "proof": "--"
+    },
+    "INV-5": {
+      "slice": "--",
+      "proof": "--"
+    },
+    "INV-6": {
+      "slice": "--",
+      "proof": "--"
+    },
+    "INV-7": {
+      "slice": "--",
+      "proof": "--"
+    },
+    "INV-8": {
+      "slice": "--",
+      "proof": "--"
+    },
+    "INV-9": {
+      "slice": "--",
+      "proof": "--"
+    },
+    "INV-10": {
+      "slice": "--",
+      "proof": "--"
+    },
+    "INV-11": {
+      "slice": "--",
+      "proof": "--"
+    },
+    "INV-12": {
+      "slice": "--",
+      "proof": "--"
+    },
+    "INV-13": {
+      "slice": "--",
+      "proof": "--"
+    },
+    "OB-1": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "OB-2": {
+      "slice": "slice-02-ssh-read-esc-monitor",
+      "proof": "AC"
+    },
+    "OB-3": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "OB-4": {
+      "slice": "slice-02-ssh-read-esc-monitor",
+      "proof": "AC"
+    },
+    "OB-5": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "OB-6": {
+      "slice": "slice-02-ssh-read-esc-monitor",
+      "proof": "AC"
+    },
+    "OB-7": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "OB-8": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "OB-9": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "OB-10": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "OB-11": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "OB-12": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "OB-13": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "OB-14": {
+      "slice": "slice-02-ssh-read-esc-monitor",
+      "proof": "AC"
+    },
+    "OB-15": {
+      "slice": "slice-01-preview-server",
+      "proof": "AC"
+    },
+    "OB-16": {
+      "slice": "nach dem Merge",
+      "proof": "--"
+    },
+    "OB-17": {
+      "slice": "nach dem Merge",
+      "proof": "--"
+    },
+    "OB-18": {
+      "slice": "slice-04-preview-surfaces",
+      "proof": "AC"
+    },
+    "OB-19": {
+      "slice": "--",
+      "proof": "--"
+    }
+  },
+  "after_merge": [
+    "BR-17",
+    "FL-8",
+    "SVC-20",
+    "OB-16",
+    "OB-17"
+  ]
+}

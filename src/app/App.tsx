@@ -90,6 +90,7 @@ import {
   useWindowTitle,
   useWorkspaceCwd,
 } from "@/modules/tabs";
+import { defersToActivePreview } from "@/modules/tabs/lib/tabSwipe";
 import {
   clearFocusedTerminal,
   disposeSession,
@@ -131,6 +132,12 @@ import {
   type WorkspaceEnv,
 } from "@/modules/workspace";
 import { listSshHosts, type SshHost } from "@/modules/workspace/sshHosts";
+import {
+  aiToggleAllowed,
+  useZenEscape,
+  useZenStore,
+  zenChrome,
+} from "@/modules/zen";
 import { setTerminalPathOpener } from "@/modules/terminal/lib/rendererPool";
 import { resolveTerminalPath } from "@/modules/terminal/lib/terminalPathLinks";
 import { invoke } from "@tauri-apps/api/core";
@@ -388,6 +395,8 @@ export default function App() {
     initialSidebarCollapsed,
     persistSidebarView,
     persistSidebarCollapsed,
+    collapseForZen,
+    restoreAfterZen,
     toggleSidebar,
     cycleSidebarView,
     persistSidebarWidth,
@@ -959,7 +968,18 @@ export default function App() {
     (s) => s.explorerGitDecorations,
   );
   const statusbarLayout = usePreferencesStore((s) => s.statusbarLayout);
-  const [zenMode, setZenMode] = useState(false);
+  const zenMode = useZenStore((s) => s.on);
+  const toggleZen = useZenStore((s) => s.toggleZen);
+  // What zen hides for the active tab kind; zen off shows everything.
+  const chrome = zenChrome(zenMode, activeTab?.kind);
+  const aiToggleOn = aiToggleAllowed(zenMode, activeTab?.kind);
+  useZenEscape(activeTab);
+  // Zen collapses the sidebar without persisting it and restores the previous
+  // width (or keeps it collapsed) when zen ends.
+  useEffect(() => {
+    if (chrome.sidebar) restoreAfterZen();
+    else collapseForZen();
+  }, [chrome.sidebar, collapseForZen, restoreAfterZen]);
   const { sourceControl, toggleSourceControl, openGitGraphFromContext } =
     useSourceControlContext({
       activeTab,
@@ -1065,7 +1085,14 @@ export default function App() {
       "blocks.prev": () => navigateFocusedBlocks(-1),
       "blocks.next": () => navigateFocusedBlocks(1),
       "search.focus": () => searchInlineRef.current?.focus(),
-      "ai.toggle": togglePanelAndFocus,
+      "ai.toggle": () => {
+        // While zen hides the input bar (every tab but a terminal), toggling
+        // the AI panel would change state nobody can see and focus a hidden
+        // field, so the key does nothing. Outside zen and in terminal tabs it
+        // works as before.
+        if (!aiToggleOn) return;
+        togglePanelAndFocus();
+      },
       "ai.askSelection": askFromSelection,
       "agent.focusAttention": () => {
         const from = activeTerminalTabRef.current?.activeLeafId ?? null;
@@ -1083,7 +1110,7 @@ export default function App() {
       "view.zoomIn": zoomIn,
       "view.zoomOut": zoomOut,
       "view.zoomReset": zoomReset,
-      "view.zenMode": () => setZenMode((v) => !v),
+      "view.zenMode": toggleZen,
       "editor.undo": () => editorRefs.current.get(activeId)?.undo(),
       "editor.redo": () => editorRefs.current.get(activeId)?.redo(),
       "editor.save": () => {
@@ -1106,12 +1133,14 @@ export default function App() {
       focusNextPaneInTab,
       toggleSourceControl,
       togglePanelAndFocus,
+      aiToggleOn,
       askFromSelection,
       toggleSidebar,
       toggleExplorerFocus,
       zoomIn,
       zoomOut,
       zoomReset,
+      toggleZen,
       activateAgentTarget,
     ],
   );
@@ -1182,7 +1211,13 @@ export default function App() {
     },
     [trackpadTabSwipe, visibleTabs, activeId, setActiveId],
   );
-  useTabSwipe(appRootRef, swipeTab);
+  // With no hovered element while an HTML tab is active, the swipe keeps the
+  // tab. A hovered element is left to isInsideHorizontalScroller, which honours
+  // a `data-no-tab-swipe` opt-out on an ancestor.
+  const activeKind = activeTab?.kind;
+  useTabSwipe(appRootRef, swipeTab, (target) =>
+    defersToActivePreview(activeKind, target),
+  );
 
   const registerTerminalHandle = useCallback(
     (leafId: number, h: TerminalPaneHandle | null) => {
@@ -1508,7 +1543,11 @@ export default function App() {
             focusSearch: () => searchInlineRef.current?.focus(),
             focusExplorerSearch: () => explorerRef.current?.focusSearch(),
             toggleSidebar,
-            toggleAi: togglePanelAndFocus,
+            // Same rule as the "ai.toggle" key: nothing while zen hides the
+            // input bar.
+            toggleAi: () => {
+              if (aiToggleOn) togglePanelAndFocus();
+            },
             askAiSelection: askFromSelection,
             openAgentOverview: () => setMissionControlOpen(true),
             openSettings: () => void openSettingsWindow(),
@@ -1543,6 +1582,7 @@ export default function App() {
       splitActivePaneInActiveTab,
       toggleSidebar,
       togglePanelAndFocus,
+      aiToggleOn,
       askFromSelection,
       activeSpaceId,
       handleNewSpace,
@@ -1631,7 +1671,7 @@ export default function App() {
           ref={appRootRef}
           className="relative flex h-screen flex-col overflow-hidden bg-background text-foreground"
         >
-          {!zenMode && (
+          {chrome.header && (
             <Header
               tabs={stripTabs}
               activeId={activeId}
@@ -1682,6 +1722,9 @@ export default function App() {
           <main className="zoom-content flex min-h-0 flex-1 flex-col">
             <ResizablePanelGroup
               orientation="horizontal"
+              // Zen unmounts the handle; the group would still offer an
+              // invisible drag zone between the panels, so dragging is off.
+              disabled={!chrome.resizeHandle}
               className="min-h-0 flex-1"
               onLayoutChanged={(_, { isUserInteraction }) => {
                 // Keyboard resizes fire this synchronously before the panel
@@ -1748,7 +1791,7 @@ export default function App() {
                   />
                 </div>
               </ResizablePanel>
-              <ResizableHandle withHandle />
+              {chrome.resizeHandle && <ResizableHandle withHandle />}
               <ResizablePanel id="workspace" defaultSize="78%" minSize="30%">
                 <div className="flex h-full min-h-0 flex-col">
                   <div className="relative min-h-0 flex-1">
@@ -1787,13 +1830,14 @@ export default function App() {
                     panelOpen={panelOpen}
                     keysLoaded={keysLoaded}
                     onConnect={() => void openSettingsWindow("models")}
+                    hiddenInZen={!chrome.inputBar}
                   />
                 </div>
               </ResizablePanel>
             </ResizablePanelGroup>
           </main>
 
-          {!zenMode && (
+          {chrome.statusBar && (
             <StatusBar
               cwd={activeCwd}
               filePath={activeFilePath}
@@ -1845,7 +1889,10 @@ export default function App() {
           ) : null}
 
           {switcherState && (
-            <TabSwitcherHud tabs={visibleTabs} state={switcherState} />
+            // Esc cancels the switcher; the marker keeps zen on for that Esc.
+            <div className="contents" data-esc-overlay>
+              <TabSwitcherHud tabs={visibleTabs} state={switcherState} />
+            </div>
           )}
 
           <CommandPalette

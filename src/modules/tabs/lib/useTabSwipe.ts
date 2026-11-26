@@ -10,18 +10,23 @@ import { isInsideHorizontalScroller } from "./tabSwipe";
  * emits `terax:tab-swipe` with a direction (-1 prev / 1 next); we only decide
  * here whether the element under the cursor should scroll horizontally instead.
  *
- * `boundaryRef` bounds the scroller walk-up (the app root). On non-macOS the
- * native event never fires, so this is a no-op.
+ * `boundaryRef` bounds the scroller walk-up (the app root). `shouldDefer`, when
+ * given, is asked after the scroller check with the same hover target; `true`
+ * keeps the tab (App passes defersToActivePreview). On
+ * non-macOS the native event never fires, so this is a no-op.
  */
 export function useTabSwipe<T extends HTMLElement = HTMLElement>(
   boundaryRef: React.RefObject<T | null>,
   onSwipe: (dir: -1 | 1) => void,
+  shouldDefer?: (target: Element | null) => boolean,
 ) {
   const onSwipeRef = useRef(onSwipe);
-  // Keep the latest callback without re-subscribing; a layout effect keeps the
+  const shouldDeferRef = useRef(shouldDefer);
+  // Keep the latest callbacks without re-subscribing; a layout effect keeps the
   // hook clean under the React Compiler.
   useLayoutEffect(() => {
     onSwipeRef.current = onSwipe;
+    shouldDeferRef.current = shouldDefer;
   });
 
   useEffect(() => {
@@ -35,6 +40,7 @@ export function useTabSwipe<T extends HTMLElement = HTMLElement>(
       const hovered = document.querySelectorAll(":hover");
       const target = hovered.length ? hovered[hovered.length - 1] : null;
       if (isInsideHorizontalScroller(target, boundaryRef.current, dir)) return;
+      if (shouldDeferRef.current?.(target)) return;
       onSwipeRef.current(dir);
     }).then((un) => {
       if (disposed) un();
