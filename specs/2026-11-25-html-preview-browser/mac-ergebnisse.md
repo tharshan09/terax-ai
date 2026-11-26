@@ -108,3 +108,10 @@ Alle Esc-Fälle mit nativem Klick in die Seite (Fokus im Rahmen), dann nativer E
 - Jeder Link hält einen eigenen lauschenden Socket (nach 260 Versuchen: 256 IPv4-Sockets, ab dem 257. `limit_reached`).
 - **Mit Limit 256 (Test-App direkt mit `ulimit -n 256` gestartet) kam nach rund 243 Links `Too many open files (os error 24)`.** Danach konnte der Prozess keine Datei mehr öffnen (die Test-Bridge las ihre Befehle nicht mehr); das betrifft Terminal, Explorer, Git und Lesen bis zum Neustart.
 - Grundlast ohne Links: installierte Terax 39 Datei-Kennungen, „Terax Dev" 22. In der echten App kippt es also schon nach rund 215 bis 235 Links, unter der geplanten Obergrenze von 256; jede HTML-Vorschau in der App zählt mit (OB-23: neu vorzulegen).
+
+## Nachbesserung nach der Abnahme (Commit `ec6c2fc8`, Entscheidung des Users am 26.11.2026)
+
+- **Dateilimit:** `run()` hebt das weiche `RLIMIT_NOFILE` beim Start auf 8192 (nie über das harte Limit, nie niedriger als vorher; `raise_open_file_limit` in `src-tauri/src/lib.rs`, Test `raises_a_finder_style_limit_of_256`). Gemessen mit Startlimit 256 wie aus dem Finder: 255 Links plus eine Vorschau bis zur Obergrenze, 269 Datei-Kennungen gehalten, kein `Too many open files`; danach Git, Explorer, Vorschau-Aufruf und neuer Terminal-Tab in Ordnung. Die Obergrenze von 256 Links bleibt.
+- **Zen-Abstand:** die Kopfzeile rückt im Zen auf macOS 80 Punkte ein, unabhängig vom App-Zoom (`ZEN_MAC_INSET`). Gemessen bei 50, 75, 100, 150 und 200 %: Name ab x 80, Ampelknöpfe bis x 69. Code- und Terminal-Tabs ohne Kopfzeile bleiben im Zen unter den Ampelknöpfen (unverändert, bekannte Grenze).
+- **SSH-Lesen:** zwei Lesevorgänge je Host zugleich (vorher einer). Gemessen bei 8 offenen SSH-Terminal-Sessions: Seite plus 30 Bilder in 2,8 bis 3,0 s (vorher 6,0 s), alle 31 mit 200, keine Warnung. Bei 8 Terminals und 2 Lesungen ist `MaxSessions` (Standard 10) voll; eine weitere Sitzung baut dann eine eigene Verbindung auf (mit Agent oder Schlüssel ohne Passphrase ohne Fehler).
+- Messung am Mac auf `ec6c2fc8`: Typen sauber, Vitest 1826 grün, Lint 97 Warnungen, Rust 744 grün und 13 ignoriert, Clippy sauber.
