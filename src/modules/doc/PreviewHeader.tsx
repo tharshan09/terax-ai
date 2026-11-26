@@ -21,10 +21,16 @@ type Props = {
 };
 
 /**
+ * Left inset in zen on macOS: 80 points whatever the app zoom, since the
+ * native traffic lights (x 9-69 pt) do not scale with the CSS zoom.
+ */
+export const ZEN_MAC_INSET = "pl-[calc(80px/var(--app-zoom,1))]";
+
+/**
  * The bar above a preview: file name, then Reload, Rendered/Raw, "Open in
  * Browser" and the zen toggle as far as the model shows them. It sits in the
  * flow above the content (no overlay). In zen on macOS it leaves room on the
- * left for the window buttons (`pl-20`). Every hint is a plain `title`, so it
+ * left for the window buttons (`ZEN_MAC_INSET`). Every hint is a plain `title`, so it
  * renders without a TooltipProvider.
  */
 export function PreviewHeader({
@@ -41,7 +47,7 @@ export function PreviewHeader({
       data-preview-header=""
       className={cn(
         "flex h-9 shrink-0 items-center gap-1 border-b border-border/60 bg-card/40 pr-1.5",
-        zenOn && IS_MAC ? "pl-20" : "pl-3",
+        zenOn && IS_MAC ? ZEN_MAC_INSET : "pl-3",
       )}
     >
       <span

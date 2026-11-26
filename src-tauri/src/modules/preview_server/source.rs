@@ -827,7 +827,7 @@ mod tests {
 
     /// Sicherheitsmodell 18
     #[test]
-    fn ac17_one_read_per_host_at_a_time() {
+    fn ac17_reads_per_host_at_a_time() {
         let fake = FakeHost::new();
         fake.file("/srv/p/y.png", b"Y");
         fake.set_delay(Duration::from_millis(3));
@@ -850,8 +850,9 @@ mod tests {
         });
         assert_eq!(results.len(), 60);
         assert!(results.iter().all(|r| r.as_deref() == Ok(&b"Y"[..])), "{results:?}");
-        assert_eq!(fake.peak_on("devbox"), 1);
-        assert_eq!(fake.peak_on("box2"), 1);
+        let per_host = testkit::limits().reads_per_host;
+        assert!(fake.peak_on("devbox") <= per_host, "devbox peak {}", fake.peak_on("devbox"));
+        assert!(fake.peak_on("box2") <= per_host, "box2 peak {}", fake.peak_on("box2"));
         assert!(fake.peak_total() <= 8);
     }
 
@@ -892,6 +893,8 @@ mod tests {
         fake.hold("/srv/p/a.png", &latch);
         let mut limits = testkit::limits();
         limits.host_wait = Duration::from_millis(200);
+        // One slot per host, so a single held read fills the host.
+        limits.reads_per_host = 1;
         let gate = Arc::new(ReadGate::new(limits));
         run(async {
             let first = {
@@ -999,7 +1002,7 @@ mod tests {
         assert_eq!(l.write_budget, Duration::from_secs(30));
         assert_eq!(l.retry_pause, Duration::from_millis(250));
         assert_eq!((l.connections_per_grant, l.connections_total), (16, 64));
-        assert_eq!((l.reads_total, l.reads_per_host), (8, 1));
+        assert_eq!((l.reads_total, l.reads_per_host), (8, 2));
         assert_eq!((l.head_bytes, l.head_lines), (64 * 1024, 64));
         assert_eq!(l.grants, 256);
         // Tests shorten only the times.
@@ -1201,6 +1204,8 @@ mod tests {
         fake.fail_next(RemoteReadError::Unreachable("gone".into()));
         let mut limits = testkit::limits();
         limits.retry_pause = Duration::from_millis(150);
+        // One slot per host, so the order of the queue is visible.
+        limits.reads_per_host = 1;
         let gate = Arc::new(ReadGate::new(limits));
         run(async {
             let first = {

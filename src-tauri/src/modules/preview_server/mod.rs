@@ -3,7 +3,7 @@
 //! fallback for the frame adds `[::1]` on the same port) and a 256-bit
 //! secret as the first path segment. Every file of a link passes the same
 //! checks in `source.rs`, never as `trusted`; SSH files are read through
-//! `ssh::read_bytes_typed`, one read per host at a time and at most 60 s
+//! `ssh::read_bytes_typed`, two reads per host at a time and at most 60 s
 //! each. The address is built and opened here and never reaches the webview,
 //! except as the frame address of `preview_frame_source`. Links live in
 //! memory until the process ends; nothing is stored.
@@ -74,7 +74,7 @@ impl Limits {
         head_lines: 64,
         head_budget: Duration::from_secs(10),
         reads_total: 8,
-        reads_per_host: 1,
+        reads_per_host: 2,
         retry_pause: Duration::from_millis(250),
         host_wait: Duration::from_secs(30),
         write_budget: Duration::from_secs(30),

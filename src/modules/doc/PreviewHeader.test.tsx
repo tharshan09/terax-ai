@@ -17,7 +17,7 @@ vi.mock("@/lib/platform", () => ({
 
 import { useZenStore } from "@/modules/zen/lib/zenStore";
 import { previewHeaderModel } from "./lib/previewHeader";
-import { PreviewHeader } from "./PreviewHeader";
+import { PreviewHeader, ZEN_MAC_INSET } from "./PreviewHeader";
 
 const OVERLAY = ["absolute", "fixed", "top-3", "right-3", "z-10"];
 const MODEL = previewHeaderModel({
@@ -93,16 +93,16 @@ describe("PreviewHeader", () => {
 
   it("[AC-8] zen on macOS leaves room for the window buttons (zen), not otherwise (default)", () => {
     act(() => useZenStore.setState({ on: true }));
-    expect(classesOf(header())).toContain("pl-20");
+    expect(classesOf(header())).toContain(ZEN_MAC_INSET);
     cleanup();
 
     act(() => useZenStore.setState({ on: false }));
-    expect(classesOf(header())).not.toContain("pl-20");
+    expect(classesOf(header())).not.toContain(ZEN_MAC_INSET);
     cleanup();
 
     platform.mac = false;
     act(() => useZenStore.setState({ on: true }));
-    expect(classesOf(header())).not.toContain("pl-20");
+    expect(classesOf(header())).not.toContain(ZEN_MAC_INSET);
   });
 
   it("[UI-3] Reload shows aria-busy while reloading and calls onReload", () => {
